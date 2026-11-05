@@ -1,95 +1,103 @@
-# Manga Localizer Studio
+# Manga Localizer Studio · AMD 显卡个人适配版
 
-本地优先的日语漫画中文化工作台：按自然页序检测文字、识别日文、结合前后页保持剧情与称呼连贯，最后只在文字区域内重绘中文，不覆盖源文件。
+本地优先的漫画中文化工作台：按自然页序检测文字、识别原文（日文／英文）、结合前后页保持剧情与称呼连贯，最后只在文字区域内重绘中文 —— **不覆盖源文件**，也不把整页图片丢给云端。
 
-![桌面端工作台](docs/screenshots/app-desktop.png)
+本仓库是 [whmc76/manga-localizer-studio](https://github.com/whmc76/manga-localizer-studio) **v0.5.2** 的个人分支：在上游基础上做了 **AMD 显卡（Radeon RX 9070 XT）+ Windows** 适配，并补齐了安全暂停、任务计时、英文源支持、模型页真实状态等一批本地改动。相对上游的逐条改动、踩坑与实测数据见 [`README-本地部署.md`](README-本地部署.md)；上游的设计基线见 [`docs/DESIGN_CONTRACT.md`](docs/DESIGN_CONTRACT.md) 与 [`docs/PARITY_LEDGER.md`](docs/PARITY_LEDGER.md)。
 
-## 实机效果：前三页对比
+![桌面端工作台](docs/screenshots/app-desktop-local.png)
 
-下面三张图来自 v0.5.2 对一部 125 页漫画的全书本地实测，使用当前项目的通用 OCR、自动人名统一、9B 上下文审校、LaMa 补画和样式重建模块；没有人工人名表，也没有调用在线 LLM API。共处理 1,285 个文字单元：替换中文 690 个、明确跳过 7 个、保留大型或装饰性拟声词 588 个，未解决单元 0、无效译文 0、声明区域外变化像素 0。README 只做等比例缩略展示，125 张成品均保持各自源图的原生像素尺寸；擦除和补画只采用精确检测器拥有的几何区域。完整指标见 [`docs/benchmarks/V0.5_FULL_BOOK_REPORT.md`](docs/benchmarks/V0.5_FULL_BOOK_REPORT.md)。
+## 实机效果：原图与简体中文输出对比
 
-![第 1 页原图与简体中文输出对比](docs/screenshots/comparisons/comparison-page-01.webp)
+下面三张图来自本机对 `[Alcor] A Display of Passion`（英文同人，My Little Pony）的真实运行：内置 OCR（PP-OCRv5 + Manga OCR）+ 本机 Ollama 9B 质量模式 + LaMa 补画 + 样式重建；没有人工人名表，也没有调用在线 LLM API。5 页共 30 个文字单元：替换中文 30 个、明确跳过 0 个、未解决 0 个、无效译文 0 个。
 
-![第 2 页原图与简体中文输出对比](docs/screenshots/comparisons/comparison-page-02.webp)
+![第 3 页（整页后记文字）原图与简体中文输出对比](docs/screenshots/local/comparison-page-03.webp)
 
-![第 3 页原图与简体中文输出对比](docs/screenshots/comparisons/comparison-page-03.webp)
+![第 4 页（对白密集页）原图与简体中文输出对比](docs/screenshots/local/comparison-page-04.webp)
+
+![第 5 页（多气泡与效果字）原图与简体中文输出对比](docs/screenshots/local/comparison-page-05.webp)
+
+每张图左半是原图、右半是输出；README 只做等比例缩略展示，成品保持源图原始像素尺寸（800×1132），擦除与补画只发生在检测器确认的文字区域内。
+
+## 本分支相对上游做了什么
+
+- **AMD/Windows 适配**：不依赖 CUDA。设备选择在任何 `gpu*`/`cuda` 请求上先做可用性检查并回落到 `cpu`（Paddle、LaMa、Hy-MT2 三处），否则 AMD 机器上会死在 oneDNN 的 PIR 转换里、或抛 `Torch not compiled with CUDA enabled`。
+- **翻译全部上显卡**：把同一份 Hy-MT2 1.8B 权重交给本机 Ollama（Vulkan）跑质量模式的第二遍候选，`MLS_HY_MT2_OLLAMA` 一行开关。单次候选调用从 CPU torch 的 9–74 s 降到 0.07–0.09 s；整本 71 页质量模式从 **22.5 min 降到 4.3 min**。
+- **英文源支持**：原文语言自适应（`日文`／`英文`）的 prompt、拉丁页剔除检测器的无文本画面框、拉丁音效表与双写拟声词识别、横排字号下限放宽。修复前英文气泡会被 Manga OCR 读成假名幻觉、译文全错。
+- **「已可接受的译文是终稿」守卫**：审校／重译轮只能救援被硬门槛拒绝的行，不再把编辑初译的好译文覆盖成更差的版本。
+- **安全暂停**：页与页、chunk 与 chunk 之间暂停（模型与已完成页面都保留），暂停时段不计入计时；配合原有的「结束」与设置页「退出程序」。
+- **更完整的 UI**：侧边栏任务状态卡（阶段／页数／开始时间／已用时间／预计还需）、页码滑动条、任务记录回填、模型管理页显示**实际在跑**的模型（含两条 Ollama tag 与真实大小）、三语言文案补齐。
+- **输出目录自动推导**为 `{输出根}\{源目录名}--已汉化`，中间产物与成品都落在该子目录。
+- **纯 ASCII 安装路径**的要求与本地启动脚本（见下）。
 
 ## 特性
 
 - **中日英界面**：工作台可即时切换中文、日文和英文，并自动记住选择；界面语言与漫画目标语言相互独立。
-- **故事连贯**：默认携带前 6 页成稿；全书扫描反复出现的片假名角色名，通过 JMnedict、自然中文姓名候选过滤和本地 9B 裁决生成一致性约束，不需要为具体作品维护人工人名表。
-- **本地质量集成**：质量模式由同一个无限制 9B 模型分阶段完成草稿、上下文裁决和语义风险复译，Hy-MT2 1.8B 提供独立候选；不下载或依赖 9B 以上模型。快速模式仍可只运行单一轻量模型。
-- **质量 OCR**：Paddle 精确框 + Manga OCR 日文识别 + 9B 漏字/语义审计；视觉模型报告的漏字必须经过已有框覆盖判断、局部放大 Paddle 重检和 Manga OCR 独立确认，粗 VLM 框永远不直接擦图。
-- **原字样式匹配**：不依赖多模态 LLM，直接分析横竖排、字号、字重、前景色、描边色/宽度、字距和展示文字占比；自动使用常规或粗体中文字体重排。
-- **保护画面**：保持原始像素尺寸，不覆盖源图；LaMa 推理后强制逐像素恢复掩膜外区域，测试验证有界编辑契约。
-- **可追踪审校**：可导入已审校 `transcript.json`；旧式 `skip: true`、残留日文假名和提示词泄漏都会被判为未解决并阻止“完成”。
-- **本地后端可组合**：翻译可选内置 Hy-MT2 或本机 Ollama；OCR 可选内置专用方案或 Ollama 视觉模型。在线兼容接口仅是显式可选项。
+- **故事连贯**：默认携带前 6 页成稿；扫描全书反复出现的片假名角色名，通过 JMnedict、中文姓名候选过滤和本地 9B 裁决生成一致性约束，不需要为具体作品维护人工人名表。
+- **本地质量集成**：质量模式由同一个 9B 模型分阶段完成草稿、上下文裁决和语义风险复译，Hy-MT2 1.8B 提供独立候选；不下载或依赖 9B 以上模型。快速模式仍可只运行单一轻量模型。
+- **质量 OCR**：Paddle 精确框 + Manga OCR 识别 + 9B 漏字／语义审计；视觉模型报告的漏字必须经过已有框覆盖判断、局部放大 Paddle 重检和 Manga OCR 独立确认，粗 VLM 框永远不直接擦图。
+- **原字样式匹配**：不依赖多模态 LLM，直接分析横竖排、字号、字重、前景色、描边色／宽度、字距和展示文字占比；自动使用常规或粗体中文字体重排。
+- **保护画面**：保持原始像素尺寸，不覆盖源图；LaMa 推理后强制逐像素恢复掩膜外区域，回归测试验证有界编辑契约。
+- **本地后端可组合**：翻译可选内置 Hy-MT2、本机 Ollama 或显式在线兼容 API；OCR 可选内置专用方案或 Ollama 视觉模型。
 - **隐私边界清晰**：本地模式不外传数据；在线模式只发送 OCR 文本和上下文，不上传图片。
-- **ModelScope 优先**：Hy-MT2 与 PaddleX 权重优先从魔搭社区获取；Manga OCR 暂无等价镜像，明确回退到上游模型源。
-- **开箱即用**：uv 创建隔离 `.venv`、按硬件安装 CPU/NVIDIA 依赖；UI 可准备所需权重，质量模式首次运行会自动准备 Hy-MT2、9B 本地模型和校验过的 LaMa。
-- **字体自带方案**：安装器预取固定版本的 Noto Sans CJK SC Regular/Bold；系统字体可用时直接复用。
-- **体积可控**：默认输出逐像素无损 WebP；仍可选择无损 PNG。测试封面 WebP 约为 PNG 的 59%。
-- **UI + CLI**：浏览器工作台适合日常使用，CLI 适合批量和自动化。
 
-## 三步开始
+## 环境要求
 
-要求：Windows 10/11 或 Linux。轻量快速模式约需 8 GB 可用磁盘；完整本地质量模式只使用 9B 或更小的 Ollama 模型，并按阶段释放显存。推荐安装 [uv](https://docs.astral.sh/uv/)；uv 会自动准备 Python 3.12 和锁定环境。没有 uv 时仍会回退到系统 Python + pip。
+| 项目 | 本机实测 |
+| --- | --- |
+| 系统 | Windows 10/11（Linux 亦可，脚本在 `scripts/`） |
+| CPU | AMD Ryzen 5 5600G（6 核 12 线程，OCR 纯 CPU 跑 5–6 核） |
+| 显卡 | AMD Radeon RX 9070 XT —— 只给 Ollama 用 Vulkan，Paddle 没有 ROCm/DirectML 后端 |
+| 磁盘 | 完整本地质量模式约 13 GB（含 9B + Hy-MT2 两份 Ollama 权重） |
+| Python | 3.12.15（uv 托管），torch 2.8.0+cpu / paddlepaddle 3.3.1 / paddleocr 3.7.0 / paddlex 3.7.2 |
+| 推理服务 | Ollama 0.40.14（免安装版放在 `_dl\ollama\`，只保留 vulkan 后端） |
 
-### Windows
+**安装路径必须是纯 ASCII。** Paddle 的 C++ 推理和 `torch.jit.load` 都打不开含中文的路径，会报 `json.exception.parse_error.101` / `open file failed because of errno 2`。目录名请保持 `Manga Localizer----Ben-Ding-Fan-Yi` 这类纯 ASCII 形式，**不要再改成中文名**；如果搬动目录，还要同步改 `.venv\pyvenv.cfg` 的 `home` 和 `site-packages\_editable_impl_manga_localizer_studio.pth`。
+
+## 安装与启动
+
+**全新安装**：克隆后先跑引导脚本（`-Profile cpu` 会装 `torch==2.8.0+cpu`、`torchvision==0.23.0+cpu` 并卸载 `paddlepaddle-gpu`），再启动 UI —— 权重留给 UI 里的「准备缺失模型」按需拉取，省掉一次几 GB 的下载。
 
 ```powershell
-git clone https://github.com/whmc76/manga-localizer-studio.git
-cd manga-localizer-studio
+git clone https://github.com/aduiduid/Ai-Manga-Localizer---AMD.git
+cd Ai-Manga-Localizer---AMD
+.\scripts\bootstrap.ps1 -Profile cpu -SkipModels
 .\start-windows.bat
 ```
 
-首次启动会自动完成环境安装并打开 `http://127.0.0.1:8765`。默认方案完全在本机运行；先选择 OCR/翻译后端，再点“准备缺失模型”。Ollama 的快速模式不需要 Hy-MT2；质量模式会把 Hy-MT2 作为独立候选。使用纯 Ollama OCR 时无需下载 Paddle/Manga OCR，但推荐的混合质量 OCR 需要它们。之后双击 `start-windows.bat` 即可。
+> AMD 机器上**不要装 CUDA 版 torch**：本分支的设备回落逻辑本身就假设 `torch.cuda.is_available()` 为假，CUDA 轮子既用不到又会让 `torch` 体积翻几倍。`bootstrap.ps1` 的 `-Profile auto` 只在检测到 `nvidia-smi` 时选 `cuda129`，其余情况回落 `cpu`；AMD 机器请显式写 `-Profile cpu`。若本机没装 `uv`，脚本会自动回落到 `python -m venv` + `pip` 的兼容路径。
 
-从旧版本更新源码后，请运行一次 `.\scripts\bootstrap.ps1 -SkipModels`（Linux 为 `./scripts/bootstrap.sh --skip-models`）同步锁定环境；已有模型权重不会重复下载。
+**本机的启动方式**：本机把项目放在 `<根>\app\` 下（仓库根 = 项目根，环境在 `<根>\app\.venv`），根目录的 `start.bat` 已固化本机用到的全部环境变量 —— `MLS_HOME`、`PADDLE_PDX_CACHE_HOME`、`HF_ENDPOINT=https://hf-mirror.com`、`OLLAMA_MODELS`、`MLS_HY_MT2_OLLAMA`，并把 `USERPROFILE`／`TEMP` 挪到 `_home\`（Paddle 会往 `~/.cache/paddle` 写），同时自动拉起 `_dl\ollama\ollama.exe serve`。
 
-尚未安装 uv 时，可先执行 `winget install --id=astral-sh.uv -e`；这一步不是强制要求。
-
-### Linux
-
-```bash
-git clone https://github.com/whmc76/manga-localizer-studio.git
-cd manga-localizer-studio
-chmod +x scripts/*.sh
-./scripts/start.sh
+```
+start.bat                              :: 打开 http://127.0.0.1:8765
+start.bat run "D:\书\某本" -o "D:\书\某本--已汉化"
+start.bat doctor                       :: 环境 + 实际模型清单
+start.bat models status
 ```
 
-只创建环境、不下载权重：
-
-```powershell
-.\scripts\bootstrap.ps1 -Profile cpu -SkipModels -Dev
-```
-
-```bash
-./scripts/bootstrap.sh --cpu --skip-models --dev
-```
+`start.bat` 假定 `%~dp0app\.venv\Scripts\python.exe` 已存在（CPU 版 torch）；换机器请改脚本里的 `PY` 路径。**改这个脚本必须保持 CRLF 行尾**，写成 LF 会被 cmd 拆碎成 `'Localizer' is not recognized...`。
 
 ## 使用
 
-1. 可先在右上角切换中文、日本語或 English 界面，再选择漫画图片文件夹；支持 JPG、PNG、WebP、BMP 和 TIFF。
-2. 分别选择 OCR 与翻译后端，并按需设置“剧情连贯”“前文页数”“保留拟声词”和无损输出格式。
-3. 模型未就绪时点“准备缺失模型”；只会下载当前后端需要的本地权重。
-4. 在对比预览中检查结果；无损 WebP/PNG 成品、逐页 OCR 与翻译稿都保存在输出目录。WebP 是默认值，可明显减小 PNG 带来的体积膨胀且不改变解码后的像素。
+1. 右上角切换界面语言，选择漫画图片文件夹（JPG、PNG、WebP、BMP、TIFF）。
+2. 输出目录会自动填成 `{输出根}\{源目录名}--已汉化`；换成别的目录也可以，但输出不能与源目录相同。
+3. 选择 OCR 与翻译后端，按需设置「故事连贯」「前文页数」「保留拟声词」和输出格式（默认无损 WebP）。
+4. 模型未就绪时点「准备缺失模型」；只会下载当前后端需要的权重。
+5. 运行中可以**暂停**（当前页跑完停住，模型与已完成页面全保留）、**结束**（下一次进度回调停下，缓存复用）或从设置页**退出程序**。侧边栏卡片显示开始时间、已用时间与预计剩余。
 
 CLI 与 UI 使用同一条流水线：
 
 ```bash
-manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01_zh"
-manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01_zh" --backend ollama --quality-profile quality
-manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01_fast" --backend ollama --quality-profile fast
-manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01_zh" --ocr-backend ollama --ollama-ocr-model huihui_ai/qwen3.5-abliterated:9b
-manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01_png" --output-format png
-manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01_final" --reviewed-transcript "D:/manga/transcript-reviewed.json"
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01--已汉化"
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01--已汉化" --backend ollama --quality-profile quality
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01-fast" --backend ollama --quality-profile fast
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01-png" --output-format png
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01-final" --reviewed-transcript "D:/manga/transcript-reviewed.json"
 manga-localizer models status
 manga-localizer doctor
 ```
 
-在线兼容 API 使用 `--backend online --online-url ... --online-model ...`，密钥通过
-`MLS_ONLINE_API_KEY` 环境变量提供。UI 中输入的密钥只保留在当前服务进程内，不写入磁盘。
+在线兼容 API 使用 `--backend online --online-url ... --online-model ...`，密钥通过 `MLS_ONLINE_API_KEY` 环境变量提供；UI 中输入的密钥只保留在当前服务进程内，不写入磁盘。
 
 ## 工作原理
 
@@ -113,37 +121,45 @@ flowchart LR
 
 | 模块 | 默认方案 | 下载策略 |
 |---|---|---|
-| 文字定位 | PP-OCRv5 mobile det + server rec | PaddleX 强制 `modelscope` 源 |
-| 日文识别 | Manga OCR | 上游源回退，并在 UI 标明 |
-| 连贯翻译 | 同一 9B 分阶段草稿/审校 + Hy-MT2 独立候选 | Ollama 自动拉取；Hy-MT2 优先 ModelScope；不使用 9B 以上模型 |
+| 文字定位 | PP-OCRv5 mobile det + server rec（CPU） | PaddleX 强制 `modelscope` 源 |
+| 文字识别 | Manga OCR（日文）；英文页走 Paddle 识别结果 | 上游源回退，并在 UI 标明 |
+| 连贯翻译 | 同一 9B 分阶段草稿／审校 + Hy-MT2 独立候选（均走 Ollama/Vulkan） | Ollama 自动拉取；不使用 9B 以上模型 |
 | 画面修复 | Big-LaMa（质量）/ OpenCV（快速） | 约 196 MB，SHA-256 校验、原子下载 |
 | 样式与排字 | OpenCV 分析 + Noto CJK Regular/Bold + Pillow | 不调用 LLM，不联网 |
 
-缓存默认位于 `~/.manga-localizer-studio`，可通过 `MLS_HOME` 改变。自动字体保存在 `fonts/`，模型保存在 `models/`；也可通过 `MLS_FONT` 指向自己的 TTF/OTF/TTC 文件。
+模型与缓存都在项目目录内（`data\models`、`ollama-models\`），也可以用 `MLS_HOME` 改变位置；字体默认取系统 Noto Sans CJK SC，可用 `MLS_FONT` 指向自己的 TTF/OTF/TTC。
+
+## 已知限制
+
+- **OCR 是纯 CPU**：RX 9070 XT 只能给 Ollama 用 Vulkan，Paddle 没有 ROCm/DirectML 后端。整本 71 页质量模式实测约 3.6 s/页。
+- **没有气泡、直接画在背景上的小字可能漏检**：把 PaddleOCR 短边放大到 1280 能读出来，但整页识别慢 32% 并引入噪声框，因此没有默认开启。
+- 专有名词（书名、人名）单次翻译容易误译；质量模式已启用候选 + 9B 审校，仍不保证。
+- 白描边小字擦除后可能留淡残影，改用 `quality_profile=fast` 或手动框可以规避。
+- `preserve_sfx=True` 时英文音效按原样保留（`Grrrrr`、`poof` 等），不会译成中文拟声词。
 
 ## 设计与工程约束
 
-- 检测、补画和排字规则只使用图像/文字单元特征，不包含作品标题、对白、页号、文件名或固定坐标；完整漫画只作为回归样本。
-- 原始图片从不被覆盖；API 也拒绝相同的源/输出目录。
+- 检测、补画和排字规则只使用图像／文字单元特征，不包含作品标题、对白、页号、文件名或固定坐标。
+- 原始图片从不被覆盖；API 也拒绝相同的源／输出目录。
 - 像素变化限制在检测框周围的有界清理区；边缘连通的角色、背景和分镜线会被保留，回归测试覆盖该约束。
-- 翻译保留稳定单元 ID，模型漏行或返回日文时逐条补译，避免气泡错位；旋转角度不再被当作跳过对白的依据。
+- 翻译保留稳定单元 ID，模型漏行或返回原文时逐条补译，避免气泡错位。
 - 审校稿中的跳过项必须使用 `duplicate`、`noise`、`decorative` 或 `preserve` 之一作为 `skip_reason`；缺失原因的旧稿会被安全地视为未完成。
 - 模型状态、进度、历史和预览均来自真实本地 API，不使用伪造 UI 状态。
-- 专用 OCR 最适合印刷体；大型或极端变形的装饰拟声词默认保留原样。混合 OCR 会用本机视觉模型提高对白召回，但任何擦除区域仍必须由精确检测器确认。补画和样式重建不依赖 LLM。
 
-设计基线、响应式规则和逐项验收记录见 [`docs/DESIGN_CONTRACT.md`](docs/DESIGN_CONTRACT.md) 与 [`docs/PARITY_LEDGER.md`](docs/PARITY_LEDGER.md)。
-
-## 开发
+## 开发与测试
 
 ```powershell
-.\scripts\bootstrap.ps1 -Profile cpu -SkipModels -Dev
 uv lock --check
 uv run --frozen --no-sync pytest
 uv run --frozen --no-sync manga-localizer ui --no-open
 uv run python scripts/verify_output.py SOURCE OUTPUT OUTPUT/.manga-localizer-work/transcript.json
 ```
 
-普通与 ML 依赖（含 CPU Paddle）记录在 `uv.lock`；Torch 再由启动脚本按 CPU/CUDA 12.9 安装对应轮子。Windows CUDA 配置使用 GPU Torch + CPU Paddle，避免两套运行时在同一进程加载冲突的 cuDNN DLL；文字识别与翻译仍使用 GPU。Linux CUDA 可把 Paddle 替换为 GPU wheel。CI 使用官方 `setup-uv`，在 Windows/Linux、Python 3.11/3.12 上运行不下载权重的核心测试。完整模型测试需在本地执行。
+本机实测 **217 个测试收集、216 个通过**。唯一未通过的是 `tests/test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel`：`torch.jit.save` 打不开本机中文临时目录（pytest 的 `tmp_path` 落在中文路径下），属环境限制而非代码问题：
+
+```powershell
+python -m pytest tests --deselect tests/test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel
+```
 
 ## 许可证与模型说明
 
@@ -151,23 +167,6 @@ uv run python scripts/verify_output.py SOURCE OUTPUT OUTPUT/.manga-localizer-wor
 
 ## 致谢
 
+上游项目 [Manga Localizer Studio](https://github.com/whmc76/manga-localizer-studio) 由 **赛博迪克朗**（[@whmc76](https://github.com/whmc76)）开发并维护，本分支的 AMD／中文适配建立在 v0.5.2 之上。
+
 核心能力来自 [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)、[Manga OCR](https://github.com/kha-white/manga-ocr)、[LaMa](https://github.com/advimman/lama)、[ModelScope](https://modelscope.cn/) 与 [Hy-MT2](https://modelscope.cn/collections/Tencent-Hunyuan/Hy-MT2)。
-
----
-
-## ❤️ 支持与关注 / Support & Follow
-
-> 开源代码可以免费，但显卡、电费、服务器和咖啡豆暂时还没学会开源。
-
-你好，我是**赛博迪克朗**。我平时给 AI 喂提示词、给 ComfyUI 接管线，也负责修复那些“昨天明明还能跑”的神秘问题。教程里看起来三分钟解决的事，背后往往是三十次失败和一句又一句“这不应该啊”。
-
-如果这个项目帮你少踩了一个坑、少重装了一次环境，那些和报错窗口深情对视的夜晚就算没有白熬。欢迎通过下面的方式支持和关注：
-
-- [💙 支付宝 / Alipay](https://github.com/whmc76/.github/blob/main/SUPPORT.md#alipay)
-- [🌍 PayPal](https://paypal.me/CyberDickLang)
-- [📺 哔哩哔哩 / Bilibili](https://space.bilibili.com/339984)
-- [▶️ YouTube](https://www.youtube.com/@CyberDickLang)
-
-抖音、小红书、快手、今日头条、微信视频号、X：搜索全网统一名称 **“赛博迪克朗”**。
-
-**不赞助也完全没关系。** 使用、Star、反馈、分享，甚至一句“这东西真能用”，都是继续更新的动力。谢谢你让这个项目不只是躺在我的硬盘里感动自己。
