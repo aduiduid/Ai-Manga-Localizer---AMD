@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,13 +39,22 @@ from .translator import (
 
 
 ProgressCallback = Callable[[str, int, int, str], None]
-OCR_CACHE_VERSION = 7
+# 8: recognition payloads now keep Paddle's own text, so every cached page from
+# version 7 holds MangaOCR's Japanese hallucination for English sources.
+OCR_CACHE_VERSION = 8
 
 
 def unsafe_semantic_missing(page: PageOCR, preserve_sfx: bool) -> list[dict]:
     """Return full-page findings that cannot safely remain outside exact geometry."""
     unsafe = []
     for item in page.semantic_missing:
+        # Regional recovery re-ran the exact detector on an enlarged crop of
+        # every claim and still owned no geometry for this one, so there is
+        # nothing to erase and no box to place a translation in.  The OCR
+        # backend marks those ``unconfirmed``; failing the book over them is
+        # what turned a stray screentone read ("効果か:") into a dead run.
+        if item.get("unconfirmed"):
+            continue
         text = str(item.get("text", "")).strip()
         japanese_chars = re.findall(r"[ぁ-ゖァ-ヺ\u3400-\u9fff]", text)
         single_kana_fragment = len(japanese_chars) == 1 and bool(
@@ -354,12 +364,24 @@ class LocalizerPipeline:
                 if not model_manager.is_ready("hy-mt2"):
                     self._emit(emit, "translate", 0, total, "下载 Hy-MT2 独立翻译候选")
                     model_manager.download("hy-mt2")
-                candidate = HyMTTranslator(
-                    self.paths.models / "hy-mt2",
-                    request.target_language,
-                    request.device,
-                    JapaneseNameDictionary(self.paths.cache),
-                )
+                # Serving the same Hy-MT2 weights through Ollama keeps the
+                # candidate pass on the GPU; torch on this CPU spent 172 s of a
+                # 642 s run here.  Opt-in via MLS_HY_MT2_OLLAMA=<ollama tag>.
+                hy_mt2_tag = os.environ.get("MLS_HY_MT2_OLLAMA", "").strip()
+                if hy_mt2_tag:
+                    candidate: PromptTranslator = OllamaTranslator(
+                        request.ollama_base_url,
+                        hy_mt2_tag,
+                        request.target_language,
+                        JapaneseNameDictionary(self.paths.cache),
+                    )
+                else:
+                    candidate = HyMTTranslator(
+                        self.paths.models / "hy-mt2",
+                        request.target_language,
+                        request.device,
+                        JapaneseNameDictionary(self.paths.cache),
+                    )
                 self._emit(emit, "translate", 0, total, "启用 9B 分阶段语义审校")
                 translator = LocalQualityTranslator(editor, candidate)
             else:

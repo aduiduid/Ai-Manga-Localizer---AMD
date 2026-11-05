@@ -3,12 +3,13 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.request import Request, urlopen
 
-from .config import AppPaths, configure_model_caches
+from .config import AppPaths, UserSettings, configure_model_caches
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -22,6 +23,103 @@ LAMA_WEIGHTS_SHA256 = "7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210
 
 class ModelDependencyError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class OllamaRuntime:
+    """The Ollama service actually serving this configuration.
+
+    ``available`` maps each pulled tag to its size in bytes, or is ``None``
+    when the service could not be reached — that keeps the model page honest
+    instead of reporting a stale "ready".
+    """
+
+    translation_model: str = ""
+    ocr_model: str = ""
+    hy_mt2_tag: str = ""
+    base_url: str = "http://127.0.0.1:11434"
+    available: dict[str, int] | None = None
+
+    @classmethod
+    def from_settings(
+        cls, settings: "UserSettings", tags: dict[str, int] | None = None
+    ) -> "OllamaRuntime":
+        return cls(
+            translation_model=(settings.ollama_model or "").strip(),
+            ocr_model=(settings.ollama_ocr_model or "").strip(),
+            # Mirrors pipeline.py: the quality candidate pass is served from
+            # Ollama only when this opt-in tag is set.
+            hy_mt2_tag=os.environ.get("MLS_HY_MT2_OLLAMA", "").strip(),
+            base_url=settings.ollama_base_url,
+            available=tags,
+        )
+
+
+def ollama_tags(base_url: str, timeout: float = 3.0) -> dict[str, int] | None:
+    """Pulled tags and their sizes; ``None`` when Ollama is not answering."""
+    try:
+        with urlopen(f"{base_url.rstrip('/')}/api/tags", timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return {
+        item["name"]: int(item.get("size") or 0)
+        for item in payload.get("models", [])
+        if item.get("name")
+    }
+
+
+def _human_size(size: int) -> str:
+    if size <= 0:
+        return ""
+    if size >= 1024**3:
+        return f"~{size / 1024**3:.1f} GB"
+    return f"~{size / 1024**2:.0f} MB"
+
+
+def ollama_specs(runtime: OllamaRuntime, ocr_backend: str, quality_profile: str):
+    """One row per Ollama tag this configuration actually runs."""
+    wanted: list[tuple[str, str]] = []
+    if runtime.translation_model:
+        wanted.append((runtime.translation_model, "translation"))
+    if (
+        quality_profile == "quality"
+        and runtime.hy_mt2_tag
+        and runtime.hy_mt2_tag != runtime.translation_model
+    ):
+        wanted.append((runtime.hy_mt2_tag, "review"))
+    if ocr_backend in {"hybrid", "ollama"} and runtime.ocr_model:
+        if all(runtime.ocr_model != tag for tag, _ in wanted):
+            wanted.append((runtime.ocr_model, "ocr"))
+    rows = []
+    for tag, role in wanted:
+        size = (runtime.available or {}).get(tag)
+        rows.append(
+            {
+                "id": f"ollama:{tag}",
+                "name": tag,
+                "kind": "ollama",
+                "role": {
+                    "translation": "分阶段语义审校的主翻译模型",
+                    "review": "独立候选译文（质量模式第二遍）",
+                    "ocr": "整页视觉语义 OCR",
+                }[role],
+                "role_key": f"models.role.{role}",
+                "provider": "Ollama",
+                "repository": tag,
+                "size": _human_size(size or 0),
+                "license": "Upstream",
+                "required": True,
+                "ready": size is not None,
+                "path": f"{runtime.base_url} · {tag}",
+                "status_code": (
+                    "offline"
+                    if runtime.available is None
+                    else ("pulled" if size is not None else "missing")
+                ),
+            }
+        )
+    return rows
 
 
 @dataclass(frozen=True)
@@ -43,7 +141,7 @@ MODEL_REGISTRY = (
         role="文字检测与行级识别",
         provider="ModelScope via PaddleX",
         repository="PP-OCRv5_mobile_det + PP-OCRv5_server_rec",
-        size="~180 MB",
+        size="~93 MB",
         license="Apache-2.0",
     ),
     ModelSpec(
@@ -52,7 +150,7 @@ MODEL_REGISTRY = (
         role="日文漫画识别",
         provider="Hugging Face fallback",
         repository="kha-white/manga-ocr-base",
-        size="~450 MB",
+        size="~850 MB",
         license="Apache-2.0",
     ),
     ModelSpec(
@@ -104,10 +202,12 @@ class ModelManager:
         inference_backend: str = "builtin",
         quality_profile: str = "quality",
         ocr_backend: str = "builtin",
+        runtime: OllamaRuntime | None = None,
     ) -> list[dict]:
-        return [
+        local = [
             {
                 **asdict(spec),
+                "kind": "local",
                 "required": (
                     (
                         spec.id != "hy-mt2"
@@ -115,6 +215,8 @@ class ModelManager:
                         or (
                             inference_backend == "ollama"
                             and quality_profile == "quality"
+                            # Served from Ollama instead of the torch weights.
+                            and not (runtime and runtime.hy_mt2_tag)
                         )
                     )
                     and (spec.id != "lama" or quality_profile == "quality")
@@ -128,6 +230,12 @@ class ModelManager:
             }
             for spec in MODEL_REGISTRY
         ]
+        # Rows above describe weights on disk.  The models that actually run
+        # this configuration live in Ollama, so they are listed separately
+        # instead of pretending Hy-MT2-on-disk is the active translator.
+        if inference_backend != "ollama" or runtime is None:
+            return local
+        return local + ollama_specs(runtime, ocr_backend, quality_profile)
 
     def lama_weights_path(self) -> Path:
         return self.model_dir("lama") / "big-lama.pt"

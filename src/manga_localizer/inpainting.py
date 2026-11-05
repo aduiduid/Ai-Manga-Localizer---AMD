@@ -38,7 +38,11 @@ class LaMaInpainter:
         if self.requested_device == "auto":
             device = "cuda" if torch.cuda.is_available() else "cpu"
         elif self.requested_device.startswith("gpu") or self.requested_device == "cuda":
-            device = "cuda"
+            # The UI always offers "GPU 0".  On a machine without CUDA (this
+            # box runs the CPU torch wheel on an AMD card) asking torch for
+            # cuda raises "Torch not compiled with CUDA enabled", so honour
+            # the request only when it can actually be met.
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             device = "cpu"
         self._torch = torch

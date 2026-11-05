@@ -20,6 +20,7 @@ from PIL import Image, ImageDraw, ImageOps
 
 from .config import AppPaths, configure_model_caches
 from .model_manager import ModelDependencyError
+from .sfx import lookup_sfx
 
 
 def manga_force_cpu(device: str, cuda_available: bool) -> bool:
@@ -85,6 +86,11 @@ def likely_sfx_text(text: str) -> bool:
         return True
     if re.search(r"[\u3400-\u9fff]", clean):
         return False
+    if re.fullmatch(r"[A-Za-z]{2,14}(?:\s+[A-Za-z]{2,14}){0,3}[!?！？.…]*", clean):
+        # English pages write their effects as words: GRRRRR, poof, AUGH!
+        # They also double them ("sniff snif"), so allow a few space-separated
+        # words and let the lookup decide whether every word is an effect.
+        return lookup_sfx(clean) is not None
     katakana = "".join(re.findall(r"[ァ-ヺー]", clean))
     hiragana_count = len(re.findall(r"[ぁ-ゖ]", clean))
     if len(katakana) < 4 or hiragana_count > 3:
@@ -394,6 +400,34 @@ def semantic_text_agreement(current: str, candidate: str) -> bool:
     )
 
 
+def _rereads_known_text(
+    text: str, known_text: set[str], known_bigrams: set[str]
+) -> bool:
+    """Detect a garbled re-read of a line the exact detector already owns.
+
+    The recall pass re-reads whole pages, so it returns lines MangaOCR already
+    recognised with one or two characters mangled ("何か理由が…ちゃんとなんて
+    話を" for "…ちゃんと話を", "平気よの" for "…平気よ").  Neither containment
+    nor a strict ratio catches every case, so a claim is treated as a re-read
+    when most of its bigrams appear in the page's known text.  Two-character
+    effects stay exempt: ``がー`` shares nothing, and a real omission must keep
+    failing the book.  Dropping a re-read costs one untranslated line at worst;
+    keeping one fails the entire book.
+    """
+    if len(text) < 3:
+        return False
+    bigrams = {text[index : index + 2] for index in range(len(text) - 1)}
+    if not bigrams:
+        return False
+    coverage = len(bigrams & known_bigrams) / len(bigrams)
+    if coverage >= 0.6:
+        return True
+    return any(
+        difflib.SequenceMatcher(None, text, known).ratio() >= 0.5
+        for known in known_text
+    )
+
+
 def merge_semantic_missing(*batches: list[dict]) -> list[dict]:
     """Union repeated visual omissions without merging two equal nearby sounds."""
     merged: list[dict] = []
@@ -452,23 +486,92 @@ def oversized_decorative_sfx(page: PageOCR, unit: TextUnit) -> bool:
     )
 
 
+def _best_recognized_text(group: list[dict]) -> tuple[str, float]:
+    """Reassemble one region group's recognized text in reading order.
+
+    A bubble is detected as several lines and each line as several boxes.  Only
+    the longest single box used to survive, which truncated every bubble to one
+    fragment ("I SHALL GIVE DUE TO THE" for a two-line speech balloon).  Segments
+    are joined top-to-bottom, left-to-right, and Latin words keep a space between
+    segments because Japanese-style separation would merge "HAVE TO" and "WEAR".
+    """
+    pieces = [
+        (item["box"], str(item.get("text", "")).strip(), float(item.get("score", 0.0)))
+        for item in group
+        if str(item.get("text", "")).strip()
+    ]
+    if not pieces:
+        return "", 0.0
+    pieces.sort(key=lambda piece: (piece[0][1], piece[0][0]))
+    texts = [text for _box, text, _score in pieces]
+    latin = sum(len(re.findall(r"[A-Za-z\u00c0-\u024f]", text)) for text in texts)
+    japanese = sum(len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", text)) for text in texts)
+    joiner = " " if latin > japanese else ""
+    return joiner.join(texts), max(score for _box, _text, score in pieces)
+
+
+def is_latin_page(regions: list[dict]) -> bool:
+    """A page whose recognized text is overwhelmingly Latin is an English book."""
+    latin = sum(
+        len(re.findall(r"[A-Za-z\u00c0-\u024f]", str(item.get("text", ""))))
+        for item in regions
+    )
+    script = sum(
+        len(re.findall(r"[\u3040-\u30ff\u3400-\u9fff]", str(item.get("text", ""))))
+        for item in regions
+    )
+    return latin > 0 and latin > script * 2
+
+
+def _is_latin_region(text: str, score: float) -> bool:
+    """Decide whether a region holds Latin-script dialogue rather than Japanese.
+
+    Paddle's PP-OCRv5 recognizer covers Latin scripts well, while MangaOCR only
+    knows Japanese and hallucinates kana for English bubbles.  A region therefore
+    keeps Paddle's own text when it has a confident score and its letters are
+    overwhelmingly Latin.  Japanese still routes to MangaOCR, which wins on kana.
+    """
+    clean = re.sub(r"\s+", "", text)
+    if len(clean) < 3 or score < 0.75:
+        return False
+    latin = len(re.findall(r"[A-Za-z\u00c0-\u024f]", clean))
+    kana = len(re.findall(r"[\u3040-\u30ff]", clean))
+    letters = latin + kana + len(re.findall(r"[\u3400-\u9fff]", clean))
+    return letters > 0 and kana == 0 and latin / letters >= 0.6
+
+
 def merge_region_candidates(primary: list[dict], secondary: list[dict]) -> list[dict]:
-    """Union detector candidates without letting recognition delete text boxes."""
+    """Union detector candidates without letting recognition delete text boxes.
+
+    The detection-only payload has no text, while the recognition payload has
+    both.  A duplicate used to be dropped outright, which threw the recognized
+    text away and left MangaOCR to guess at every bubble.  Duplicates now donate
+    their text and score to the surviving detector box instead.
+    """
     merged = list(primary)
     for candidate in secondary:
         candidate_box = candidate["box"]
-        duplicate = any(
-            _axis_overlap(
+        overlapping = [
+            item
+            for item in merged
+            if _axis_overlap(
                 candidate_box[0], candidate_box[2], item["box"][0], item["box"][2]
             )
             * _axis_overlap(
                 candidate_box[1], candidate_box[3], item["box"][1], item["box"][3]
             )
             >= min(_area(candidate_box), _area(item["box"])) * 0.65
-            for item in merged
-        )
-        if not duplicate:
-            merged.append(candidate)
+        ]
+        if not overlapping:
+            merged.append(dict(candidate))
+            continue
+        for item in overlapping:
+            text = str(candidate.get("text", "")).strip()
+            if text and text not in str(item.get("text", "")):
+                item["text"] = f"{item.get('text', '')} {text}".strip()
+            item["score"] = max(
+                float(item.get("score", 0.0)), float(candidate.get("score", 0.0))
+            )
     return merged
 
 
@@ -608,10 +711,16 @@ def _connects(a: dict, b: dict) -> bool:
     # normally narrow/neutral rather than a large strongly horizontal block.
     if (a_vertical and b_horizontal) or (a_horizontal and b_vertical):
         return False
+    # Gaps are scaled to the text itself.  A fixed 58/72 px budget merges
+    # separate bubbles on dense English pages, which pulls several lines of
+    # dialogue (and their erase boxes) into one unit and scrambles the reading
+    # order.  Line spacing inside one bubble stays well under one line height.
     if ah >= aw * 1.25 and bh >= bw * 1.25:
-        return x_gap <= 72 and y_overlap / max(1, min(ah, bh)) >= 0.22
+        slack = max(10, round(min(aw, bw) * 0.9))
+        return x_gap <= slack and y_overlap / max(1, min(ah, bh)) >= 0.22
     if aw >= ah * 1.25 and bw >= bh * 1.25:
-        return y_gap <= 58 and x_overlap / max(1, min(aw, bw)) >= 0.22
+        slack = max(10, round(min(ah, bh) * 0.9))
+        return y_gap <= slack and x_overlap / max(1, min(aw, bw)) >= 0.35
     return x_gap <= 36 and y_gap <= 36
 
 
@@ -948,17 +1057,26 @@ class PaddleMangaOCR:
         self.reader = MangaOcr(force_cpu=manga_force_cpu(device, torch_cuda))
 
     @staticmethod
-    def _resolve_device(device: str) -> str:
-        if device != "auto":
-            return device
+    def _paddle_gpu_available() -> bool:
         try:
             import paddle
 
-            if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
-                return "gpu:0"
+            return paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0
         except Exception:
-            pass
-        return "cpu"
+            return False
+
+    @staticmethod
+    def _resolve_device(device: str) -> str:
+        # The settings panel offers "GPU 0" on every machine, but Paddle on
+        # Windows is CPU- or CUDA-only.  Given "gpu:0" without CUDA it only
+        # warns "device not available, switching to CPU" and then dies inside
+        # oneDNN's PIR conversion (ConvertPirAttribute2RuntimeAttribute).  A
+        # silent CPU fallback is what the user asked for by picking "auto".
+        if device != "auto":
+            if device.startswith("gpu") or device == "cuda":
+                return device if PaddleMangaOCR._paddle_gpu_available() else "cpu"
+            return device
+        return "gpu:0" if PaddleMangaOCR._paddle_gpu_available() else "cpu"
 
     @staticmethod
     def _payload(result) -> dict:
@@ -969,6 +1087,54 @@ class PaddleMangaOCR:
 
     @staticmethod
     def _regions(payload: dict) -> list[dict]:
+        # A recognition payload carries dt_polys *and* rec_texts.  Preferring the
+        # detector polys dropped every recognized string, so each region reached
+        # MangaOCR as an empty box and the Japanese-only reader hallucinated the
+        # text.  Recognized text always wins when it is available.
+        # ``rec_boxes`` can arrive as a numpy array, whose truth value is
+        # ambiguous; test its length instead of the object itself.
+        if len(payload.get("rec_boxes") or []):
+            texts = payload.get("rec_texts", [])
+            scores = payload.get("rec_scores", [])
+            boxes = payload.get("rec_boxes", [])
+            selected = []
+            for index, raw_box in enumerate(boxes):
+                box = [int(value) for value in raw_box]
+                text = str(texts[index]).strip() if index < len(texts) else ""
+                score = float(scores[index]) if index < len(scores) else 0.0
+                # Small print inside a balloon ("um,", "TH-") covers only ~400
+                # px^2, so a flat 650 px^2 floor dropped the balloon's first and
+                # last lines: the middle was translated and those two stayed
+                # painted in English around the Chinese text.  A confidently
+                # recognized string is real text at any size.
+                if _area(box) < 650 and not (score >= 0.8 and len(text) >= 2):
+                    continue
+                # One glyph spanning a whole drawing ("X" across 160x137 px of
+                # artwork) is a mis-recognition, not a caption: real text runs
+                # 50-200 px^2 per character.  Strip the text so the box is
+                # treated as a text-less detector region instead of a bubble.
+                compact = re.sub(r"\s+", "", text)
+                if compact and _area(box) / len(compact) > 2_000:
+                    text = ""
+                has_japanese = bool(JP_RE.search(text))
+                kana_count = len(re.findall(r"[\u3040-\u30ff]", text))
+                large_detector_box = _area(box) >= 5_000
+                # A short English line ("TODAY?", "UMM...") covers barely 1,100
+                # px^2, so the old 1,200 px^2 floor dropped it: the balloon kept
+                # its first and last lines, the group only erased the middle
+                # ones, and the leftovers showed around the Chinese text.
+                confident_effect = score >= 0.72 and bool(text)
+                if not (has_japanese or large_detector_box or confident_effect):
+                    continue
+                if (
+                    has_japanese
+                    and score < 0.58
+                    and not (score >= 0.42 and kana_count >= 2)
+                    and not large_detector_box
+                ):
+                    continue
+                selected.append({"box": box, "text": text, "score": score})
+            return selected
         if "dt_polys" in payload:
             selected = []
             scores = payload.get("dt_scores", [])
@@ -987,31 +1153,7 @@ class PaddleMangaOCR:
                     }
                 )
             return selected
-        texts = payload.get("rec_texts", [])
-        scores = payload.get("rec_scores", [])
-        boxes = payload.get("rec_boxes", [])
-        selected = []
-        for index, raw_box in enumerate(boxes):
-            box = [int(value) for value in raw_box]
-            if _area(box) < 650:
-                continue
-            text = str(texts[index]).strip() if index < len(texts) else ""
-            score = float(scores[index]) if index < len(scores) else 0.0
-            has_japanese = bool(JP_RE.search(text))
-            kana_count = len(re.findall(r"[\u3040-\u30ff]", text))
-            large_detector_box = _area(box) >= 5_000
-            confident_effect = score >= 0.72 and _area(box) >= 1_200 and bool(text)
-            if not (has_japanese or large_detector_box or confident_effect):
-                continue
-            if (
-                has_japanese
-                and score < 0.58
-                and not (score >= 0.42 and kana_count >= 2)
-                and not large_detector_box
-            ):
-                continue
-            selected.append({"box": box, "text": text, "score": score})
-        return selected
+        return []
 
     @staticmethod
     def is_cover_title_candidate(page: PageOCR) -> bool:
@@ -1085,12 +1227,49 @@ class PaddleMangaOCR:
             )
             if not overlaps_detector:
                 regions.append(candidate)
+        # On an English page the detector's text-less boxes are artwork (a mane, a
+        # garment, a panel border).  They not only inflated the unit to the
+        # drawing's size -- which made the typesetter pick a huge font and the
+        # cleaner erase the art -- they also bridged two separate balloons into
+        # one unit, so a caption and a speech bubble were translated as a single
+        # line.  Paddle's recognizer reads Latin text reliably, so a Latin page
+        # keeps only the boxes that actually carry a string.
+        if is_latin_page(regions):
+            regions = [item for item in regions if str(item.get("text", "")).strip()]
         groups = _groups(regions)
         groups.sort(
             key=lambda group: (_union_box(group)[1] // 180, -_union_box(group)[0])
         )
         units: list[TextUnit] = []
         for index, group in enumerate(groups, start=1):
+            # MangaOCR only knows Japanese.  Given an English bubble it does not
+            # fail: it invents plausible kana ("いや、そういうことですが、") that
+            # pass JP_RE and silently replace the real line, so every English
+            # page came out as fluent nonsense.  Paddle's recognizer reads Latin
+            # text reliably, so a confidently Latin-only region keeps Paddle's
+            # own text; Japanese regions keep MangaOCR, which is far better at
+            # kana than the Chinese/English recognizer.
+            paddle_text, paddle_score = _best_recognized_text(group)
+            if _is_latin_region(paddle_text, paddle_score):
+                # On an English page the detector's text-less boxes are often
+                # artwork (a mane, a garment) that merely sat next to a caption.
+                # Keeping them inflated the unit to the artwork's size, so the
+                # typesetter chose a huge font and the translation spilled out
+                # of the balloon, and the quality cleanup erased the drawing.
+                text_boxes = [
+                    item["box"] for item in group if str(item.get("text", "")).strip()
+                ]
+                group = [
+                    item
+                    for item in group
+                    if str(item.get("text", "")).strip()
+                    or any(
+                        _axis_overlap(item["box"][0], item["box"][2], tbox[0], tbox[2])
+                        * _axis_overlap(item["box"][1], item["box"][3], tbox[1], tbox[3])
+                        >= min(_area(item["box"]), _area(tbox)) * 0.65
+                        for tbox in text_boxes
+                    )
+                ]
             box = _union_box(group)
             pad_x = max(10, round((box[2] - box[0]) * 0.04))
             pad_y = max(10, round((box[3] - box[1]) * 0.03))
@@ -1103,8 +1282,21 @@ class PaddleMangaOCR:
             crop = image.crop(tuple(crop_box))
             if any(item.get("reverse", False) for item in group):
                 crop = ImageOps.invert(crop)
-            refined = self.reader(crop).strip()
-            if not JP_RE.search(refined):
+            # A detector fragment that Paddle could not read at all is noise
+            # (paper grain, a hair strand, a panel border).  MangaOCR still
+            # invents kana for it, and those kana pass JP_RE, so a 52x16 speck
+            # became a translated line.  Real text, including small SFX, always
+            # carries a recognized string from one of the two passes.
+            if not paddle_text and _area(box) < 4_000:
+                continue
+            manga_text = self.reader(crop).strip()
+            if _is_latin_region(paddle_text, paddle_score):
+                refined = paddle_text
+            elif JP_RE.search(manga_text):
+                refined = manga_text
+            elif _is_latin_region(manga_text, paddle_score):
+                refined = manga_text
+            else:
                 continue
             score = max((item["score"] for item in group), default=0.0)
             clean = refined.strip()
@@ -1479,6 +1671,20 @@ class OllamaVisionOCR:
         retry_delays = (0.5, 2.0)
         prediction_budgets = (8192, 12_288, 16_384)
         for attempt in range(len(retry_delays) + 1):
+            options = {
+                "temperature": 0,
+                "num_ctx": 32_768,
+                "num_predict": prediction_budgets[attempt],
+            }
+            if attempt:
+                # Dense pages can make the model degenerate into emitting the
+                # same glyph with ever-growing coordinates ("オ" at y=3173,
+                # y=7413, y=15493…) until the budget runs out, so a bigger
+                # budget alone never recovers.  Penalising repeats on the
+                # retry breaks the loop; the first attempt stays untouched so
+                # ordinary pages keep the upstream sampling.
+                options["repeat_penalty"] = 1.3
+                options["repeat_last_n"] = 256
             body = json.dumps(
                 {
                     **payload_base,
@@ -1487,11 +1693,7 @@ class OllamaVisionOCR:
                     # truncated response keeps ordinary pages responsive while
                     # allowing a transiently verbose structured generation to
                     # recover without accepting partial JSON.
-                    "options": {
-                        "temperature": 0,
-                        "num_ctx": 32_768,
-                        "num_predict": prediction_budgets[attempt],
-                    },
+                    "options": options,
                 },
                 ensure_ascii=False,
             ).encode("utf-8")
@@ -2219,6 +2421,11 @@ role 选择 dialogue（对白）、narration（旁白）、sfx（拟声/效果�
             for unit in page.units
             if len(normalized_text(unit.ja)) >= 2
         }
+        known_bigrams: set[str] = set()
+        for value in known_text:
+            known_bigrams.update(
+                value[index : index + 2] for index in range(len(value) - 1)
+            )
         known_boxes = [
             erase_box
             for unit in page.units
@@ -2230,6 +2437,12 @@ role 选择 dialogue（对白）、narration（旁白）、sfx（拟声/效果�
             if text and any(
                 text == known or text in known or known in text for known in known_text
             ):
+                continue
+            # The recall pass re-reads lines the detector already owns and
+            # garbles a character or two ("何か理由が…ちゃんとなんて話を" for
+            # "…ちゃんと話を").  Exact containment then misses and a fully
+            # covered line aborted the book, so compare loosely as well.
+            if text and _rereads_known_text(text, known_text, known_bigrams):
                 continue
             try:
                 raw = [int(value) for value in item["bbox"]]
@@ -2331,6 +2544,16 @@ class HybridMangaOCR:
                 self.last_missing = self.semantics.filter_covered_missing(
                     page, pending_missing
                 )
+            # Whatever recovery could not confirm is not actionable: the claim
+            # has no detector-owned geometry, so nothing can be erased and the
+            # translator has nowhere to put the line.  A full-page VLM produces
+            # such claims constantly — screentone hatching read as "ただだ",
+            # panel borders as "効果か:", a known line re-read with one kana
+            # changed — and each one used to abort the whole book.  Mark them
+            # instead of dropping them: the page keeps the record (it lands in
+            # the transcript and the work directory) and the run continues.
+            for item in self.last_missing:
+                item["unconfirmed"] = True
         page = prune_nested_duplicate_units(page)
         if getattr(self, "profile", "quality") == "quality" and hasattr(
             self.semantics, "refine_local_crops"

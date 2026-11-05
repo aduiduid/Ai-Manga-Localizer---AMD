@@ -9,17 +9,21 @@ from PIL import Image, ImageDraw
 
 from manga_localizer.ocr import (
     HybridMangaOCR,
+    JP_RE,
     OllamaVisionOCR,
     PageOCR,
     PaddleMangaOCR,
     TextUnit,
+    _best_recognized_text,
     _connects,
+    _is_latin_region,
     _light_on_dark_regions,
     _outlined_light_text_regions_near,
     _suppress_optional_ccache_warning,
     classify_non_story_text,
     duplicate_tiny_fragment,
     deduplicate_nested_region_groups,
+    is_latin_page,
     likely_sfx_text,
     list_images,
     malformed_tiny_ocr,
@@ -33,6 +37,7 @@ from manga_localizer.ocr import (
     semantic_sfx_classification,
     tiny_low_confidence_nontext,
 )
+from manga_localizer.pipeline import unsafe_semantic_missing
 
 
 def test_publication_metadata_and_misread_edge_folio_are_preserved():
@@ -608,7 +613,102 @@ def test_hybrid_ocr_keeps_missing_until_exact_geometry_proves_coverage(tmp_path)
 
     result = service.analyze(source, 3)
 
-    assert result.semantic_missing == missing
+    assert [item["text"] for item in result.semantic_missing] == ["見落とし"]
+    # Recovery could not confirm it, so it is recorded rather than acted on.
+    assert result.semantic_missing[0]["unconfirmed"] is True
+
+
+def test_garbled_reread_of_known_line_is_not_a_missing_unit():
+    """The recall pass re-reads owned lines with a mangled character.
+
+    ``何か理由があると思ってちゃんとなんて話を聞いてあげたのよ`` is a garbled
+    re-read of a line MangaOCR already recognised, and reporting it aborted a
+    whole book.  Short effects and genuinely new lines must stay reported.
+    """
+    from manga_localizer.ocr import _rereads_known_text
+
+    known = {
+        "何か理由があると思ってちゃんと話を聞いてあげたのよ",
+        "それなのにわざわざ私に",
+        "げっ、マジかよ",
+        "えっどういう彼女にはもう前みたいな力は無いの",
+    }
+    bigrams: set[str] = set()
+    for value in known:
+        bigrams.update(value[i : i + 2] for i in range(len(value) - 1))
+
+    assert _rereads_known_text(
+        "何か理由があると思ってちゃんとなんて話を聞いてあげたのよ", known, bigrams
+    )
+    assert _rereads_known_text(
+        "それなのにわさざわざ私にしてくるん化けてくるすもの", known, bigrams
+    )
+    assert _rereads_known_text("前彼女にはもう力はみたいなの", known, bigrams)
+    # ``マジかよ`` is a re-read of the known ``げっ、マジかよ``.
+    assert _rereads_known_text("マジかよ", known, bigrams)
+    # Two-character effects share nothing and stay exempt.
+    assert _rereads_known_text("がー！", known, bigrams) is False
+    # A genuinely new line must keep failing the book.
+    assert _rereads_known_text("見落とし", known, bigrams) is False
+
+
+def test_hybrid_ocr_marks_unconfirmed_claims_instead_of_failing_the_book(tmp_path):
+    """A VLM reads screentone as effects; exact recovery is the arbiter.
+
+    ``ただだ`` was reported on a blank patch of hatching.  Recovery re-ran the
+    detector on an enlarged crop and found no geometry, which is positive
+    evidence there is nothing to erase -- failing the book over it is wrong.
+    The claim is kept as ``unconfirmed`` so the transcript still records it,
+    and ``unsafe_semantic_missing`` ignores it.
+    """
+    source = tmp_path / "screentone.png"
+    Image.new("RGB", (1000, 2000), "white").save(source)
+    page = PageOCR(
+        3,
+        source.name,
+        1000,
+        2000,
+        [TextUnit("p003u01", [50, 50, 200, 300], [40, 40, 210, 310], "既存", 0.9)],
+    )
+    missing = [
+        {"text": "ただだ", "bbox": [600, 700, 700, 750], "score": 0.98, "is_sfx": True},
+        {"text": "見落とし", "bbox": [700, 900, 900, 980], "score": 0.9, "is_sfx": False},
+    ]
+
+    class Geometry:
+        def analyze(self, _path, _page_number):
+            return page
+
+        def recover_missing(self, _path, current, _missing):
+            return current
+
+    class Semantics:
+        calls = 0
+
+        def refine(self, _path, current):
+            self.calls += 1
+            return current, (missing if self.calls == 1 else [])
+
+        def find_missing(self, _path, _current):
+            return []
+
+        def filter_covered_missing(self, current, unresolved):
+            return OllamaVisionOCR.filter_covered_missing(current, unresolved)
+
+        def refine_local_crops(self, _path, current):
+            return current
+
+    service = HybridMangaOCR.__new__(HybridMangaOCR)
+    service.geometry = Geometry()
+    service.semantics = Semantics()
+    service.profile = "quality"
+    service.last_missing = []
+
+    result = service.analyze(source, 3)
+
+    assert [item["text"] for item in result.semantic_missing] == ["ただだ", "見落とし"]
+    assert all(item["unconfirmed"] for item in result.semantic_missing)
+    assert unsafe_semantic_missing(result, True) == []
 
 
 def test_manga_ocr_gpu_choice_is_independent_from_paddle():
@@ -623,6 +723,24 @@ def test_repeated_mixed_kana_ocr_noise_is_preserved_as_sfx():
     assert likely_sfx_text("そのカキノカキ") is True
     assert likely_sfx_text("このゲーム") is False
     assert likely_sfx_text("サナはいつも") is False
+
+
+def test_latin_sound_words_are_effects_but_latin_dialogue_is_not():
+    """English pages spell effects as words; without this every GRRRRR became
+    a phonetic Chinese transliteration instead of a sound."""
+    assert likely_sfx_text("Grrrrr") is True
+    assert likely_sfx_text("poof") is True
+    assert likely_sfx_text("AUGH!") is True
+    assert likely_sfx_text("STUPID MASK") is False
+    assert likely_sfx_text("Banana") is False
+
+
+def test_repeated_latin_sound_words_are_one_effect():
+    """English pages double their effects ("sniff snif"); reading the pair as a
+    sentence turned it into the half-transliterated "嗅嗅，尼夫"."""
+    assert likely_sfx_text("sniff snif") is True
+    assert likely_sfx_text("poof poof") is True
+    assert likely_sfx_text("you sniff") is False
 
 
 def test_windows_cpu_detector_disables_mkldnn_regression():
@@ -760,6 +878,56 @@ def test_recognition_candidates_can_add_but_never_delete_detector_regions():
         [200, 10, 280, 120],
         [400, 10, 480, 120],
     ]
+
+
+def test_single_glyph_spread_over_artwork_loses_its_text():
+    """A 1-glyph "box" covering 160x137 px of drawing is a mis-read, not a line."""
+    payload = {
+        "rec_boxes": [[339, 966, 499, 1103], [275, 919, 357, 940]],
+        "rec_texts": ["X", "UHM..I-I MEAN."],
+        "rec_scores": [0.896, 0.798],
+    }
+    regions = PaddleMangaOCR._regions(payload)
+    assert [item["text"] for item in regions] == ["", "UHM..I-I MEAN."]
+
+
+def test_english_region_keeps_paddle_text_instead_of_mangaocr_kana():
+    """MangaOCR hallucinates kana for English bubbles; Paddle reads them fine."""
+    group = [{"box": [10, 10, 300, 120], "text": "STUPID MASK TODAY?", "score": 0.94}]
+    text, score = _best_recognized_text(group)
+    assert _is_latin_region(text, score) is True
+    # Without this guard the Japanese-only reader replaced the line with
+    # made-up kana that still passed the JP_RE filter.
+    assert _is_latin_region("いや、そういうことですが、", 0.94) is False
+    assert _is_latin_region("STUPID MASK", 0.40) is False
+    assert _is_latin_region("２０１５年１０月１４日", 0.95) is False
+
+
+def test_latin_page_drops_text_less_artwork_boxes():
+    """A Latin page keeps only boxes that carry a string.
+
+    Text-less detector boxes are artwork on an English page; keeping them
+    inflated unit bboxes and bridged two balloons into one unit.
+    """
+    latin = [
+        {"box": [10, 10, 300, 40], "text": "ASK YOUR MOTHER", "score": 0.94},
+        {"box": [10, 400, 300, 600], "text": "", "score": 0.90},
+    ]
+    assert is_latin_page(latin) is True
+    assert is_latin_page([{"box": [0, 0, 9, 9], "text": "それは", "score": 0.9}]) is False
+
+
+def test_english_only_book_survives_the_japanese_character_filter():
+    """A page of pure English must not be dropped for lacking JP_RE matches."""
+    assert JP_RE.search("DO YOU REALLY HAVE TO WEAR THAT STUPID MASK TODAY?") is None
+    text, score = _best_recognized_text(
+        [
+            {"box": [10, 10, 300, 120], "text": "DO YOU", "score": 0.88},
+            {"box": [10, 130, 300, 240], "text": "HAVE TO WEAR", "score": 0.91},
+        ]
+    )
+    assert (text, score) == ("DO YOU HAVE TO WEAR", 0.91)
+    assert _is_latin_region(text, score) is True
 
 
 def test_semantic_ocr_cannot_replace_a_complete_line_with_its_prefix():
@@ -963,7 +1131,9 @@ def test_ollama_vision_ocr_retries_truncated_structured_output(
 
     def truncated_then_complete(request, timeout):
         body = json.loads(request.data.decode("utf-8"))
-        calls.append((body["options"]["num_predict"], timeout))
+        calls.append(
+            (body["options"]["num_predict"], body["options"].get("repeat_penalty"))
+        )
         if len(calls) == 1:
             payload = {
                 "done_reason": "length",
@@ -981,7 +1151,10 @@ def test_ollama_vision_ocr_retries_truncated_structured_output(
     )
 
     assert page.units == []
-    assert [budget for budget, _timeout in calls] == [8192, 12_288]
+    # A dense page can degenerate into repeating one glyph with ever-growing
+    # coordinates until the budget runs out, so the retry must also penalise
+    # repeats; raising the budget alone never terminates.
+    assert calls == [(8192, None), (12_288, 1.3)]
 
 
 def test_ollama_vision_ocr_rejects_repeated_truncation(monkeypatch, tmp_path):

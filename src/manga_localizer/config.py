@@ -16,11 +16,12 @@ class AppPaths:
 
     @classmethod
     def from_env(cls) -> "AppPaths":
-        root = (
-            Path(os.environ.get("MLS_HOME", Path.home() / ".manga-localizer-studio"))
-            .expanduser()
-            .resolve()
-        )
+        # No .resolve(): paddle's C++ inference and torch.jit.load cannot open
+        # non-ASCII paths, and resolve() would turn an ASCII junction
+        # (MLS_HOME=E:\mls\data) back into the real Chinese directory.
+        root = Path(
+            os.environ.get("MLS_HOME", Path.home() / ".manga-localizer-studio")
+        ).expanduser()
         return cls(
             root=root,
             models=root / "models",

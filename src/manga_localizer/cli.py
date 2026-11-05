@@ -16,7 +16,7 @@ import typer
 from . import __version__
 from .api import create_app
 from .config import AppPaths, UserSettings
-from .model_manager import MODEL_REGISTRY, ModelManager
+from .model_manager import MODEL_REGISTRY, ModelManager, OllamaRuntime, ollama_tags
 from .pipeline import LocalizerPipeline, PipelineRequest
 from .renderer import ensure_bold_font, ensure_font, find_bold_font, find_font
 from .translator import DEFAULT_LOCAL_TRANSLATION_MODEL
@@ -84,7 +84,12 @@ def ui(
             target=lambda: (time.sleep(1.0), webbrowser.open(f"http://{host}:{port}")),
             daemon=True,
         ).start()
-    uvicorn.run(create_app(), host=host, port=port)
+    # Keep a Server handle so the settings page can ask for a clean shutdown.
+    # `uvicorn.run()` hides it, and SIGINT on Windows would TerminateProcess.
+    application = create_app()
+    server = uvicorn.Server(uvicorn.Config(application, host=host, port=port))
+    application.state.server = server
+    server.run()
 
 
 @app.command("run")
@@ -226,7 +231,15 @@ def doctor(
         "home": str(paths.root),
         "settings": settings.__dict__,
         "models": ModelManager(paths).status(
-            settings.inference_backend, settings.quality_profile, settings.ocr_backend
+            settings.inference_backend,
+            settings.quality_profile,
+            settings.ocr_backend,
+            OllamaRuntime.from_settings(
+                settings,
+                ollama_tags(settings.ollama_base_url)
+                if settings.inference_backend == "ollama"
+                else None,
+            ),
         ),
         "font": _font_status(find_font, paths),
         "bold_font": _font_status(find_bold_font, paths),

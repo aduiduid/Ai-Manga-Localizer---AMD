@@ -277,6 +277,28 @@ def test_lexicalized_apology_is_not_treated_as_logical_negation():
     assert PromptTranslator()._candidate_is_acceptable(unit, "有点抱歉呢……", {})
 
 
+def test_forcible_muri_is_not_treated_as_negation():
+    """無理に/無理やり is "forcibly", not "impossible"."""
+    unit = TextUnit(
+        "p007u08",
+        [469, 569, 533, 772],
+        [459, 559, 543, 782],
+        "ならば魔法で無理にでもそういう気持ちにさせてやろうか",
+        0.94,
+    )
+    assert PromptTranslator._source_negation_contract(unit.ja) == (
+        False,
+        False,
+        False,
+        False,
+    )
+    assert PromptTranslator()._candidate_is_acceptable(
+        unit, "那就用魔法强行让她产生那种心情吧", {}
+    )
+    # A real 無理 (impossible) still demands a negation in Chinese.
+    assert PromptTranslator._source_negation_contract("それは無理だ")[0] is True
+
+
 def test_repeated_short_vocalization_allows_natural_two_glyph_contraction():
     unit = TextUnit(
         "p052u04",
@@ -1309,3 +1331,181 @@ def test_semantic_retranslation_uses_bounded_non_thinking_json_for_risk_units():
         [page], {unit.id}, {}, preserve_sfx=True
     )
     assert unit.zh == "别插到最里面"
+
+
+def test_retranslation_never_overwrites_an_accepted_translation():
+    """An accepted translation is final: retranslate may rescue a rejected
+    line but must not clobber a good one with a hallucinated rewrite
+    (date bleed, dropped clause, wrong word). Regression for the quality
+    complaint where the last attempt almost always made things worse."""
+    class Auditor(OllamaTranslator):
+        def _generate_json(self, prompt, schema, max_new_tokens=4096, think=False):
+            del prompt, schema, max_new_tokens
+            # A worse hallucinated rewrite (date bleeds in from the next line).
+            return {"items": [{"id": "p001u01", "zh": "既成那般，自 2015 年 10 月 14 日"}]}
+
+    unit = TextUnit(
+        "p001u01",
+        [0, 0, 20, 80],
+        [0, 0, 20, 80],
+        "まぁ、そういったくなったのですから、",
+        0.96,
+        zh="嘛，既然都变成这样了，",
+    )
+    unit.translation_attempts = ["嘛，既然都变成这样了，"]
+    page = PageOCR(1, "001.png", 100, 100, [unit])
+    Auditor("http://localhost:11434", "local-9b").retranslate_risk_units(
+        [page], {unit.id}, {}, preserve_sfx=True
+    )
+    assert unit.zh == "嘛，既然都变成这样了，"
+    assert unit.translation_attempts == [
+        "嘛，既然都变成这样了，",
+        "既成那般，自 2015 年 10 月 14 日",
+    ]
+
+
+def test_retranslation_still_rescues_a_rejected_line():
+    """The guard only protects accepted text: a line rejected by the hard
+    gates is still overwritten by an acceptable retranslation."""
+    class Auditor(OllamaTranslator):
+        def _generate_json(self, prompt, schema, max_new_tokens=4096, think=False):
+            del prompt, schema, max_new_tokens
+            return {"items": [{"id": "p001u01", "zh": "既成那般，自 2015 年 10 月 14 日"}]}
+
+    unit = TextUnit(
+        "p001u01",
+        [0, 0, 20, 80],
+        [0, 0, 20, 80],
+        "まぁ、そういったくなったのですから、",
+        0.96,
+        # 假名泄漏 -> rejected by the hard gates.
+        zh="まぁ、そういったくなったのですから、",
+    )
+    page = PageOCR(1, "001.png", 100, 100, [unit])
+    Auditor("http://localhost:11434", "local-9b").retranslate_risk_units(
+        [page], {unit.id}, {}, preserve_sfx=True
+    )
+    assert unit.zh == "既成那般，自 2015 年 10 月 14 日"
+
+
+def test_judge_never_overwrites_an_accepted_translation():
+    """Same accepted-is-final rule for judge_candidates: a rewrite choice may
+    resolve a rejected line, never replace a good translation."""
+    class Auditor(OllamaTranslator):
+        def _generate_json(self, prompt, schema, max_new_tokens=4096, think=False):
+            del prompt, schema, max_new_tokens
+            return {"items": [{"id": "p001u01", "choice": "rewrite", "final": "既成那般，自 2015 年 10 月 14 日"}]}
+
+    unit = TextUnit(
+        "p001u01",
+        [0, 0, 20, 80],
+        [0, 0, 20, 80],
+        "まぁ、そういったくなったのですから、",
+        0.96,
+        zh="嘛，既然都变成这样了，",
+    )
+    unit.translation_attempts = ["嘛，既然都变成这样了，"]
+    page = PageOCR(1, "001.png", 100, 100, [unit])
+    Auditor("http://localhost:11434", "local-9b").judge_candidates(
+        [page], {unit.id: "嘛，既然都变成这样了，"}, {}, preserve_sfx=True
+    )
+    assert unit.zh == "嘛，既然都变成这样了，"
+
+
+def test_english_book_is_labelled_and_cannot_echo_the_source():
+    """An English book must not be described as Japanese, and a translation
+    that echoes the Latin source is not an acceptable translation."""
+    from manga_localizer.translator import source_language_label
+
+    english = PageOCR(
+        1,
+        "001.png",
+        100,
+        100,
+        [
+            TextUnit(
+                "p001u01",
+                [0, 0, 20, 80],
+                [0, 0, 20, 80],
+                "DO YOU REALLY HAVE TO WEAR THAT STUPID MASK",
+                0.94,
+            )
+        ],
+    )
+    japanese = PageOCR(
+        1,
+        "001.png",
+        100,
+        100,
+        [
+            TextUnit(
+                "p001u01",
+                [0, 0, 20, 80],
+                [0, 0, 20, 80],
+                "そんなことはないでしょうか。",
+                0.94,
+            )
+        ],
+    )
+    assert source_language_label([english]) == "英文"
+    assert source_language_label([japanese]) == "日文"
+    assert source_language_label([]) == "日文"
+
+    unit = english.units[0]
+    assert PromptTranslator._valid_translation(unit, "You really have to wear that mask") is False
+    assert PromptTranslator._valid_translation(unit, "你今天真的非得戴那个蠢面具吗") is True
+    # A Japanese source still tolerates a Latin loan word it actually contains.
+    latin_unit = TextUnit(
+        "p002u01",
+        [0, 0, 20, 80],
+        [0, 0, 20, 80],
+        "これはＰＲＥＣＥＡＮＴＡＹＡです",
+        0.9,
+    )
+    assert PromptTranslator._valid_translation(latin_unit, "这是PRECANT AYA") is True
+
+
+def test_prompts_follow_the_source_language():
+    """Every prompt used to hardcode "Japanese", so an English book was
+    translated as if its Latin text were Japanese."""
+    class Editor(OllamaTranslator):
+        def __init__(self):
+            super().__init__("http://localhost:11434", "local-9b")
+            self.prompts = []
+
+        def _generate(self, prompt, max_new_tokens=1600):
+            self.prompts.append(prompt)
+            return ""
+
+    editor = Editor()
+    unit = TextUnit(
+        "p001u01",
+        [0, 0, 500, 500],
+        [0, 0, 500, 500],
+        "DO YOU REALLY HAVE TO WEAR THAT STUPID MASK",
+        0.94,
+    )
+    page = PageOCR(1, "001.png", 800, 1132, [unit])
+    editor.translate_pages([page], progress=None)
+    assert editor.source_language == "英文"
+    joined = "\n".join(editor.prompts)
+    assert "英文漫画" in joined
+    assert "日语漫画" not in joined
+    assert "日文假名" not in joined
+
+
+def test_half_translated_english_line_is_rejected():
+    """Echoing a run of English words inside the Chinese is not a translation.
+    A proper noun or two (Alcor, Twily) is allowed; a whole phrase is not."""
+    unit = TextUnit(
+        "p003u01",
+        [0, 0, 20, 80],
+        [0, 0, 20, 80],
+        "Display oPassion 6y Alcor",
+        0.98,
+    )
+    assert PromptTranslator._valid_translation(unit, "Display 展现 oPassion 6 年 Alcor") is False
+    assert PromptTranslator._valid_translation(unit, "Alcor展示激情") is True
+    # Leaving a whole English title in place is the same failure, only longer.
+    assert PromptTranslator._valid_translation(unit, "Display of Passion，作者 Alcor") is False
+    assert PromptTranslator._valid_translation(unit, "激情展示，作者 Alcor") is True

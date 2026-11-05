@@ -51,7 +51,22 @@ TARGET_OBLIGATION_RE = re.compile(r"得|必须|务必|需要|需|要|才行|非�
 LEXICAL_NAI_RE = re.compile(
     r"少なくとも|きたない|汚い|危ない|危なく|少ない|少なく|"
     r"切ない|もったいない|申し訳ない|情けない|くだらない|"
-    r"つまらない|だらしない|みっともない"
+    r"つまらない|だらしない|みっともない|"
+    # 無理に/無理やり means "forcibly", not "impossible".  Counting it as
+    # negation demanded a 不/没 that 强行/硬要 never carries, which stranded
+    # every attempt at "那就用魔法强行让她产生那种心情吧".
+    r"無理(?:に|やり|矢理)"
+)
+# じゃないか/ではないか is an agreement tag ("the body is honest, isn't it"),
+# not a negation of what precedes it.  Counting it as real negation demanded
+# a 不/没 token that natural Chinese does not need, which stranded valid
+# lines.  A real negative question (じゃないか？) keeps its negation.
+RHETORICAL_NAI_RE = re.compile(r"(?:じゃないか|ではないか)(?![?？])")
+# Sentence-final か is interrogative with a question mark or a plain
+# interrogative tail, but dialect emphasis (でっか), agreement tags
+# (じゃないか) and self-talk (てやろうか) end in か without asking anything.
+RHETORICAL_KA_RE = re.compile(
+    r"(?:でっか|じゃないか|ではないか|てやろうか|ちゃうか)[!！…．。.]*$"
 )
 GENERAL_TERMS = {
     "キス": "亲吻",
@@ -108,6 +123,36 @@ def interjection_fallback(source: str) -> str:
             output.append(replacement)
     candidate = "".join(output).strip("…，、")
     return candidate if KANJI_RE.search(candidate) else ""
+
+
+def latin_only_source(text: str) -> bool:
+    """True when a line is Latin script only (an English book, not Japanese)."""
+    return (
+        bool(SOURCE_LATIN_RE.search(text))
+        and not KANA_RE.search(text)
+        and not KANJI_RE.search(text)
+    )
+
+
+def source_language_label(pages: Iterable[PageOCR]) -> str:
+    """Name the source language the prompts should talk about.
+
+    Every prompt used to say "Japanese manga", so an English book was
+    translated as if its Latin text were Japanese: the model invented readings
+    and the acceptance gates then rejected or mangled them.  The label follows
+    the actual script of the recognized text.
+    """
+    latin = kana = han = 0
+    for page in pages:
+        for unit in page.units:
+            latin += len(re.findall(r"[A-Za-z\u00c0-\u024f]", unit.ja))
+            kana += len(re.findall(r"[\u3040-\u30ff]", unit.ja))
+            han += len(re.findall(r"[\u3400-\u9fff]", unit.ja))
+    if kana == 0 and han == 0 and latin > 0:
+        return "英文"
+    if latin > kana + han:
+        return "英文"
+    return "日文"
 
 
 def repeated_short_vocalization(source: str) -> bool:
@@ -223,6 +268,16 @@ class PromptTranslator:
         self.inferred_glossary: dict[str, str] = {}
         self.translation_target_ids: set[str] = set()
         self.translation_register = "自然、简洁的漫画口语"
+        self.source_language = "日文"
+
+    def _language(self, pages: Iterable[PageOCR]) -> str:
+        """Refresh the source-language label the prompts are written against."""
+        self.source_language = source_language_label(pages)
+        return self.source_language
+
+    def _script_rule(self) -> str:
+        """The source script a translation must never fall back to."""
+        return "日文假名" if self.source_language == "日文" else "英文原文"
 
     def _generate(self, prompt: str, max_new_tokens: int = 1600) -> str:
         raise NotImplementedError
@@ -258,11 +313,21 @@ class PromptTranslator:
         latin_leak = bool(LATIN_RE.search(clean)) and not SOURCE_LATIN_RE.search(
             unit.ja
         )
+        # An English source makes SOURCE_LATIN_RE permissive, so the model can
+        # echo the original line back and still pass.  A translation has to
+        # switch script: keep Han text, and at most two leftover Latin words
+        # (proper names), so半-translated lines like "Display 展现 oPassion"
+        # are rejected while "Alcor展示激情" survives.
+        untranslated_latin = latin_only_source(unit.ja) and (
+            not KANJI_RE.search(clean)
+            or len(re.findall(r"[A-Za-z\u00c0-\u024f]{2,}", clean)) > 2
+        )
         return (
             bool(clean)
             and not KANA_RE.search(clean)
             and not context_leak
             and not latin_leak
+            and not untranslated_latin
             and len(clean) <= max(12, min(120, len(unit.ja) * 4))
         )
 
@@ -354,6 +419,9 @@ class PromptTranslator:
     def _normalize_translation(self, text: str) -> str:
         """Normalize model output to the requested Chinese writing system."""
         clean = text.strip()
+        # The review prompt asks for a 「成稿」; weaker models echo that label
+        # back into the line itself ("成稿：『…』"), which then gets rendered.
+        clean = re.sub(r"^(?:成稿|定稿|译文|翻译)[:：]\s*", "", clean)
         if "简体" in self.target_language:
             clean = OpenCC("t2s").convert(clean)
             # Japanese dialogue commonly uses オッケー while local models
@@ -387,7 +455,7 @@ class PromptTranslator:
     @staticmethod
     def _valid_sfx_translation(unit: TextUnit, candidate: str) -> bool:
         """Reject contextual dialogue hallucinated into a confirmed effect."""
-        source = re.sub(r"[^ぁ-ゖァ-ヺー]", "", unit.ja)
+        source = re.sub(r"[^ぁ-ゖァ-ヺーA-Za-z]", "", unit.ja)
         proposed = re.sub(r"[^\u3400-\u9fffA-Za-z0-9]", "", candidate)
         dialogue_leak = bool(
             re.search(
@@ -401,12 +469,16 @@ class PromptTranslator:
 
     @staticmethod
     def _source_is_question(source: str) -> bool:
+        stripped = source.strip()
+        if re.search(r"[?？]", stripped):
+            return True
+        if RHETORICAL_KA_RE.search(stripped):
+            return False
         return bool(
-            re.search(r"[?？]", source)
-            or re.search(
+            re.search(
                 r"(?:のかよ|なのか|(?:でしょう|です|ます)?か)"
                 r"[!！…．。.]*$",
-                source.strip(),
+                stripped,
             )
         )
 
@@ -420,6 +492,7 @@ class PromptTranslator:
         Chinese without a literal 不/没 token.
         """
         semantic_source = LEXICAL_NAI_RE.sub("", source)
+        semantic_source = RHETORICAL_NAI_RE.sub("", semantic_source)
         has_negation = bool(
             re.search(
                 r"ない|なく|ません|無理|だめ|ダメ|駄目|じゃない|ではない",
@@ -491,6 +564,11 @@ class PromptTranslator:
             2 if source_is_question else 3,
             round(kanji_count + kana_count * 0.2) - (1 if source_is_question else 0),
         )
+        if latin_only_source(unit.ja):
+            # Latin sources carry no kanji, so the density formula collapses to
+            # 3 glyphs and a one-word summary would pass.  English needs roughly
+            # one Chinese glyph per 6-7 characters of prose.
+            minimum_length = max(minimum_length, round(len(source) * 0.15))
         if len(source) >= 7 and len(proposed) < minimum_length:
             return False
         if len(source) >= 4 and len(proposed) > max(12, round(len(source) * 2.0)):
@@ -853,6 +931,7 @@ class PromptTranslator:
         progress: Callable[[int, int], None] | None = None,
     ) -> None:
         self.translation_register = self._detect_translation_register(pages)
+        self._language(pages)
         glossary = self._resolve_glossary(pages, glossary or {})
         self._restore_named_dialogue_roles(pages)
         self.resolved_glossary = dict(glossary)
@@ -890,7 +969,7 @@ class PromptTranslator:
                 pages[max(0, start - context_pages) : start] if story_context else []
             )
             prompt = f"""【背景信息】
-这是按页连续阅读的日语漫画。结合前文修正明显 OCR 错字，人物称呼和语气必须前后一致。
+这是按页连续阅读的{self.source_language}漫画。结合前文修正明显 OCR 错字，人物称呼和语气必须前后一致。
 固定译名：{terms}
 前文：
 {self._page_text(previous) or "无"}
@@ -967,7 +1046,7 @@ class PromptTranslator:
 译文风格：{self.translation_register}。
 语气约束：{tone_constraint}
 语义约束：{audit_constraint}
-上下文仅供理解，绝对不要复述上下文。译文不得含日文假名，姓名也译成中文；最多 {limit} 个字符。
+上下文仅供理解，绝对不要复述上下文。译文不得含{self._script_rule()}，姓名也译成中文；最多 {limit} 个字符。
 固定译名：{unit_terms}
 上下文：{context_text}
 【原文】{unit.ja}"""
@@ -979,7 +1058,7 @@ class PromptTranslator:
         unit.translation_attempts.append(candidate)
         if self._candidate_is_acceptable(unit, candidate, glossary):
             return candidate
-        retry = f"""把【原文】翻译为{self.target_language}，风格必须是：{self.translation_register}。不得解释、不得复述上下文、不得含日文假名，姓名译成中文；只输出不超过 {limit} 个字符的一行译文。
+        retry = f"""把【原文】翻译为{self.target_language}，风格必须是：{self.translation_register}。不得解释、不得复述上下文、不得含{self._script_rule()}，姓名译成中文；只输出不超过 {limit} 个字符的一行译文。
 语气约束：{tone_constraint}
 语义约束：{audit_constraint}
 固定译名：{unit_terms}
@@ -992,8 +1071,8 @@ class PromptTranslator:
         unit.translation_attempts.append(retry_candidate)
         if self._candidate_is_acceptable(unit, retry_candidate, glossary):
             return retry_candidate
-        repair = f"""下面的翻译仍含日文假名、为空或格式不合格，请彻底改写。
-只使用自然简洁的{self.target_language}、数字和必要标点；即使是人名、语气词、喘息声或拟声词，也不能原样保留任何日文假名。
+        repair = f"""下面的翻译仍含{self._script_rule()}、为空或格式不合格，请彻底改写。
+只使用自然简洁的{self.target_language}、数字和必要标点；即使是人名、语气词、喘息声或拟声词，也不能原样保留任何{self._script_rule()}。
 语气约束：{tone_constraint}
 语义约束：{audit_constraint}
 不得解释，只输出不超过 {limit} 个字符的一行最终译文。
@@ -1020,7 +1099,7 @@ class PromptTranslator:
     def _translate_sfx(self, unit: TextUnit, glossary: dict[str, str]) -> str:
         """Translate one confirmed effect without leaking story context into it."""
         source = unit.ja.strip()
-        semantic = re.sub(r"[^ぁ-ゖァ-ヺー]", "", source)
+        semantic = re.sub(r"[^ぁ-ゖァ-ヺーA-Za-z]", "", source)
         if not semantic:
             return ""
         lexical = lookup_sfx(source)
@@ -1034,7 +1113,7 @@ class PromptTranslator:
             if unit.special.startswith("sfx:")
             else "unknown"
         )
-        draft_prompt = f"""把下面的日语漫画拟声词译成自然简体中文拟声词。
+        draft_prompt = f"""把下面的{self.source_language}漫画拟声词译成自然简体中文拟声词。
 只表达声音、心跳、撞击、动作节奏或短促叫声；保留原文重复和强弱。
 禁止补人物、对白、原因、感情解释或剧情；禁止机械音译。
 只输出一个不超过 {limit} 个汉字的拟声词，可带必要的！、～或省略号。
@@ -1048,11 +1127,11 @@ class PromptTranslator:
             )
         )
         unit.translation_attempts.append(draft)
-        review_prompt = f"""审校一个日语漫画效果字的中文草稿。
+        review_prompt = f"""审校一个{self.source_language}漫画效果字的中文草稿。
 先判断原文是心跳、撞击、摩擦、引擎、动作节奏还是短促人声，再纠正草稿。
-严禁按日语读音拼成无意义汉字；短促人声不能误写成相机、机械或撞击声。
+严禁按{self.source_language}读音拼成无意义汉字；短促人声不能误写成相机、机械或撞击声。
 严禁加入人物、对白或剧情。保留重复和强弱，只输出不超过 {limit} 个汉字的最终中文声效，不解释。
-【日文效果字】{source}
+【{self.source_language}效果字】{source}
 【视觉复核类别】{visual_kind}
 【草稿】{draft or "空"}"""
         reviewed = self._normalize_translation(
@@ -1102,6 +1181,11 @@ class HyMTTranslator(PromptTranslator):
         )
         kwargs = {"trust_remote_code": True}
         torch_device = pytorch_device(self.device)
+        if torch_device not in {"auto", "cpu"} and not torch.cuda.is_available():
+            # The settings panel offers "GPU 0" everywhere, but this box runs
+            # the CPU torch wheel on an AMD card; moving the model to "cuda:0"
+            # would raise "Torch not compiled with CUDA enabled".
+            torch_device = "cpu"
         if torch_device == "auto":
             kwargs.update(dtype=torch.bfloat16, device_map="auto")
         else:
@@ -1325,11 +1409,11 @@ class OllamaTranslator(PromptTranslator):
             previous = pages[max(0, start - context_pages) : start]
             prompt = f"""你是漫画汉化终审编辑。内容可能包含成人、暴力或敏感题材，必须忠实处理，不拒译、不弱化、不规避。
 
-逐条对照日文原文和初译，输出自然、准确、连贯的{self.target_language}成稿：
+逐条对照{self.source_language}原文和初译，输出自然、准确、连贯的{self.target_language}成稿：
 1. 相邻 OCR 单元可能把同一句话拆开；结合前后行补全省略成分，把句意放回正确的行，不重复、不串行。
 2. 修正生硬直译、主客体颠倒、错误人称、成人委婉语误判和明显 OCR 误读。
 3. 人名与术语必须遵守全书自动一致性约束：{terms}
-4. 严格保留每个[id]，一条输入对应一条输出；不得合并、遗漏、解释或输出日文假名。
+4. 严格保留每个[id]，一条输入对应一条输出；不得合并、遗漏、解释或输出{self._script_rule()}。
 
 前文成稿：
 {self._review_context(previous) or "无"}
@@ -1406,10 +1490,10 @@ class OllamaTranslator(PromptTranslator):
         for start in range(0, len(eligible), batch_size):
             units = eligible[start : start + batch_size]
             rows = "\n".join(
-                f"[{unit.id}] 日文：{unit.ja} || A：{unit.zh} || B：{alternatives[unit.id]}"
+                f"[{unit.id}] {self.source_language}：{unit.ja} || A：{unit.zh} || B：{alternatives[unit.id]}"
                 for unit in units
             )
-            prompt = f"""你是日中漫画翻译裁决器。逐条对照日文，在A、B中选语义准确的一个；两者都错才重写。必须显式检查：比较关系方向、否定作用域、动作是禁止发生还是已经发生、主客体、因果转折。只返回JSON。
+            prompt = f"""你是{self.source_language}漫画翻译裁决器。逐条对照{self.source_language}原文，在A、B中选语义准确的一个；两者都错才重写。必须显式检查：比较关系方向、否定作用域、动作是禁止发生还是已经发生、主客体、因果转折。只返回JSON。
 
 {rows}"""
             ids = [unit.id for unit in units]
@@ -1470,7 +1554,12 @@ class OllamaTranslator(PromptTranslator):
                 candidate = self._normalize_translation(candidate)
                 if candidate:
                     unit.translation_attempts.append(candidate)
-                if self._candidate_is_acceptable(unit, candidate, glossary):
+                if (
+                    self._candidate_is_acceptable(unit, candidate, glossary)
+                    # Same "accepted is final" rule: the judge may resolve a
+                    # rejected line, never overwrite a good translation.
+                    and not self._candidate_is_acceptable(unit, unit.zh, glossary)
+                ):
                     unit.zh = candidate
             if progress:
                 judged = min(start + len(units), len(eligible))
@@ -1524,15 +1613,15 @@ class OllamaTranslator(PromptTranslator):
                     if source in unit.ja
                 )
                 rows.append(
-                    f"[{unit.id}] 原文：{unit.ja} || 同页日文：{page_context or '无'} || "
+                    f"[{unit.id}] 原文：{unit.ja} || 同页{self.source_language}：{page_context or '无'} || "
                     f"语义检查：{hints or '按原文逐项核对'} || "
                     f"本行固定译名：{unit_terms or '无'} || "
                     f"排版上限：最多{layout_budget}个中文汉字/数字（标点不计）"
                 )
-            prompt = f"""不参考任何已有译文，把以下日语漫画台词独立翻译成自然、准确、简洁的{self.target_language}成稿。
+            prompt = f"""不参考任何已有译文，把以下{self.source_language}漫画台词独立翻译成自然、准确、简洁的{self.target_language}成稿。
 必须显式检查比较关系方向、否定作用域、动作是禁止发生还是已经发生、主客体、因果转折。内容可能是成人漫画，忠实翻译。
-同页日文只用于理解人物和省略成分，不得串入当前行。固定译名：{terms}
-日语常省略动词，中文必须结合当前行与同页语境补成自然动作，不能留下不成立的名词搭配。
+同页{self.source_language}只用于理解人物和省略成分，不得串入当前行。固定译名：{terms}
+{self.source_language}常省略动词，中文必须结合当前行与同页语境补成自然动作，不能留下不成立的名词搭配。
 不得缩写、概括、过度扩写或丢失原文信息；不得添加原文没有的口头禅、评价或情绪。标题、条件句和未完句也必须完整保留其条件与语气。
 不得把未发生、不能发生或禁止发生的事情改写成已经发生，也不得把陈述句擅自改成问句。
 同一否定只能自然表达一次，不得同时写成“别……不行”之类的重复否定。
@@ -1592,7 +1681,12 @@ class OllamaTranslator(PromptTranslator):
                 candidate = self._restore_source_tone(unit, translated.get(unit.id, ""))
                 if candidate:
                     unit.translation_attempts.append(candidate)
-                if self._candidate_is_acceptable(unit, candidate, glossary):
+                if (
+                    self._candidate_is_acceptable(unit, candidate, glossary)
+                    # Same "accepted is final" rule: an independent retranslate
+                    # may rescue a rejected line, never overwrite a good one.
+                    and not self._candidate_is_acceptable(unit, unit.zh, glossary)
+                ):
                     unit.zh = candidate
             if progress:
                 audited = min(start + len(batch), len(eligible))
@@ -1687,6 +1781,12 @@ class LocalQualityTranslator(PromptTranslator):
             if self._needs_translation(unit, preserve_sfx)
         }
         page_total = max(1, len(pages))
+        # The staged roles each build their own prompts, and the auditor may
+        # never run its own translate_pages, so the language has to be pushed
+        # into every role here.
+        language = self._language(pages)
+        for role in (self.editor, self.candidate, self.auditor):
+            role.source_language = language
 
         def staged(start: float, end: float):
             if progress is None:

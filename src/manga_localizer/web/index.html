@@ -18,6 +18,11 @@
         <button class="nav-item" data-view="models"><span>⬡</span><b data-i18n="nav.models">模型管理</b></button>
         <button class="nav-item" data-view="settings"><span>⚙</span><b data-i18n="nav.settings">设置</b></button>
       </nav>
+      <div class="job-status" id="jobStatus">
+        <span class="job-dot"></span>
+        <div><b id="jobStatusText" data-i18n="job.notStarted">尚未开始任务</b><small id="jobStatusDetail" data-i18n="job.idle">等待开始</small><small id="jobClock" class="job-clock"></small></div>
+        <button id="cancelJob" type="button" class="job-stop" hidden data-i18n="job.cancel">结束</button>
+      </div>
       <div class="local-note"><span></span><div><b id="privacyBadgeTitle">本地模式</b><small id="privacyBadgeDetail">数据不会离开设备</small></div></div>
       <p id="versionLabel" class="version">MIT License</p>
     </aside>
@@ -60,6 +65,7 @@
                 <figure class="preview-pane output-pane"><figcaption data-i18n="preview.output">译文</figcaption><img id="outputPreview" alt="本地化页面预览" data-i18n-alt="preview.output.alt"><div id="outputPending" class="preview-pending" role="status" data-i18n="preview.output.waiting">等待生成译文页面</div></figure>
               </div>
               <div class="pager"><button id="prevPage" aria-label="上一页" data-i18n-aria-label="preview.previous" disabled>‹</button><span><b id="pageNumber">0</b> / <span id="pageTotal">0</span></span><button id="nextPage" aria-label="下一页" data-i18n-aria-label="preview.next" disabled>›</button></div>
+              <div class="page-slider"><input id="pageSlider" type="range" min="1" max="1" value="1" step="1" disabled aria-label="跳转页面" data-i18n-aria-label="preview.jump"><span id="pageSliderLabel" class="page-slider-label">1 / 1</span></div>
             </section>
 
             <aside class="inspector">
@@ -89,12 +95,12 @@
           <section class="panel execution-bar" data-testid="execution-status">
             <div class="execution-copy"><span id="activityRing" class="activity-ring"></span><div><b id="jobMessage" data-i18n="job.notStarted">尚未开始任务</b><small id="jobDetail" data-i18n="job.selectFolders">选择源文件夹和输出目录后即可开始</small></div></div>
             <div class="progress-track"><i id="jobProgress"></i></div><span id="jobCount">0 / 0</span>
-            <button id="pauseButton" disabled title="当前版本不支持安全暂停" data-i18n-title="job.pauseUnsupported">Ⅱ <span data-i18n="job.pause">暂停</span></button>
+            <button id="pauseButton" disabled title="在当前页结束后暂停，模型与已完成的页面都会保留" data-i18n-title="job.pauseDetail"><span id="pauseButtonIcon">Ⅱ</span> <span id="pauseButtonLabel" data-i18n="job.pause">暂停</span></button>
           </section>
         </section>
 
         <section id="historyView" class="view utility-view" data-view-panel="history"><div class="utility-head"><div><h2 data-i18n="history.title">任务记录</h2><p data-i18n="history.detail">任务状态会保存在本机应用目录。</p></div><button id="refreshJobs" class="secondary-button" data-i18n="history.refresh">刷新</button></div><div id="jobList" class="utility-list"></div></section>
-        <section id="modelsView" class="view utility-view" data-view-panel="models"><div class="utility-head"><div><h2 data-i18n="modelPage.title">模型管理</h2><p data-i18n="modelPage.detail">默认优先从 ModelScope 下载；无等价模型时明确回退。</p></div><button id="bootstrapModelsLarge" class="primary-small" data-i18n="modelPage.prepareAll">准备全部模型</button></div><div id="modelListLarge" class="utility-list"></div></section>
+        <section id="modelsView" class="view utility-view" data-view-panel="models"><div class="utility-head"><div><h2 data-i18n="modelPage.title">模型管理</h2><p data-i18n="modelPage.detail">默认优先从 ModelScope 下载；无等价模型时明确回退。</p></div><div class="head-actions"><button id="refreshModelsLarge" class="text-button" aria-label="刷新模型状态" data-i18n-aria-label="models.refresh">↻</button><button id="bootstrapModelsLarge" class="primary-small" data-i18n="modelPage.prepareAll">准备全部模型</button></div></div><div id="modelListLarge" class="utility-list"></div></section>
         <section id="settingsView" class="view utility-view" data-view-panel="settings">
           <div class="utility-head"><div><h2 data-i18n="settings.title">设置</h2><p data-i18n="settings.detail">后端配置保存在本机；API 密钥仅保留在当前服务进程或环境变量中。</p></div><button id="checkInference" class="primary-small" data-i18n="settings.check">测试推理连接</button></div>
           <div class="panel settings-form">
@@ -118,6 +124,10 @@
             <label><span data-i18n="settings.device">计算设备</span><select id="deviceSetting"><option value="auto" data-i18n="settings.device.auto">自动选择</option><option value="cpu">CPU</option><option value="gpu:0">GPU 0</option></select></label>
             <label class="toggle-row"><span><b data-i18n="settings.modelscope">ModelScope 优先</b><small data-i18n="settings.modelscope.detail">适合中国大陆网络环境</small></span><input id="preferModelscope" type="checkbox"><i></i></label>
             <p id="appHome"></p>
+            <div class="danger-zone">
+              <div><b data-i18n="settings.quit.title">退出程序</b><small data-i18n="settings.quit.detail">关闭本机服务并停止正在运行的任务，已完成的页面会保留。</small></div>
+              <button id="quitApp" type="button" class="danger-button" data-i18n="settings.quit.button">退出程序</button>
+            </div>
           </div>
         </section>
       </div>

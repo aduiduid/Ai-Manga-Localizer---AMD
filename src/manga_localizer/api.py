@@ -4,6 +4,7 @@ import asyncio
 import os
 import platform
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .config import AppPaths, UserSettings
 from .jobs import JobService
-from .model_manager import ModelManager
+from .model_manager import ModelManager, OllamaRuntime, ollama_tags
 from .ocr import DEFAULT_OLLAMA_VISION_MODEL, list_images
 from .pipeline import PipelineRequest
 from .translator import (
@@ -29,6 +30,7 @@ from .translator import (
 
 class FolderRequest(BaseModel):
     initial: str | None = None
+    output: str | None = None
 
 
 class SettingsPayload(BaseModel):
@@ -135,9 +137,20 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     def model_status(refresh: bool = Query(False)):
         del refresh
         active = UserSettings.load(paths.settings)
+        runtime = OllamaRuntime.from_settings(
+            active,
+            # Only probe the service when it is actually the inference backend;
+            # a 3 s dead-socket wait on every page load is not worth it.
+            ollama_tags(active.ollama_base_url)
+            if active.inference_backend == "ollama"
+            else None,
+        )
         return {
             "models": models.status(
-                active.inference_backend, active.quality_profile, active.ocr_backend
+                active.inference_backend,
+                active.quality_profile,
+                active.ocr_backend,
+                runtime,
             ),
             "source_policy": "ModelScope first",
         }
@@ -308,7 +321,8 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         if not payload.initial:
             return {"path": ""}
         source = Path(payload.initial).expanduser()
-        return {"path": str(source.parent / f"{source.name}_localized")}
+        base = Path(payload.output).expanduser() if payload.output else source.parent
+        return {"path": str(base / f"{source.name}--已汉化")}
 
     @app.post("/api/jobs")
     def create_job(payload: JobPayload):
@@ -368,6 +382,27 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             raise HTTPException(404, "Job not found")
         return job
 
+    @app.post("/api/jobs/{job_id}/pause")
+    def pause_job(job_id: str):
+        job = jobs.pause(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return job
+
+    @app.post("/api/jobs/{job_id}/resume")
+    def resume_job(job_id: str):
+        job = jobs.resume(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return job
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str):
+        job = jobs.cancel(job_id)
+        if not job:
+            raise HTTPException(404, "Job not found")
+        return job
+
     @app.get("/api/jobs/{job_id}/preview/{kind}/{page_number}")
     def preview(job_id: str, kind: str, page_number: int):
         job = jobs.store.get(job_id)
@@ -375,7 +410,12 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             raise HTTPException(404, "Job not found")
         source = Path(job["request"]["source"])
         output = Path(job["request"]["output"])
-        files = list_images(source)
+        try:
+            files = list_images(source)
+        except ValueError as error:
+            # The source folder can be deleted after the job ran; the UI shows
+            # the message instead of a bare 500 in the console.
+            raise HTTPException(404, str(error)) from error
         if page_number < 1 or page_number > len(files):
             raise HTTPException(404, "Page not found")
         source_file = files[page_number - 1]
@@ -393,6 +433,38 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         if not path.exists():
             raise HTTPException(404, "Preview is not ready")
         return FileResponse(path)
+
+    @app.post("/api/shutdown")
+    def shutdown():
+        """Stop the local server.
+
+        Active jobs are cancelled first: the executor threads are non-daemon,
+        so a running pipeline would otherwise keep the process alive after
+        uvicorn stops.
+        """
+        for job in jobs.store.list():
+            if job["status"] in {"queued", "running", "paused"}:
+                jobs.cancel(job["id"])
+        server = getattr(app.state, "server", None)
+        if server is None:
+            raise HTTPException(409, "Server handle unavailable")
+        # Reply first, then stop: should_exit is checked on the next loop tick.
+        threading.Thread(
+            target=lambda: (time.sleep(0.4), setattr(server, "should_exit", True)),
+            daemon=True,
+        ).start()
+        return {"ok": True}
+
+    @app.middleware("http")
+    async def revalidate_web_assets(request, call_next):
+        # The bundled UI has no build step and no content hashes, so browsers
+        # heuristically cache app.js/i18n.js and keep rendering raw i18n keys
+        # after an upgrade.  Make them revalidate instead.
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith((".js", ".css", ".html")):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     web_dir = Path(__file__).resolve().parent / "web"
     app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")

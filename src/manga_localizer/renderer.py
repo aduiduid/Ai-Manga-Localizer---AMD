@@ -153,12 +153,20 @@ def _fit_vertical(
     preferred_size: int | None = None,
 ):
     start = min(height, max(20, preferred_size or min(160, width, height)))
-    for size in range(start, 19, -2):
+    for size in range(start, 11, -2):
         capacity = max(1, height // round(size * 1.08))
         columns = math.ceil(len(text) / capacity)
         if columns * round(size * 1.12) <= width:
             return _font(font_path, size), size, capacity
-    return _font(font_path, 20), 20, max(1, height // 22)
+    # Small round bubbles fit barely one glyph column, so the fixed 20px
+    # fallback spilled its columns past the bbox edge and the leftmost text
+    # was clipped.  Keep shrinking until the columns fit.
+    size = 12
+    capacity = max(1, height // round(size * 1.08))
+    while size > 7 and math.ceil(len(text) / capacity) * round(size * 1.12) > width:
+        size -= 1
+        capacity = max(1, height // round(size * 1.08))
+    return _font(font_path, size), size, capacity
 
 
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> list[str]:
@@ -184,14 +192,17 @@ def _fit_horizontal(
     preferred_size: int | None = None,
 ):
     start = min(height, max(20, preferred_size or min(160, height)))
-    for size in range(start, 19, -2):
+    for size in range(start, 7, -2):
         font = _font(font_path, size)
         lines = _wrap(draw, text, font, width)
         line_height = round(size * 1.24)
         if len(lines) * line_height <= height:
             return font, size, lines, line_height
-    font = _font(font_path, 20)
-    return font, 20, _wrap(draw, text, font, width), 25
+    # A long English line translated into Chinese needs far more glyphs than
+    # the source occupied, so stopping at 20px spilled the text out of the
+    # balloon.  Keep shrinking instead of overflowing the region.
+    font = _font(font_path, 8)
+    return font, 8, _wrap(draw, text, font, width), 10
 
 
 class ArtworkPreservingRenderer:
@@ -235,7 +246,19 @@ class ArtworkPreservingRenderer:
         # Japanese manga dialogue is conventionally vertical.  A union of
         # several vertical columns is often almost square, so aspect ratio
         # alone must only classify clearly wide strips as horizontal.
-        vertical = unit.special == "cover_title" or height >= width * 0.62
+        # A union of wide stacked lines (signs, captions, cover blurbs) is the
+        # exception: treating it as one vertical column inflates the type until
+        # the columns overflow the sign.  Per-column detector boxes are tall
+        # and narrow, so their shape separates the two layouts.
+        source_boxes = unit.erase_boxes or [unit.bbox]
+        stacked_lines = len(source_boxes) >= 2 and sum(
+            1
+            for box in source_boxes
+            if (box[2] - box[0]) > (box[3] - box[1])
+        ) >= len(source_boxes) / 2
+        vertical = unit.special == "cover_title" or (
+            height >= width * 0.62 and not stacked_lines
+        )
 
         dark = (gray < 105).astype(np.uint8)
         if dark.any():
@@ -279,9 +302,33 @@ class ArtworkPreservingRenderer:
         else:
             line_heights = [max(1, box[3] - box[1]) for box in erase_boxes]
             estimated = float(np.median(line_heights)) * (0.78 if outlined else 0.7)
+            if stacked_lines:
+                # Detector boxes on a sign wrap loosely around the glyphs, so
+                # their median height is an upper bound, not the em-size.  Using
+                # it fills the whole sign and pushes the last line off the
+                # plaque.  Budget the available height across the source lines
+                # instead.
+                estimated = min(
+                    estimated, height / max(1, len(erase_boxes)) * 0.62
+                )
         font_size = max(20, min(320, round(estimated)))
 
-        if mean < 145 and white_ratio < 0.35:
+        # Text colour is the polarity of the glyph pixels against the local
+        # background, not overall page brightness.  Cyan signboards and wood
+        # plaques carry black lettering while their mean luminance sits in the
+        # mid-tone range, so a fixed mean/white-ratio threshold renders white
+        # text on top of black source glyphs (and seeds an empty erase mask).
+        background_level = float(np.median(gray)) if gray.size else 255.0
+        darker_ratio = float((gray < background_level - 45).mean()) if gray.size else 0.0
+        brighter_ratio = (
+            float((gray > background_level + 45).mean()) if gray.size else 0.0
+        )
+        if halo_ratio >= 0.38 and float(dark.mean()) >= 0.01:
+            # Outlined lettering is a dark core inside a bright halo, so the
+            # halo *is* the stroke.  Counting bright ring pixels against dark
+            # cores would flip the polarity on thick outlines.
+            fill, stroke_fill = "black", "white"
+        elif brighter_ratio > darker_ratio:
             fill, stroke_fill = "white", "black"
         else:
             fill, stroke_fill = "black", "white"
@@ -310,10 +357,16 @@ class ArtworkPreservingRenderer:
     @staticmethod
     def _text_mask(crop: np.ndarray, style: TextStyle, dilation: int) -> np.ndarray:
         gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        # Fixed thresholds assume a white balloon.  Black lettering on a cyan
+        # sign or a wood plaque sits at mid/dark luminance, where a constant
+        # cutoff selects the entire background and every component is rejected
+        # as edge-connected, leaving the source text in place.  Anchor the
+        # cutoff to the local median instead.
+        level = float(np.median(gray)) if gray.size else 255.0
         if style.fill == "white":
-            seed = (gray > 210).astype(np.uint8)
+            seed = (gray > min(215, level + 55)).astype(np.uint8)
         else:
-            seed = (gray < 135).astype(np.uint8)
+            seed = (gray < max(15, min(150, level - 45))).astype(np.uint8)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(seed, 8)
         selected = np.zeros_like(seed, dtype=np.uint8)
         height, width = seed.shape
@@ -321,7 +374,7 @@ class ArtworkPreservingRenderer:
         # belong to the same replacement region.  Keep their components while
         # still rejecting isolated screentone speckles.
         min_area = max(4, round(style.font_size * style.font_size * 0.0005))
-        max_area = max(80, round(width * height * 0.16))
+        max_area = max(80, round(width * height * 0.45))
         for label in range(1, count):
             x, y, component_width, component_height, area = stats[label]
             touches_edge = (
@@ -333,7 +386,14 @@ class ArtworkPreservingRenderer:
             aspect = max(component_width, component_height) / max(
                 1, min(component_width, component_height)
             )
-            if touches_edge or area < min_area or area > max_area or aspect > 12:
+            # A tight detector box often cuts through its own glyphs, so the
+            # stroke cluster reaches the padded crop border.  Rejecting every
+            # edge-connected component there drops the whole source text and
+            # leaves it visible under the new lettering.  Only large edge blobs
+            # are artwork; the caller still clips the mask to the text box.
+            if (touches_edge and area > width * height * 0.25) or area < min_area:
+                continue
+            if area > max_area or aspect > 12:
                 continue
             selected[labels == label] = 255
         if dilation > 1 and selected.any():
@@ -460,16 +520,22 @@ class ArtworkPreservingRenderer:
                 (gray < 150).astype(np.uint8), 5
             )
             crop[mask > 0] = 255
-        elif mean < 145:
-            mask = ArtworkPreservingRenderer._interior_component_mask(
-                (gray > 215).astype(np.uint8), 7
-            )
-            crop = cv2.inpaint(crop, mask, 6, cv2.INPAINT_TELEA)
         else:
-            mask = ArtworkPreservingRenderer._interior_component_mask(
-                (gray < 75).astype(np.uint8), 7
+            # Mid-tone grounds (cyan signboards, colour panels) carry dark
+            # lettering, so "mean < 145" must not imply light glyphs.  Compare
+            # the text-like components on each side of the local median rather
+            # than raw pixel counts: a bright balloon border outnumbers the
+            # glyphs even when the glyphs are the dark side.
+            level = float(np.median(gray))
+            darker = ArtworkPreservingRenderer._interior_component_mask(
+                (gray < level - 45).astype(np.uint8), 7
             )
-            crop = cv2.inpaint(crop, mask, 6, cv2.INPAINT_TELEA)
+            brighter = ArtworkPreservingRenderer._interior_component_mask(
+                (gray > level + 45).astype(np.uint8), 7
+            )
+            mask = darker if darker.sum() >= brighter.sum() else brighter
+            if mask.any():
+                crop = cv2.inpaint(crop, mask, 6, cv2.INPAINT_TELEA)
         rgb[y0:y1, x0:x1] = crop
         return rgb, mean, white_ratio
 
@@ -527,9 +593,14 @@ class ArtworkPreservingRenderer:
             font, size, capacity = _fit_vertical(
                 font_path, text, width, height, style.font_size
             )
+            # Split into balanced columns instead of filling each one to
+            # capacity: greedy filling leaves the last column holding only
+            # trailing punctuation ("！！"), which reads as a stray mark.
+            columns_count = max(1, math.ceil(len(text) / capacity))
+            chunk = math.ceil(len(text) / columns_count)
             chunks = [
-                text[index : index + capacity]
-                for index in range(0, len(text), capacity)
+                text[index : index + chunk]
+                for index in range(0, len(text), chunk)
             ]
             step_x = round(size * (1.12 if style.display else 1.1))
             step_y = round(size * (1.18 if style.display else 1.07))
