@@ -212,6 +212,36 @@ PUBLICATION_METADATA_MARKERS = (
 )
 
 
+def page_spanning_display_artwork(page: PageOCR, unit: TextUnit) -> bool:
+    """Detect cover artwork that OCR misread as one page-filling caption.
+
+    A cover plate carries stylized display lettering, not a balloon.  Paddle
+    groups the display lines into a single detector region spanning a third of
+    the page, and MangaOCR -- which only knows Japanese -- answers with a
+    plausible-looking date for it ("２０１８年０９月１０日" for the three art
+    lines of "Display of Passion").  Without this rule the unit looked like an
+    ordinary translatable caption: the quality cleaner erased every art line and
+    typeset "2018 年 09 月 10 日" across the cover.
+
+    One region covering a fifth of the page while every character claims more
+    than 2% of the page area cannot be a speech bubble or a caption, so it is
+    preserved rather than destructively replaced.  Both measures are normalized
+    by page area, so the rule holds at any scan resolution.  Merged cover titles
+    are excluded: those are meant to be translated in place, and display sound
+    effects are excluded because ``oversized_decorative_sfx`` owns them.
+    """
+    if unit.special == "cover_title" or unit.is_sfx:
+        return False
+    semantic = re.sub(r"[\s．。…、，,!?！？:：♡♥〰〜～]", "", unit.ja)
+    if not semantic:
+        return False
+    page_area = max(1, page.width * page.height)
+    box_area = _area(unit.bbox)
+    if box_area < page_area * 0.20:
+        return False
+    return box_area / len(semantic) >= page_area * 0.02
+
+
 def classify_non_story_text(page: PageOCR) -> PageOCR:
     """Preserve publication metadata and tiny edge folios as non-story text.
 
@@ -254,6 +284,13 @@ def classify_non_story_text(page: PageOCR) -> PageOCR:
             unit.skip = True
             unit.skip_reason = "decorative"
             unit.special = "page_folio"
+            continue
+
+        if page_spanning_display_artwork(page, unit):
+            unit.zh = ""
+            unit.skip = True
+            unit.skip_reason = "preserve"
+            unit.special = "artwork_text"
             continue
 
         markers = {

@@ -32,6 +32,7 @@ from manga_localizer.ocr import (
     merge_region_candidates,
     merge_semantic_missing,
     overlapping_sfx_echo,
+    page_spanning_display_artwork,
     prefer_semantic_ocr,
     prune_nested_duplicate_units,
     prune_detached_orthogonal_outliers,
@@ -87,6 +88,92 @@ def test_story_dialogue_with_one_metadata_word_is_not_skipped():
     classify_non_story_text(page)
 
     assert unit.skip is False
+
+
+def test_cover_display_artwork_is_preserved_instead_of_translated():
+    """A cover art plate is not a balloon.
+
+    Paddle groups the three display lines of a cover title into one region
+    covering a third of the page, and MangaOCR answers the stylized Latin art
+    with an invented date ("２０１８年０９月１０日").  Built-in OCR has no
+    semantic pass, so nothing marked the unit: the cleaner erased every art
+    line and "2018 年 09 月 10 日" was typeset across the cover.
+    """
+    cover = TextUnit(
+        "p001u01",
+        [110, 15, 800, 403],
+        [82, 3, 800, 415],
+        "２０１８年０９月１０日",
+        0.9892,
+        erase_boxes=[
+            [590, 325, 790, 403],
+            [247, 164, 800, 352],
+            [110, 15, 579, 203],
+        ],
+    )
+    page = PageOCR(1, "00000001.webp", 800, 1132, [cover])
+
+    classify_non_story_text(page)
+
+    assert cover.skip is True
+    assert cover.skip_reason == "preserve"
+    assert cover.special == "artwork_text"
+    assert cover.zh == ""
+
+
+def test_ordinary_large_dialogue_region_is_not_treated_as_cover_art():
+    """The rule must not swallow wide dialogue or inner-page display text."""
+    line = TextUnit(
+        "p004u08",
+        [12, 108, 788, 172],
+        [6, 100, 794, 180],
+        "HEEEEY CARROT TOP, HOW'S IT HANGING?",
+        0.94,
+    )
+    caption = TextUnit(
+        "p003u02",
+        [138, 360, 660, 479],
+        [130, 350, 670, 490],
+        "HELLO! Thank you very much for buying my book.",
+        0.93,
+    )
+    # A page-filling SFX belongs to oversized_decorative_sfx, not to this rule.
+    thunder = TextUnit(
+        "p009u01",
+        [40, 30, 760, 900],
+        [30, 20, 770, 910],
+        "ドドドド",
+        0.95,
+        is_sfx=True,
+    )
+    page = PageOCR(4, "00000004.webp", 800, 1132, [line, caption, thunder])
+
+    for unit in page.units:
+        assert page_spanning_display_artwork(page, unit) is False
+
+    classify_non_story_text(page)
+
+    assert line.skip is False
+    assert caption.skip is False
+
+
+def test_merged_cover_title_stays_translatable():
+    """An explicitly merged cover title is translated in place, not preserved."""
+    merged = TextUnit(
+        "p001u01",
+        [300, 590, 520, 1320],
+        [290, 580, 530, 1330],
+        "僕に勇気があったなら",
+        0.9,
+        special="cover_title",
+    )
+    page = PageOCR(1, "000.webp", 1000, 1400, [merged])
+
+    assert page_spanning_display_artwork(page, merged) is False
+
+    classify_non_story_text(page)
+
+    assert merged.skip is False
 
 
 def test_orthogonal_scene_text_does_not_join_vertical_dialogue():
