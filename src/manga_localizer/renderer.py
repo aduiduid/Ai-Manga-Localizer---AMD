@@ -205,6 +205,16 @@ def _fit_horizontal(
     return font, 8, _wrap(draw, text, font, width), 10
 
 
+# ``quality_profile`` ("quality"/"fast") is the user-facing setting; the
+# renderer only distinguishes how aggressively it repairs the erased pixels.
+# The fast profile means "no LaMa inpainting, plain fill", which is exactly the
+# artwork cleanup.  Accepting the user-facing names here keeps the two
+# vocabularies from drifting apart: a caller passing "fast" used to reach the
+# render step and fail there with "Unknown cleanup profile: fast" after OCR and
+# translation had already finished.
+CLEANUP_PROFILE_ALIASES = {"fast": "artwork", "artwork": "artwork", "quality": "quality"}
+
+
 class ArtworkPreservingRenderer:
     def __init__(
         self,
@@ -218,9 +228,10 @@ class ArtworkPreservingRenderer:
         self.paths = (paths or AppPaths.from_env()).ensure()
         self.font_path = font_path or ensure_font(self.paths)
         self.bold_font_path = bold_font_path or find_bold_font(self.paths)
-        if cleanup_profile not in {"artwork", "quality"}:
+        resolved_profile = CLEANUP_PROFILE_ALIASES.get(cleanup_profile)
+        if resolved_profile is None:
             raise ValueError(f"Unknown cleanup profile: {cleanup_profile}")
-        self.cleanup_profile = cleanup_profile
+        self.cleanup_profile = resolved_profile
         self.device = device
         self._inpainter = inpainter
 
@@ -509,6 +520,30 @@ class ArtworkPreservingRenderer:
         return mask
 
     @staticmethod
+    def _background_color(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Median colour of the pixels the text mask does not claim.
+
+        Erased glyphs must be filled with the local page colour, not pure
+        white.  Cream, grey and coloured panels are common, and a solid white
+        patch is far more noticeable than the source text it replaced.  The
+        median of the untouched pixels is the background by construction: a
+        dense text block still leaves the surrounding paper in the majority.
+        """
+        keep = mask == 0
+        if int(keep.sum()) >= 16:
+            sample = crop[keep]
+        else:
+            # The mask claims nearly the whole crop (tight detector box around
+            # one large glyph).  Fall back to the lighter half, which is the
+            # paper side of any plain glyph/ground pair.
+            gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+            sample = crop[gray >= float(np.median(gray))]
+        if not sample.size:
+            return np.array([255, 255, 255], dtype=np.uint8)
+        median = np.median(sample.reshape(-1, 3), axis=0)
+        return np.clip(median, 0, 255).astype(np.uint8)
+
+    @staticmethod
     def _erase(rgb: np.ndarray, box: list[int]) -> tuple[np.ndarray, float, float]:
         x0, y0, x1, y1 = box
         crop = rgb[y0:y1, x0:x1].copy()
@@ -519,7 +554,10 @@ class ArtworkPreservingRenderer:
             mask = ArtworkPreservingRenderer._interior_component_mask(
                 (gray < 150).astype(np.uint8), 5
             )
-            crop[mask > 0] = 255
+            if mask.any():
+                crop[mask > 0] = ArtworkPreservingRenderer._background_color(
+                    crop, mask
+                )
         else:
             # Mid-tone grounds (cyan signboards, colour panels) carry dark
             # lettering, so "mean < 145" must not imply light glyphs.  Compare

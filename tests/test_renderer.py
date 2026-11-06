@@ -2,6 +2,7 @@ import io
 
 import cv2
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 
 from manga_localizer.config import AppPaths
@@ -456,3 +457,58 @@ def test_quality_plain_balloon_cleans_furigana_outside_main_bbox(tmp_path):
     EraseOnlyQuality().render_page(source, page, output)
     rendered = np.asarray(Image.open(output).convert("RGB"))
     assert np.all(rendered[65:96, 148:159] == 255)
+
+
+def test_fast_quality_profile_maps_to_the_artwork_cleanup(tmp_path):
+    # The web UI and the API accept quality_profile="fast"; the renderer used to
+    # reject that name and failed at the render step, after OCR and translation
+    # had already run.  "fast" means no LaMa inpainting, i.e. artwork cleanup.
+    renderer = ArtworkPreservingRenderer(cleanup_profile="fast")
+    assert renderer.cleanup_profile == "artwork"
+    assert ArtworkPreservingRenderer(cleanup_profile="quality").cleanup_profile == "quality"
+
+
+def test_fast_profile_renders_without_loading_lama(tmp_path):
+    def explode(*_args, **_kwargs):
+        raise AssertionError("fast profile must not run LaMa inpainting")
+
+    source = tmp_path / "fast.png"
+    Image.new("RGB", (120, 90), "white").save(source)
+    page = PageOCR(
+        1,
+        source.name,
+        120,
+        90,
+        [TextUnit("p001u01", [10, 10, 110, 80], [10, 10, 110, 80], "日本語", 1.0, False, "中文")],
+    )
+    renderer = ArtworkPreservingRenderer(cleanup_profile="fast", inpainter=explode)
+    renderer._draw = lambda *_args, **_kwargs: None
+    output = tmp_path / "fast-out.png"
+    renderer.render_page(source, page, output)
+    assert output.exists()
+
+
+def test_unknown_cleanup_profile_is_rejected():
+    with pytest.raises(ValueError, match="Unknown cleanup profile"):
+        ArtworkPreservingRenderer(cleanup_profile="turbo")
+
+
+def test_cleanup_fills_erased_glyphs_with_the_local_page_colour():
+    # Cream paper, not white: a solid #FFFFFF patch where the source text used
+    # to be is more visible than the text it replaced.  The fill has to come
+    # from the surrounding paper.
+    paper = np.array([250, 243, 231], dtype=np.uint8)
+    image = np.full((120, 240, 3), 255, dtype=np.uint8)
+    image[:] = paper
+    for x in range(70, 170, 20):
+        cv2.rectangle(image, (x, 55), (x + 10, 80), (30, 30, 30), -1)
+    cleaned, _, _ = ArtworkPreservingRenderer._erase(image.copy(), [40, 40, 200, 95])
+    filled = cleaned[58:78, 80:160]
+    assert np.all(np.abs(filled.astype(int) - paper.astype(int)) <= 2)
+
+
+def test_cleanup_still_uses_white_when_the_page_is_white():
+    image = np.full((60, 60, 3), 255, dtype=np.uint8)
+    image[25:35, 20:40] = 0
+    cleaned, _, _ = ArtworkPreservingRenderer._erase(image.copy(), [10, 15, 50, 45])
+    assert np.all(cleaned[27:33, 23:37] >= 250)

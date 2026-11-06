@@ -121,6 +121,32 @@ def test_cover_display_artwork_is_preserved_instead_of_translated():
     assert cover.zh == ""
 
 
+def test_inner_title_plate_display_artwork_is_preserved():
+    """A smaller inner title plate is the same misread, not a caption.
+
+    The credits page repeats the cover lettering at roughly 13% of the page and
+    MangaOCR invents a longer date for it, so the cover-only threshold missed
+    it and the letters were replaced by "这是 1009 年 9 月 30 日".
+    """
+    plate = TextUnit(
+        "p003u01",
+        [210, 43, 671, 307],
+        [200, 33, 681, 317],
+        "これは１００９年９月３０：００１",
+        0.93,
+    )
+    page = PageOCR(3, "00000003.webp", 800, 1132, [plate])
+
+    assert page_spanning_display_artwork(page, plate) is True
+
+    classify_non_story_text(page)
+
+    assert plate.skip is True
+    assert plate.skip_reason == "preserve"
+    assert plate.special == "artwork_text"
+    assert plate.zh == ""
+
+
 def test_ordinary_large_dialogue_region_is_not_treated_as_cover_art():
     """The rule must not swallow wide dialogue or inner-page display text."""
     line = TextUnit(
@@ -150,6 +176,24 @@ def test_ordinary_large_dialogue_region_is_not_treated_as_cover_art():
 
     for unit in page.units:
         assert page_spanning_display_artwork(page, unit) is False
+
+    # Small type over a large block is a text page, not display lettering:
+    # dense credit lists and long captions reach 10-17% of the page but their
+    # glyphs claim only 0.02-0.2% each, a magnitude below any display face.
+    dense_credits = TextUnit(
+        "p073u02",
+        [80, 400, 720, 588],
+        [70, 390, 730, 598],
+        (
+            "This project was our first big debut into the MLP fandom, and over "
+            "the last two years it grew far beyond anything I could have "
+            "imagined when I first started drawing the opening page of it. "
+            "Thank you for reading all the way through."
+        ),
+        0.9,
+    )
+    credits_page = PageOCR(73, "00000073.webp", 800, 1132, [dense_credits])
+    assert page_spanning_display_artwork(credits_page, dense_credits) is False
 
     classify_non_story_text(page)
 

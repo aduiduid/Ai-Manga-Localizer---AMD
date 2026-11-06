@@ -216,19 +216,29 @@ def page_spanning_display_artwork(page: PageOCR, unit: TextUnit) -> bool:
     """Detect cover artwork that OCR misread as one page-filling caption.
 
     A cover plate carries stylized display lettering, not a balloon.  Paddle
-    groups the display lines into a single detector region spanning a third of
-    the page, and MangaOCR -- which only knows Japanese -- answers with a
-    plausible-looking date for it ("２０１８年０９月１０日" for the three art
+    groups the display lines into a single detector region spanning a sixth to a
+    third of the page, and MangaOCR -- which only knows Japanese -- answers with
+    a plausible-looking date for it ("２０１８年０９月１０日" for the three art
     lines of "Display of Passion").  Without this rule the unit looked like an
     ordinary translatable caption: the quality cleaner erased every art line and
     typeset "2018 年 09 月 10 日" across the cover.
 
-    One region covering a fifth of the page while every character claims more
-    than 2% of the page area cannot be a speech bubble or a caption, so it is
-    preserved rather than destructively replaced.  Both measures are normalized
-    by page area, so the rule holds at any scan resolution.  Merged cover titles
-    are excluded: those are meant to be translated in place, and display sound
-    effects are excluded because ``oversized_decorative_sfx`` owns them.
+    The same misread appears on inner title plates, where the display block is
+    smaller (13% of the page instead of 30%) and the hallucinated text is longer,
+    so the threshold has to leave room below the cover case.
+
+    One region covering an eighth of the page while every character claims more
+    than 0.8% of the page area cannot be a speech bubble or a caption: dialogue
+    glyphs sit around 0.02-0.05% of a page, so this demands lettering roughly
+    five times larger than a balloon font while also covering a large block.
+    Both measures are normalized by page area, so the rule holds at any scan
+    resolution.  On the 2248 units currently on disk the two measures separate
+    cleanly: the artwork regions score 0.296/0.027 and 0.134/0.009, and the next
+    candidate -- long dialogue blocks with small type -- drops to 0.002.
+
+    Merged cover titles are excluded: those are meant to be translated in place,
+    and display sound effects are excluded because ``oversized_decorative_sfx``
+    owns them.
     """
     if unit.special == "cover_title" or unit.is_sfx:
         return False
@@ -237,9 +247,9 @@ def page_spanning_display_artwork(page: PageOCR, unit: TextUnit) -> bool:
         return False
     page_area = max(1, page.width * page.height)
     box_area = _area(unit.bbox)
-    if box_area < page_area * 0.20:
+    if box_area < page_area * 0.12:
         return False
-    return box_area / len(semantic) >= page_area * 0.02
+    return box_area / len(semantic) >= page_area * 0.008
 
 
 def classify_non_story_text(page: PageOCR) -> PageOCR:
