@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from opencc import OpenCC
 
+from .config import DEFAULT_OLLAMA_MODEL
 from .model_manager import ModelDependencyError
 from .name_dictionary import JapaneseNameDictionary, NameCandidate
 from .ocr import PageOCR, TextUnit
@@ -79,7 +80,7 @@ ADULT_TERMS = {
     "絶頂": "高潮",
     "コンドーム": "避孕套",
 }
-DEFAULT_LOCAL_TRANSLATION_MODEL = "huihui_ai/qwen3.5-abliterated:9b"
+DEFAULT_LOCAL_TRANSLATION_MODEL = DEFAULT_OLLAMA_MODEL
 LOCAL_MODEL_MAX_BILLIONS = 9.0
 INTERJECTION_VOICE_MAP = {
     **dict.fromkeys("あぁアァ", "啊"),

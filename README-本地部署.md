@@ -36,7 +36,7 @@ start.bat models status
 | `app\` | 上游源码 + `.venv`（Python 3.12.15，torch 2.8.0+cpu），2.45 GB |
 | `data\` | `MLS_HOME`：settings、模型、OCR 缓存、transcript，4.92 GB |
 | `_dl\ollama\ollama.exe` | Ollama 0.40.14（免安装，只留 vulkan 后端），0.12 GB |
-| `ollama-models\` | Ollama 模型库（`huihui_ai/qwen3.5-abliterated:9b` 6.6 GB + `hy-mt2-1.8b:q8` 1.9 GB），7.92 GB |
+| `ollama-models\` | Ollama 模型库（`DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest` 8.3 GB + `hy-mt2-1.8b:q8` 1.9 GB），9.49 GB |
 | `_cache\` | `pythons\`（venv 的 `home` 指向这里，**不能删**）+ uv 缓存，0.10 GB |
 | `_home\` | `USERPROFILE` 重定向后的壳目录 + tmp，0.02 GB |
 | `output\` | 成品输出 |
@@ -284,7 +284,7 @@ ollama create hy-mt2-1.8b:q8 -f _dl\hy-mt2\Modelfile
 
 `model_manager.py` + `api.py` + `cli.py` + `web\app.js`（约 130 行）：模型页列的是**实际在跑**的模型。
 
-- 原来的 4 行只是「磁盘上的权重」，真正的翻译模型 `huihui_ai/qwen3.5-abliterated:9b` 根本没显示；
+- 原来的 4 行只是「磁盘上的权重」，真正的翻译模型 `DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K` 根本没显示；
   质量模式的第二遍也不是磁盘上的 `data\models\hy-mt2`，而是 `MLS_HY_MT2_OLLAMA=hy-mt2-1.8b:q8`
   这个 Ollama tag。现在 `/api/models` 会连 `{ollama_base_url}/api/tags`，把这两个 tag 作为
   `kind="ollama"` 的行追加在后面，带真实大小（`~6.1 GB` / `~1.8 GB`）和 `已拉取/未拉取/服务未连接`。

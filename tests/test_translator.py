@@ -13,6 +13,7 @@ from manga_localizer.translator import (
     PromptTranslator,
     calm_preference_fallback,
     available_remote_models,
+    DEFAULT_LOCAL_TRANSLATION_MODEL,
     ensure_ollama_model,
     hy_mt_generation_options,
     interjection_fallback,
@@ -29,7 +30,7 @@ def test_shared_gpu_name_is_normalized_for_pytorch():
 
 
 def test_local_model_size_rejects_explicit_models_above_9b():
-    validate_local_model_size("huihui_ai/qwen3.5-abliterated:9b")
+    validate_local_model_size(DEFAULT_LOCAL_TRANSLATION_MODEL)
     validate_local_model_size("custom-local-model")
     with pytest.raises(ValueError, match="最多支持 9B"):
         validate_local_model_size("qwen3.5:14b")

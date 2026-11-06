@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-from .config import AppPaths, configure_model_caches
+from .config import DEFAULT_OLLAMA_MODEL, AppPaths, configure_model_caches
 from .model_manager import ModelDependencyError
 from .sfx import lookup_sfx
 
@@ -37,7 +37,7 @@ URL_RE = re.compile(
     re.IGNORECASE,
 )
 UNRESOLVED_SKIP_REASON = "unresolved"
-DEFAULT_OLLAMA_VISION_MODEL = "huihui_ai/qwen3.5-abliterated:9b"
+DEFAULT_OLLAMA_VISION_MODEL = DEFAULT_OLLAMA_MODEL
 SFX_KINDS = (
     "heartbeat",
     "impact",

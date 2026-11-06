@@ -285,14 +285,14 @@ def test_models_page_lists_the_ollama_tags_that_actually_run(monkeypatch, tmp_pa
     monkeypatch.setattr(
         "manga_localizer.api.ollama_tags",
         lambda *args, **kwargs: {
-            "huihui_ai/qwen3.5-abliterated:9b": 6_557_000_000,
+            "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest": 6_557_000_000,
             "hy-mt2-1.8b:q8": 1_900_000_000,
         },
     )
     monkeypatch.setenv("MLS_HY_MT2_OLLAMA", "hy-mt2-1.8b:q8")
     client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
     rows = {item["id"]: item for item in client.get("/api/models").json()["models"]}
-    assert rows["ollama:huihui_ai/qwen3.5-abliterated:9b"]["size"] == "~6.1 GB"
+    assert rows["ollama:DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest"]["size"] == "~6.1 GB"
     assert rows["ollama:hy-mt2-1.8b:q8"]["size"] == "~1.8 GB"
     assert rows["ollama:hy-mt2-1.8b:q8"]["status_code"] == "pulled"
     assert rows["ollama:hy-mt2-1.8b:q8"]["kind"] == "ollama"
@@ -304,7 +304,7 @@ def test_models_page_says_so_when_ollama_is_not_answering(monkeypatch, tmp_path)
     monkeypatch.setattr("manga_localizer.api.ollama_tags", lambda *args, **kwargs: None)
     client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
     rows = {item["id"]: item for item in client.get("/api/models").json()["models"]}
-    row = rows["ollama:huihui_ai/qwen3.5-abliterated:9b"]
+    row = rows["ollama:DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest"]
     assert row["ready"] is False
     assert row["status_code"] == "offline"
     assert row["size"] == ""

@@ -9,7 +9,7 @@ not bundled and remain governed by their upstream licenses.
 | Manga OCR | Japanese manga OCR | `kha-white/manga-ocr-base` (fallback) | Apache-2.0 |
 | Big-LaMa | Masked artwork inpainting | pinned `simple-lama-inpainting` v0.1.0 asset (`big-lama.pt`, SHA-256 `7ba7aa7ac37a4d41fdbbeba3a2af7ead18058552997e3a3cd1a3b2210c9e6b4c`) | Apache-2.0 |
 | Hy-MT2 1.8B | Context-aware translation | `Tencent-Hunyuan/Hy-MT2-1.8B` on ModelScope | Apache-2.0 |
-| Qwen3.5 Abliterated 9B | Local vision OCR, unrestricted translation, and staged semantic review | Ollama `huihui_ai/qwen3.5-abliterated:9b`, derived from Qwen3.5 | Apache-2.0 derivative; upstream usage warnings apply |
+| DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic (i1-Q6_K) | Local vision OCR, unrestricted translation, and staged semantic review | Ollama tag `DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K`, built from `mradermacher/DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic-i1-GGUF` (Q6_K + f16 mmproj) over `Jackrong/DeepSeek-V4-Pro-Qwen3.5-9B`, derived from Qwen3.5 | Apache-2.0 derivative; upstream usage warnings apply |
 | JMnedict | Automatic Japanese name candidates | Downloaded on demand from EDRDG | CC BY-SA 4.0; attribution to EDRDG |
 | Noto Sans CJK SC | Simplified Chinese typesetting | pinned `notofonts/noto-cjk` release | SIL OFL-1.1 |
 

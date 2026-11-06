@@ -5,6 +5,11 @@ import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# 默认本地模型：DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic（i1-Q6_K 量化 + f16 mmproj），
+# 以 `ollama create` 从两个 GGUF 合成。标签必须带 `:latest`，因为 ensure_ollama_model
+# 用严格字符串匹配 /api/tags 返回的名字。
+DEFAULT_OLLAMA_MODEL = "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest"
+
 
 @dataclass(frozen=True)
 class AppPaths:
@@ -49,8 +54,8 @@ class UserSettings:
     ocr_backend: str = "hybrid"
     inference_backend: str = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "huihui_ai/qwen3.5-abliterated:9b"
-    ollama_ocr_model: str = "huihui_ai/qwen3.5-abliterated:9b"
+    ollama_model: str = DEFAULT_OLLAMA_MODEL
+    ollama_ocr_model: str = DEFAULT_OLLAMA_MODEL
     online_base_url: str = "https://api.openai.com/v1"
     online_model: str = ""
 

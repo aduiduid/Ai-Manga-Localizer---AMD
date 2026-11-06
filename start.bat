@@ -31,7 +31,7 @@ for %%D in (Desktop Documents Downloads Pictures Music Videos Favorites Links Se
   if not exist "%~dp0_home\%%~D" mkdir "%~dp0_home\%%~D"
 )
 
-rem --- Ollama: 9B abliterated Qwen3.5, Vulkan on RX 9070 XT ---
+rem --- Ollama: DeepSeek-V4-Pro-Qwen3.5-9B (i1-Q6_K + f16 mmproj), Vulkan on RX 9070 XT ---
 set "OLLAMA_MODELS=%~dp0ollama-models"
 set "OLLAMA_HOST=127.0.0.1:11434"
 rem --- Serve the Hy-MT2 candidate pass from the GPU too.  Drop this line to

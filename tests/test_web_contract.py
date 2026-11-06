@@ -21,7 +21,7 @@ def test_navigation_and_pipeline_contract():
     assert 'id="ollamaOcrModel"' in html
     assert 'id="checkInference"' in html
     assert 'id="glossaryText"' not in html
-    assert "huihui_ai/qwen3.5-abliterated:9b" in html
+    assert "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest" in html
 
 
 def test_ocr_phase_uses_zero_based_dom_index():

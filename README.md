@@ -47,7 +47,7 @@
 | 系统 | Windows 10/11（Linux 亦可，脚本在 `scripts/`） |
 | CPU | AMD Ryzen 5 5600G（6 核 12 线程，OCR 纯 CPU 跑 5–6 核） |
 | 显卡 | AMD Radeon RX 9070 XT —— 只给 Ollama 用 Vulkan，Paddle 没有 ROCm/DirectML 后端 |
-| 磁盘 | 完整本地质量模式约 13 GB（含 9B + Hy-MT2 两份 Ollama 权重） |
+| 磁盘 | 完整本地质量模式约 15 GB（含 DeepSeek-V4-Pro-Qwen3.5-9B i1-Q6_K 8.3 GB + Hy-MT2 1.9 GB 两份 Ollama 权重） |
 | Python | 3.12.15（uv 托管），torch 2.8.0+cpu / paddlepaddle 3.3.1 / paddleocr 3.7.0 / paddlex 3.7.2 |
 | 推理服务 | Ollama 0.40.14（免安装版放在 `_dl\ollama\`，只保留 vulkan 后端） |
 
