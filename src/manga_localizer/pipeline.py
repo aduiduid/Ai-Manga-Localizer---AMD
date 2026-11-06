@@ -41,7 +41,9 @@ from .translator import (
 ProgressCallback = Callable[[str, int, int, str], None]
 # 8: recognition payloads now keep Paddle's own text, so every cached page from
 # version 7 holds MangaOCR's Japanese hallucination for English sources.
-OCR_CACHE_VERSION = 8
+# 9: link blocks are now preserved instead of translated, so a cached credit
+# page still carries the un-skippable unit that failed the whole book.
+OCR_CACHE_VERSION = 9
 
 
 def unsafe_semantic_missing(page: PageOCR, preserve_sfx: bool) -> list[dict]:
@@ -426,12 +428,19 @@ class LocalizerPipeline:
                 work / "translation-draft.json", source, pages, glossary
             )
         quality = completion_summary(pages, request.preserve_sfx)
-        if quality["unresolved_units"]:
-            sample = ", ".join(quality["unresolved_ids"][:8])
-            raise ValueError(
-                f"Localization has {quality['unresolved_units']} unresolved text units"
-                f" ({sample}). Translate them or assign an explicit skip_reason."
+        fallback_ids = preserve_unresolved_units(pages, quality)
+        if fallback_ids:
+            self._emit(
+                emit,
+                "translate",
+                total,
+                total,
+                f"{len(fallback_ids)} 处未能翻译，已保留原文"
+                f"：{', '.join(fallback_ids[:6])}",
             )
+            quality = completion_summary(pages, request.preserve_sfx)
+            quality["fallback_preserved_units"] = len(fallback_ids)
+            quality["fallback_preserved_ids"] = fallback_ids
         self._emit(emit, "translate", total, total, "连贯翻译完成")
         self._write_transcript(
             work / "transcript.json",
@@ -568,6 +577,29 @@ def page_from_dict(payload: dict) -> PageOCR:
         ],
         semantic_missing=list(payload.get("semantic_missing", [])),
     )
+
+
+def preserve_unresolved_units(pages: list[PageOCR], summary: dict) -> list[str]:
+    """Keep the printed source for units that exhausted the translation ladder.
+
+    A heavily merged English block can defeat even the eight-attempt retry
+    ladder: the model never produces a candidate that satisfies the audit
+    contract.  The upstream contract failed the whole book over a handful of
+    print-sized lines, which threw away half an hour of finished work, so those
+    units stay as printed and every id is reported back to the caller.
+    """
+    unresolved = sorted(set(summary.get("unresolved_ids", [])))
+    if not unresolved:
+        return []
+    ids = set(unresolved)
+    for page in pages:
+        for unit in page.units:
+            if unit.id in ids:
+                unit.zh = ""
+                unit.skip = True
+                unit.skip_reason = "preserve"
+                unit.special = "unresolved_fallback"
+    return unresolved
 
 
 def completion_summary(pages: list[PageOCR], preserve_sfx: bool = False) -> dict:

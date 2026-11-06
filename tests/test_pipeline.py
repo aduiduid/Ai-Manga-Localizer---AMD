@@ -9,8 +9,38 @@ from manga_localizer.pipeline import (
     completion_summary,
     merge_glossaries,
     page_from_dict,
+    preserve_unresolved_units,
     unsafe_semantic_missing,
 )
+
+
+def test_unresolved_units_are_preserved_instead_of_failing_the_book():
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [
+                {"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "FINALLY", "zh": ""},
+                {"id": "p001u02", "bbox": [40, 2, 70, 40], "ja": "THANKS", "zh": "谢谢"},
+            ],
+        }
+    )
+    summary = completion_summary([page])
+    assert summary["unresolved_ids"] == ["p001u01"]
+
+    assert preserve_unresolved_units([page], {"unresolved_ids": []}) == []
+    assert preserve_unresolved_units([page], summary) == ["p001u01"]
+
+    assert page.units[0].zh == ""
+    assert page.units[0].skip is True
+    assert page.units[0].skip_reason == "preserve"
+    assert page.units[0].special == "unresolved_fallback"
+    followed = completion_summary([page])
+    assert followed["unresolved_units"] == 0
+    assert followed["explicitly_skipped_units"] == 1
+    assert followed["translated_units"] == 1
 
 
 def test_reviewed_transcript_glossary_survives_with_explicit_overrides():

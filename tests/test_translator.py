@@ -1509,3 +1509,39 @@ def test_half_translated_english_line_is_rejected():
     # Leaving a whole English title in place is the same failure, only longer.
     assert PromptTranslator._valid_translation(unit, "Display of Passion，作者 Alcor") is False
     assert PromptTranslator._valid_translation(unit, "激情展示，作者 Alcor") is True
+
+
+def test_latin_sources_are_not_measured_with_japanese_prose_gates():
+    """A 74-page English book failed with "14 unresolved text units" because the
+    prose gates were tuned for Japanese: a word-sized source could not shrink to
+    one glyph, an all-caps shout could not gain 「！」, and a wall of small print
+    was longer than the 120-glyph cap.  The Japanese rules must stay strict."""
+
+    def unit(text: str) -> TextUnit:
+        return TextUnit("p001u01", [0, 0, 20, 80], [0, 0, 20, 80], text, 0.95)
+
+    # "FINALLY" -> 终于: two glyphs for a seven-character word.
+    assert OllamaTranslator._preserves_audit_information(unit("FINALLY"), "终于") is True
+    # "Shlap" (a misread SLAP) -> 啪: one glyph for a five-character word.
+    assert OllamaTranslator._preserves_audit_information(unit("Shlap"), "啪") is True
+    # A short shout may be rendered with an exclamation mark.
+    assert OllamaTranslator._preserves_audit_information(unit("NGGHH..."), "啊……哈！") is True
+    assert OllamaTranslator._preserves_audit_information(unit("NNNN-NN"), "啊！再久点……") is True
+
+    # A merged wall of English print needs more than the Japanese 120-glyph cap.
+    blob = unit("AND, I MEAN, THERE'S ALSO THE SMELL. " * 16)
+    assert len(blob.ja) >= 500
+    assert PromptTranslator._valid_translation(blob, "好" * 300) is True
+    assert PromptTranslator._valid_translation(blob, "好" * (len(blob.ja))) is False
+
+    # Japanese sources keep every guard: a three-glyph floor and a 120 cap.
+    kana = unit("ありがとうございます")
+    assert len(kana.ja) >= 7
+    assert OllamaTranslator._preserves_audit_information(kana, "谢") is False
+    assert OllamaTranslator._preserves_audit_information(kana, "谢谢你啦") is True
+    calm = unit("そうですね")
+    assert OllamaTranslator._preserves_audit_information(calm, "爽啊！") is False
+    assert OllamaTranslator._preserves_audit_information(calm, "是这样呢") is True
+    japanese = unit("あ" * 200)
+    assert PromptTranslator._valid_translation(japanese, "好" * 140) is False
+    assert PromptTranslator._valid_translation(japanese, "好" * 40) is True

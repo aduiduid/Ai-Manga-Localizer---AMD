@@ -32,6 +32,10 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 JP_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 KATAKANA_RE = re.compile(r"^[\u30a0-\u30ffー・…ッっ♡♥！？!?.．]+$")
 EXPLICIT_SKIP_REASONS = frozenset({"duplicate", "noise", "decorative", "preserve"})
+URL_RE = re.compile(
+    r"https?://\S+|www\.\S+|[A-Za-z0-9][A-Za-z0-9.-]*\.(?:com|net|org|jp|io|app|co|me|tv)/",
+    re.IGNORECASE,
+)
 UNRESOLVED_SKIP_REASON = "unresolved"
 DEFAULT_OLLAMA_VISION_MODEL = "huihui_ai/qwen3.5-abliterated:9b"
 SFX_KINDS = (
@@ -272,6 +276,16 @@ def classify_non_story_text(page: PageOCR) -> PageOCR:
             unit.skip = True
             unit.skip_reason = "preserve"
             unit.special = "publication_metadata"
+            continue
+        if link_block_text(unit.ja):
+            # Credit pages print several links in one detector region.  A
+            # translation can only echo or summarise them, both of which fail
+            # the quality contract, so the unit used to stay unresolved and
+            # failed the whole book.  Keep the printed links instead.
+            unit.zh = ""
+            unit.skip = True
+            unit.skip_reason = "preserve"
+            unit.special = "link_block"
     return page
 
 
@@ -461,6 +475,21 @@ def merge_semantic_missing(*batches: list[dict]) -> list[dict]:
         if not duplicate:
             merged.append(dict(item))
     return merged
+
+
+def link_block_text(text: str) -> bool:
+    """A block of URLs is not prose and must not be translated.
+
+    Credit pages put several links in one detector region.  The model can only
+    echo them or summarise them, and both are rejected, so the unit stays
+    unresolved and fails the whole book."""
+    compact = re.sub(r"\s+", "", text)
+    if not compact:
+        return False
+    links = URL_RE.findall(text)
+    if len(links) >= 3:
+        return True
+    return bool(links) and sum(len(item) for item in links) >= len(compact) * 0.4
 
 
 def oversized_text_region(page: PageOCR, unit: TextUnit) -> bool:

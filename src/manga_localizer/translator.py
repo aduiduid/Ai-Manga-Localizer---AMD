@@ -322,13 +322,20 @@ class PromptTranslator:
             not KANJI_RE.search(clean)
             or len(re.findall(r"[A-Za-z\u00c0-\u024f]{2,}", clean)) > 2
         )
+        ceiling = max(12, min(120, len(unit.ja) * 4))
+        if latin_only_source(unit.ja):
+            # The 120-glyph cap is tuned for Japanese prose.  A wall of small
+            # English print gets merged into one unit, and its faithful Chinese
+            # rendering is far longer than 120 glyphs: the cap rejected every
+            # attempt and failed the whole book with "unresolved text units".
+            ceiling = max(ceiling, round(len(unit.ja) * 0.75))
         return (
             bool(clean)
             and not KANA_RE.search(clean)
             and not context_leak
             and not latin_leak
             and not untranslated_latin
-            and len(clean) <= max(12, min(120, len(unit.ja) * 4))
+            and len(clean) <= ceiling
         )
 
     @staticmethod
@@ -552,7 +559,10 @@ class PromptTranslator:
             # Treating it as prose stranded valid two-glyph translations.
             return bool(proposed) and len(proposed) <= max(12, len(source) * 2)
         source_is_question = cls._source_is_question(unit.ja)
-        if len(source) >= 5 and len(proposed) < 2:
+        # A short Latin source collapses legitimately: "Shlap" (a misread SLAP)
+        # becomes 啪, one glyph.  The proportional floor below covers the prose
+        # cases this two-glyph rule used to guard.
+        if len(source) >= 5 and len(proposed) < 2 and not latin_only_source(unit.ja):
             return False
         # Kana-heavy Japanese routinely contracts to much shorter Chinese
         # (ありがとうございます -> 谢谢). Count kanji as semantic units and
@@ -566,9 +576,12 @@ class PromptTranslator:
         )
         if latin_only_source(unit.ja):
             # Latin sources carry no kanji, so the density formula collapses to
-            # 3 glyphs and a one-word summary would pass.  English needs roughly
-            # one Chinese glyph per 6-7 characters of prose.
-            minimum_length = max(minimum_length, round(len(source) * 0.15))
+            # 3 glyphs.  English needs roughly one Chinese glyph per 6-7
+            # characters of prose, but a word-sized source (FINALLY, NGGHH...)
+            # legitimately becomes one or two glyphs: the flat three-glyph floor
+            # rejected those correct answers and failed the whole book with
+            # "unresolved text units".
+            minimum_length = max(1, round(len(source) * 0.15))
         if len(source) >= 7 and len(proposed) < minimum_length:
             return False
         if len(source) >= 4 and len(proposed) > max(12, round(len(source) * 2.0)):
@@ -639,7 +652,15 @@ class PromptTranslator:
                 unit.ja,
             )
         )
-        if not source_is_emphatic and re.search(r"超爱|最爱|爱死|！|!", candidate):
+        # A one-token Latin source ("NNNN-NN", "FINALLY") is a sound or a shout,
+        # so a Chinese rendering with 「！」 is faithful rather than the inflated
+        # enthusiasm this guard exists to catch.  Prose lines keep the guard.
+        short_latin_token = latin_only_source(unit.ja) and len(source) <= 8
+        if (
+            not source_is_emphatic
+            and not short_latin_token
+            and re.search(r"超爱|最爱|爱死|！|!", candidate)
+        ):
             return False
         if re.match(r"^[你我他她它]，", candidate.strip()):
             return False

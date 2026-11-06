@@ -25,6 +25,7 @@ from manga_localizer.ocr import (
     deduplicate_nested_region_groups,
     is_latin_page,
     likely_sfx_text,
+    link_block_text,
     list_images,
     malformed_tiny_ocr,
     manga_force_cpu,
@@ -915,6 +916,23 @@ def test_latin_page_drops_text_less_artwork_boxes():
     ]
     assert is_latin_page(latin) is True
     assert is_latin_page([{"box": [0, 0, 9, 9], "text": "それは", "score": 0.9}]) is False
+
+
+def test_link_blocks_are_preserved_instead_of_translated():
+    """A credit page's link list cannot be translated: the model can only echo
+    it or replace it with a summary, and both are rejected, so the unit stayed
+    unresolved and failed the whole 74-page book."""
+    assert (
+        link_block_text(
+            "https://derpibooru.org/profiles/Alcor https://www.patreon.com/alcorart "
+            "https://discordapp.com/invite/zdKRakh https://e621.net/post/index/1/alcor90"
+        )
+        is True
+    )
+    assert link_block_text("Twitter: @AlcorArt / www.alcorart.com") is True
+    assert link_block_text("THANK YOU FOR READING MY COMIC!") is False
+    assert link_block_text("I have 3.5 hours left.") is False
+    assert link_block_text("") is False
 
 
 def test_english_only_book_survives_the_japanese_character_filter():

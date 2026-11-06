@@ -393,7 +393,9 @@ poof/bam/bang/slam/thud/crash/clang/knock/creak/rustle/splash/gulp/munch/sniff/w
 
 新增测试：`test_single_glyph_spread_over_artwork_loses_its_text`、
 `test_latin_page_drops_text_less_artwork_boxes`、`test_latin_sound_words_are_effects_but_latin_dialogue_is_not`、
-`test_repeated_latin_sound_words_are_one_effect`、
+`test_repeated_latin_sound_words_are_one_effect`、`test_link_blocks_are_preserved_instead_of_translated`、
+`test_latin_sources_are_not_measured_with_japanese_prose_gates`、
+`test_unresolved_units_are_preserved_instead_of_failing_the_book`、
 `test_english_book_is_labelled_and_cannot_echo_the_source`、
 `test_prompts_follow_the_source_language`、`test_half_translated_english_line_is_rejected`。
 
@@ -411,9 +413,70 @@ poof/bam/bang/slam/thud/crash/clang/knock/creak/rustle/splash/gulp/munch/sniff/w
 （`iOTTH` s=0.95、`oop fig` s=0.53、`UOISSD` s=0.58 等），这些框面积够大、会被当成台词
 翻译后画到画面上。所以**没有默认开启**；要提高小字召回，就得接受这个代价。
 
+### 「Localization has N unresolved text units」：从整本失败改成保留原文
+
+英文页有一种很致命的失败方式：任务跑到 70% 抛
+`Localization has 14 unresolved text units (p007u02, p022u07, …)`，然后**整本不出成稿**。
+这是 `pipeline.py` 收尾的硬门槛（`completion_summary()` 的 `unresolved_units != 0` 就 `raise`）：
+只要有**一个** unit 的 `zh` 为空、或过不了 `_valid_translation`，
+前面 OCR + 翻译的二十多分钟全部白跑。用那本 74 页英文书复现（`_notes\probe_unres.py`
+直接读已落盘的 OCR 缓存跑同一套 quality 栈），先修掉三个「拿日语标准去量英文」的门槛：
+
+- **字形下限**：`_preserves_audit_information` 对 `FINALLY` 算 `max(3, round(7×0.15)=1)=3`，
+  正确译文「终于」只有 2 字被拒；`Shlap`（SLAP 的误读）更早就被
+  `len(source) >= 5 and len(proposed) < 2` 拒掉（正确译文「啪」只有 1 字）。
+  现在英文源的下限是 `max(1, round(len(source) * 0.15))`，那个两字形门槛只对非拉丁源生效。
+- **不许乱加感叹号**：源是 `NGGHH...` / `NNNN-NN` 这类呼喊时，译文「啊……哈！」「啊！再久点……」
+  被 `source_is_emphatic` 判成无端激动而拒。现在**长度 ≤ 8 的拉丁单词**豁免这条（长句仍受管）。
+- **120 字上限**：`_valid_translation` 的 `min(120, len(ja) * 4)` 是按日文散文定的；英文页一屏小字
+  会被 OCR 合并成一个 557 字的 unit，忠实译文 200+ 字，全部撞上限。现在英文源的 ceiling 取
+  `max(ceiling, round(len(ja) * 0.75))`。
+- **版权页的链接块**：`p073u03` 是后记里的一串 `https://…`（Patreon / Discord / Twitter），
+  模型要么原样回吐（不换脚本 → 拒），要么写成摘要（原文含 `/` 也会被 `context_leak` 拒），
+  于是这个 unit 永远无法通过、整本失败。`ocr.py` 新增 `link_block_text()`（≥3 个链接，
+  或链接占去一半以上字符），判定放在 `classify_non_story_text()` 里 —— 那是 `pipeline.py`
+  对所有后端、**包括复用缓存页**统一执行的「非正文」契约，所以标记一定生效，
+  命中就把该 unit 标成 `skip_reason="preserve"`、`special="link_block"`：
+  渲染阶段跳过它，**原图的链接保持原样**。
+  （第一版把判定插进了 `OllamaVisionOCR` 的收尾循环，而任务走的是 `builtin` 后端，
+  那个分支根本不执行 —— 规则必须放在两个后端共用的契约里。）
+
+然后再给收尾加**兜底**：`preserve_unresolved_units()`（`pipeline.py`）在翻译阶梯八次尝试
+全部用尽后，把仍然过不了硬门槛的 unit 标成 `skip_reason="preserve"`、
+`special="unresolved_fallback"` —— **原图那几行英文保持原样**，任务继续渲染并出成稿，
+而不是整本失败；被保留的 id 写进 `translation_manifest.json`，任务进度里也会写一行
+「N 处未能翻译，已保留原文：…」：
+
+```json
+"quality": {"total_units": 1018, "translated_units": 1015, "explicitly_skipped_units": 3,
+            "unresolved_units": 0, "fallback_preserved_units": 3,
+            "fallback_preserved_ids": ["p052u27", "p069u08"]}
+```
+
+之前那次是**随机失败**：同一本 74 页，第一轮挂 `p023u04/p052u27/p073u03`，第二轮挂
+`p052u27/p052u28/p069u08` —— 合并出来的长英文块能不能过审计门槛取决于模型的发挥，
+所以「修门槛」只能减少概率，必须配兜底才不会白跑一趟。
+
+**最终真机结果**（job `1fe6857a9a52`，74 页，`complete 100% 74/74`，输出
+`output\1416037-…--已汉化`）：74 个 webp 全部生成，`quality` =
+`{"total_units": 1018, "translated_units": 1016, "explicitly_skipped_units": 2,
+"preserved_sfx_units": 0, "unresolved_units": 0, "invalid_translation_units": 0,
+"fallback_preserved_units": 1, "fallback_preserved_ids": ["p047u01"]}` ——
+只有一处（`p047u01`，一串 OCR 读歪的呻吟 `GH TWI-- mh nh hh ah…`）保留了原文，
+版权页链接块 `p073u03` 按设计保留，其余 1016 个 unit 全部译出。
+
+日文源的 3 字形下限、120 字上限、感叹号规则**全部保留**（新增回归测试
+`test_latin_sources_are_not_measured_with_japanese_prose_gates` 同时断两侧，
+`test_unresolved_units_are_preserved_instead_of_failing_the_book` 断兜底）。
+
+⚠️ 复现这个 bug 时注意：`.manga-localizer-work\translation-draft.json` 是**按输出目录共享**的，
+被后续 run（哪怕是被取消的）覆盖过，只有 `0000000N.ocr.json` 缓存可靠。
+另外**跑 `pytest` 会触发 `_adopt_orphans()`**（有些测试用真实 `MLS_HOME`），把正在跑的真实任务
+标成「服务重启，任务已中断」——测试前先确认没有任务在跑。
+
 `tests\test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel` 在本机失败，
 原因是 `torch.jit.save` 打不开含中文的临时目录（pytest 的 tmp_path 落在中文目录下），
-不是代码问题。其余 216 个测试全绿（共 217 个）：
+不是代码问题。其余 219 个测试全绿（共 220 个）：
 `python -m pytest tests --deselect tests/test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel`
 
 ## 磁盘清理（2026-11-04，49.36 GB → 15.16 GB）
