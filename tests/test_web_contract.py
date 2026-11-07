@@ -229,10 +229,18 @@ def test_notification_sounds_are_separate_opt_in_switches():
     assert 'id="notifyFailure"' in html
     assert 'data-i18n="settings.sound.complete"' in html
     assert 'data-i18n="settings.sound.failure"' in html
-    # The two events must not share a waveform: completion is a rising major
-    # arpeggio, failure a falling minor second built from a different oscillator.
-    assert 'complete:{type:"sine"' in javascript
-    assert 'failure:{type:"triangle"' in javascript
+    # The two events must not share a timbre: completion is a rising major
+    # arpeggio on a bell-like overtone stack, failure a falling minor second on a
+    # square wave.  Both are brighter than the plain sine the chime started as,
+    # which is why the completion cue carries harmonics instead of a waveform name.
+    assert "BELL_PARTIALS=[1,0.8,0.6,0.4,0.25,0.15]" in javascript
+    assert 'complete:{partials:BELL_PARTIALS,' in javascript
+    assert 'failure:{type:"square"' in javascript
+    # The partials must go through the two-argument form, which normalises the
+    # curve to full scale: without that the overtones would add to the sample
+    # peak and the amplitude headroom the volume ceiling relies on would be gone.
+    assert "createPeriodicWave(real,imag)" in javascript
+    assert "setPeriodicWave(soundWave(soundContext,cue.partials))" in javascript
     assert '"#notifyComplete","#notifyFailure"' in javascript
     assert "notify_on_complete:$(\"#notifyComplete\").checked" in javascript
     assert "notify_on_failure:$(\"#notifyFailure\").checked" in javascript
@@ -267,22 +275,60 @@ def test_notification_volume_scales_the_cues_and_survives_reload():
     assert ".settings-form .sound-volume-row{" in css
 
 
+def _cue_envelope(gain, elapsed, duration):
+    """The gain playCue() applies ``elapsed`` seconds into a note."""
+    if elapsed < 0 or elapsed > duration:
+        return 0.0
+    if elapsed <= 0.02:
+        return gain * (1e-4 / gain) ** (elapsed / 0.02)
+    span = duration * 0.7 - 0.02
+    return gain * (1e-4 / gain) ** ((elapsed - 0.02) / span)
+
+
+def _cue_worst_case_peak(gains, notes, duration):
+    """Upper bound on a cue's peak sample level.
+
+    Every waveform a cue uses -- the built-in types and the two-argument
+    createPeriodicWave alike -- is normalised to +/-1 peak, so a note's level is
+    its gain times its envelope.  The notes are staggered and each decays while
+    the next rises, so sampling the total at each note's own peak instant bounds
+    the peak far more tightly than assuming every note peaks together.
+    """
+    worst = 0.0
+    for _, offset in notes:
+        instant = offset + 0.02
+        level = sum(
+            _cue_envelope(gain, instant - other, duration)
+            for gain, (_, other) in zip(gains, notes)
+        )
+        worst = max(worst, level)
+    return worst
+
+
 def test_notification_cues_keep_amplitude_headroom():
-    """The cue ceiling may only rise while overlapping notes still fit."""
+    """The cue ceiling may only rise while the notes still fit in full scale."""
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "createPeriodicWave(real,imag)" in javascript
     cues = re.search(r"const SOUND_CUES=\{(.*?)\};", javascript, re.S).group(1)
-    gains = [
-        [float(value) for value in re.findall(r"[\d.]+", group)]
-        for group in re.findall(r"gains:\[([^\]]*)\]", cues)
+    parsed = [
+        (
+            [float(value) for value in re.findall(r"[\d.]+", gain_group)],
+            [[float(frequency), float(offset)] for frequency, offset in re.findall(r"\[([\d.]+),([\d.]+)\]", note_group)],
+            float(duration),
+        )
+        for gain_group, note_group, duration in re.findall(
+            r"gains:\[([^\]]*)\],notes:\[(.*?)\],duration:([\d.]+)", cues
+        )
     ]
-    assert len(gains) == 2
-    # Notes of a cue overlap, so the in-phase worst case is the sum of their peak
-    # gains; past 1.0 the graph output would clip on the loudest setting. This is
+    assert len(parsed) == 2
+    # Past full scale the browser output clips on the loudest setting, so this is
     # the bound that decides how far the volume ceiling can be raised.
-    for peak_gains in gains:
-        assert sum(peak_gains) <= 1.0
-    # And the loud cues stay loud: the ceiling is twice the original fixed level.
-    assert min(sum(peak_gains) for peak_gains in gains) >= 0.7
+    for gains, notes, duration in parsed:
+        assert len(gains) == len(notes)
+        assert _cue_worst_case_peak(gains, notes, duration) <= 0.7
+    # And the cue still has to be able to get loud: a table an order of magnitude
+    # quieter would satisfy the bound above and be useless.
+    assert min(sum(gains) for gains, _, _ in parsed) >= 0.7
 
 
 def test_ml_bootstrap_installs_matching_torchvision_backend():

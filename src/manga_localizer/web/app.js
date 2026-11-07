@@ -2,22 +2,34 @@ const state={models:[],settings:null,currentJob:null,currentPage:1,previewMode:"
 const t=(key,parameters={})=>window.MLS_I18N.t(key,parameters);
 function renderCpuChoices(cpu,selected){const select=$("#cpuThreads");const detail=$("#cpuThreadsDetail");select.innerHTML="";const add=(value,label)=>{const option=document.createElement("option");option.value=String(value);option.textContent=label;select.append(option)};add(0,t("settings.cpuThreads.auto"));((cpu&&cpu.thread_choices)||[]).forEach(count=>add(count,t("settings.cpuThreads.count",{count})));select.value=String(Math.max(0,Number(selected||0)));if(select.value!==String(Math.max(0,Number(selected||0))))select.value="0";detail.textContent=cpu&&cpu.name?t("settings.cpuThreads.detail",{name:cpu.name,physical:cpu.physical_cores,logical:cpu.logical_cores}):""}
 // Completion and failure need to be tellable apart without looking, so they use
-// different wave shapes rather than the same beep at two pitches: a rising
-// three-note major arpeggio for success, a falling two-note minor second for
-// failure.  Tones are synthesised instead of shipped as files so the app keeps
-// its single-binary, no-assets layout and works offline.
-// The gains are the level at 100% volume.  Overlapping notes add up, so they are
-// kept so that even the in-phase bound stays at full scale: the loudest cue
-// measures a peak of 0.36, which leaves about 9 dB of headroom and is why the
-// ceiling can be twice the level the chime used before it was adjustable.
-const SOUND_CUES={complete:{type:"sine",gains:[0.32,0.32,0.36],notes:[[523.25,0],[659.25,0.11],[783.99,0.22]],duration:0.46},failure:{type:"triangle",gains:[0.36,0.36],notes:[[392,0],[261.63,0.19]],duration:0.62}};
+// different timbres rather than the same beep at two pitches: a rising three-note
+// major arpeggio for success, a falling two-note minor second for failure.  Tones
+// are synthesised instead of shipped as files so the app keeps its single-binary,
+// no-assets layout and works offline.
+// A plain sine is the dullest waveform there is and reads as a faint blip on a
+// laptop speaker, so success rings on a bell-like overtone stack instead, and
+// failure falls on a square wave: both put far more energy above the fundamental
+// than the sine and triangle they replaced (measured spectral centroid roughly
+// doubles for each), which is what makes them carry.
+const BELL_PARTIALS=[1,0.8,0.6,0.4,0.25,0.15];
+// The gains are the level at 100% volume.  Overlapping notes add up, but they are
+// staggered and each decays while the next rises, so the real sample peak is far
+// below the sum of the gains: the loudest cue peaks at 0.58, leaving about 4.8 dB
+// of headroom.  The arpeggio sits higher than the others because a bell's crest
+// factor is worse than a sine's -- at equal gain it would be quieter, and the
+// point of this change was brightness, not a quieter chime.
+const SOUND_CUES={complete:{partials:BELL_PARTIALS,gains:[0.5,0.5,0.56],notes:[[523.25,0],[659.25,0.11],[783.99,0.22]],duration:0.46},failure:{type:"square",gains:[0.36,0.36],notes:[[392,0],[261.63,0.19]],duration:0.62}};
 let soundContext=null;
+const soundWaves=new Map();
+// The periodic wave is built once per context and reused, since every note of a
+// cue shares it and building one per note would be wasted work.
+function soundWave(context,partials){const key=partials.join(",");const cached=soundWaves.get(key);if(cached)return cached;const real=new Float32Array(partials.length+1);const imag=new Float32Array(partials.length+1);partials.forEach((value,index)=>{imag[index+1]=value});const wave=context.createPeriodicWave(real,imag);soundWaves.set(key,wave);return wave}
 // Volume is a percentage of the cue's own peak level, and it is read from the
 // slider rather than from the saved settings so dragging gives immediate
 // feedback before the debounced save lands.
 function notifyVolumeValue(){const slider=$("#notifyVolume");const raw=slider?slider.value:(state.settings||{}).notify_volume;const percent=Number(raw);if(!Number.isFinite(percent))return 0.7;return Math.min(1,Math.max(0,percent/100))}
 function renderVolumeLabel(){const slider=$("#notifyVolume");const label=$("#notifyVolumeLabel");if(!slider||!label)return;const percent=Math.round(Number(slider.value)||0);label.textContent=`${percent}%`}
-function playCue(kind){const cue=SOUND_CUES[kind];if(!cue)return;const volume=notifyVolumeValue();if(!(volume>0))return;try{const Context=window.AudioContext||window.webkitAudioContext;if(!Context)return;if(!soundContext)soundContext=new Context();if(soundContext.state==="suspended")soundContext.resume();const start=soundContext.currentTime+0.02;cue.notes.forEach(([frequency,offset],index)=>{const oscillator=soundContext.createOscillator();const gain=soundContext.createGain();oscillator.type=cue.type;oscillator.frequency.setValueAtTime(frequency,start+offset);gain.gain.setValueAtTime(0.0001,start+offset);gain.gain.exponentialRampToValueAtTime((cue.gains[index]||0.16)*volume,start+offset+0.02);gain.gain.exponentialRampToValueAtTime(0.0001,start+offset+cue.duration*0.7);oscillator.connect(gain).connect(soundContext.destination);oscillator.start(start+offset);oscillator.stop(start+offset+cue.duration)})}catch{}}
+function playCue(kind){const cue=SOUND_CUES[kind];if(!cue)return;const volume=notifyVolumeValue();if(!(volume>0))return;try{const Context=window.AudioContext||window.webkitAudioContext;if(!Context)return;if(!soundContext)soundContext=new Context();if(soundContext.state==="suspended")soundContext.resume();const start=soundContext.currentTime+0.02;cue.notes.forEach(([frequency,offset],index)=>{const oscillator=soundContext.createOscillator();const gain=soundContext.createGain();oscillator.type=cue.type||"sine";if(cue.partials)oscillator.setPeriodicWave(soundWave(soundContext,cue.partials));oscillator.frequency.setValueAtTime(frequency,start+offset);gain.gain.setValueAtTime(0.0001,start+offset);gain.gain.exponentialRampToValueAtTime((cue.gains[index]||0.16)*volume,start+offset+0.02);gain.gain.exponentialRampToValueAtTime(0.0001,start+offset+cue.duration*0.7);oscillator.connect(gain).connect(soundContext.destination);oscillator.start(start+offset);oscillator.stop(start+offset+cue.duration)})}catch{}}
 function wantsCue(kind){const settings=state.settings||{};if(kind==="complete")return settings.notify_on_complete!==false;return settings.notify_on_failure!==false}
 function announceJobEnd(kind){if(wantsCue(kind))playCue(kind)}
 async function api(path,options={}){const response=await fetch(path,{headers:{"Content-Type":"application/json",...(options.headers||{})},...options});if(!response.ok){let message=`HTTP ${response.status}`;try{const body=await response.json();message=body.detail||message}catch{}throw new Error(message)}return response.json()}
