@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__
+from .batches import BatchService, make_task
 from .config import AppPaths, UserSettings
 from .hardware import detect_cpu, normalize_cpu_threads
 from .jobs import JobService
@@ -64,8 +65,13 @@ class SettingsPayload(BaseModel):
 
 
 class JobPayload(SettingsPayload):
-    source: str
-    output: str
+    # A single folder keeps the original single-job behaviour; a list queues a
+    # batch and runs the folders one after another.
+    source: str | list[str]
+    # For one folder this is the destination itself; for a batch it is the root
+    # holding one "<name>--已汉化" folder per queued source, and may be empty to
+    # place each result next to its own source.
+    output: str = ""
     reviewed_transcript: str | None = None
 
 
@@ -102,12 +108,62 @@ def _pick_folder(initial: str | None = None) -> str:
         raise RuntimeError(f"Native folder picker is unavailable: {exc}") from exc
 
 
+def _queued_targets(
+    sources: list[str], output_root: str
+) -> tuple[list[dict], list[str], int]:
+    """Validate queued folders and work out where each one writes.
+
+    A path that cannot be processed is reported here rather than halfway
+    through a long batch, so the whole queue is checked before any GPU work
+    starts.  Returns the tasks, the problems that block the batch, and how many
+    duplicate paths were dropped.
+    """
+    problems: list[str] = []
+    tasks: list[dict] = []
+    seen: set[str] = set()
+    duplicates = 0
+    for raw in sources:
+        text = (raw or "").strip().strip('"')
+        if not text:
+            continue
+        source = Path(text).expanduser()
+        # Windows paths are case insensitive, so "D:\Manga" and "d:\manga" are
+        # the same folder and must not be translated twice.
+        key = str(source).rstrip("\\/").casefold()
+        if key in seen:
+            duplicates += 1
+            continue
+        seen.add(key)
+        if not source.is_dir():
+            problems.append(f"源文件夹不存在：{source}")
+            continue
+        try:
+            images = list_images(source)
+        except ValueError as exc:
+            problems.append(str(exc))
+            continue
+        if not images:
+            problems.append(f"未找到支持的图片：{source}")
+            continue
+        resolved = source.resolve()
+        base = (
+            Path(output_root).expanduser() if output_root.strip() else resolved.parent
+        )
+        output = base / f"{resolved.name}--已汉化"
+        if output.resolve() == resolved:
+            problems.append(f"输出目录与源文件夹相同：{output}")
+            continue
+        tasks.append(make_task(len(tasks), resolved, output, len(images)))
+    return tasks, problems, duplicates
+
+
 def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     paths = (paths or AppPaths.from_env()).ensure()
     models = ModelManager(paths)
     jobs = (
         JobService(paths, pipeline_factory) if pipeline_factory else JobService(paths)
     )
+    batches = BatchService(paths, jobs)
     app = FastAPI(title="Manga Localizer Studio", version=__version__)
     tasks: dict[str, dict] = {}
     task_lock = threading.RLock()
@@ -347,8 +403,97 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         base = Path(payload.output).expanduser() if payload.output else source.parent
         return {"path": str(base / f"{source.name}--已汉化")}
 
+    @app.get("/api/paths/children")
+    def list_children(path: str):
+        """Sub-folders of ``path`` with their image counts, for bulk adding."""
+        folder = Path(path).expanduser()
+        if not folder.is_dir():
+            raise HTTPException(422, f"文件夹不存在：{folder}")
+        try:
+            entries = sorted(
+                (item for item in folder.iterdir() if item.is_dir()),
+                key=lambda item: item.name.casefold(),
+            )
+        except OSError as exc:
+            raise HTTPException(422, f"无法读取文件夹：{folder}（{exc}）") from exc
+        folders = []
+        for child in entries:
+            try:
+                images = len(list_images(child))
+            except ValueError:
+                images = 0
+            folders.append(
+                {"name": child.name, "path": str(child.resolve()), "images": images}
+            )
+        return {"path": str(folder.resolve()), "folders": folders}
+
+    def _activate(payload: JobPayload) -> tuple[UserSettings, str]:
+        """Persist the submitted settings and resolve the online API key."""
+        settings = SettingsPayload(
+            **payload.model_dump(exclude={"source", "output", "reviewed_transcript"})
+        )
+        active = save_settings_payload(settings)
+        api_key = payload.online_api_key
+        if api_key is None:
+            api_key = secrets["online_api_key"]
+        return active, api_key or ""
+
+    def _request_options(
+        payload: JobPayload, active: UserSettings, api_key: str
+    ) -> dict:
+        """Everything a PipelineRequest needs except the two folder paths."""
+        return {
+            "target_language": payload.target_language,
+            "source_language": payload.source_language,
+            "story_context": payload.story_context,
+            "context_pages": payload.context_pages,
+            "preserve_sfx": payload.preserve_sfx,
+            "quality_profile": payload.quality_profile,
+            "output_format": payload.output_format,
+            "device": payload.device,
+            "cpu_threads": active.cpu_threads,
+            "inference_backend": active.inference_backend,
+            "ocr_backend": active.ocr_backend,
+            "ollama_base_url": active.ollama_base_url,
+            "ollama_model": active.ollama_model,
+            "ollama_ocr_model": active.ollama_ocr_model,
+            "online_base_url": active.online_base_url,
+            "online_model": active.online_model,
+            "online_api_key": api_key,
+            "reviewed_transcript": (
+                Path(payload.reviewed_transcript).expanduser().resolve()
+                if payload.reviewed_transcript
+                else None
+            ),
+        }
+
+    def _create_batch(payload: JobPayload, sources: list[str]) -> dict:
+        if payload.reviewed_transcript:
+            raise HTTPException(
+                422, "已审校 transcript 只能用于单个文件夹，请先只保留一个源文件夹"
+            )
+        tasks, problems, duplicates = _queued_targets(sources, payload.output)
+        if problems:
+            raise HTTPException(422, "；".join(problems))
+        if not tasks:
+            raise HTTPException(422, "没有可用的文件夹：请至少添加一个包含图片的文件夹")
+        active, api_key = _activate(payload)
+        return batches.submit(
+            tasks,
+            _request_options(payload, active, api_key),
+            active,
+            duplicates=duplicates,
+            output_root=payload.output.strip(),
+        )
+
     @app.post("/api/jobs")
     def create_job(payload: JobPayload):
+        # A list of folders is a batch; a single path keeps the original
+        # response shape, so existing callers do not have to change.
+        if isinstance(payload.source, list):
+            return _create_batch(payload, payload.source)
+        if not payload.output.strip():
+            raise HTTPException(422, "Output folder is required")
         source = Path(payload.source).expanduser().resolve()
         output = Path(payload.output).expanduser().resolve()
         if not source.is_dir():
@@ -361,47 +506,43 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             raise HTTPException(422, "No supported images found")
         if source == output:
             raise HTTPException(422, "Output folder must differ from source")
-        settings = SettingsPayload(
-            **payload.model_dump(exclude={"source", "output", "reviewed_transcript"})
-        )
-        active = save_settings_payload(settings)
-        api_key = payload.online_api_key
-        if api_key is None:
-            api_key = secrets["online_api_key"]
+        active, api_key = _activate(payload)
         request = PipelineRequest(
             source=source,
             output=output,
-            target_language=payload.target_language,
-            source_language=payload.source_language,
-            story_context=payload.story_context,
-            context_pages=payload.context_pages,
-            preserve_sfx=payload.preserve_sfx,
-            quality_profile=payload.quality_profile,
-            output_format=payload.output_format,
-            device=payload.device,
-            cpu_threads=active.cpu_threads,
-            inference_backend=active.inference_backend,
-            ocr_backend=active.ocr_backend,
-            ollama_base_url=active.ollama_base_url,
-            ollama_model=active.ollama_model,
-            ollama_ocr_model=active.ollama_ocr_model,
-            online_base_url=active.online_base_url,
-            online_model=active.online_model,
-            online_api_key=api_key or "",
-            reviewed_transcript=(
-                Path(payload.reviewed_transcript).expanduser().resolve()
-                if payload.reviewed_transcript
-                else None
-            ),
+            **_request_options(payload, active, api_key),
         )
         return jobs.submit(request, total=image_count)
+
+    @app.post("/api/batches")
+    def create_batch(payload: JobPayload):
+        sources = (
+            payload.source if isinstance(payload.source, list) else [payload.source]
+        )
+        return _create_batch(payload, sources)
 
     @app.get("/api/jobs")
     def list_jobs():
         return {"jobs": jobs.store.list()}
 
+    @app.get("/api/batches")
+    def list_batches():
+        return {"batches": batches.list()}
+
+    @app.get("/api/batches/{batch_id}")
+    def get_batch(batch_id: str):
+        batch = batches.get(batch_id)
+        if not batch:
+            raise HTTPException(404, "Batch not found")
+        return batch
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
+        # Batches share this poll endpoint so the UI can keep one refresh loop
+        # and does not need to know which kind of id it is holding.
+        batch = batches.get(job_id)
+        if batch:
+            return batch
         job = jobs.store.get(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
@@ -409,6 +550,8 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/pause")
     def pause_job(job_id: str):
+        if batches.store.get(job_id):
+            return batches.pause(job_id)
         job = jobs.pause(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
@@ -416,6 +559,8 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/resume")
     def resume_job(job_id: str):
+        if batches.store.get(job_id):
+            return batches.resume(job_id)
         job = jobs.resume(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
@@ -423,6 +568,8 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: str):
+        if batches.store.get(job_id):
+            return batches.cancel(job_id)
         job = jobs.cancel(job_id)
         if not job:
             raise HTTPException(404, "Job not found")
@@ -467,6 +614,9 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         so a running pipeline would otherwise keep the process alive after
         uvicorn stops.
         """
+        for batch in batches.store.list():
+            if batch.get("status") in {"queued", "running"}:
+                batches.cancel(batch["id"])
         for job in jobs.store.list():
             if job["status"] in {"queued", "running", "paused"}:
                 jobs.cancel(job["id"])
@@ -496,6 +646,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     app.state.paths = paths
     app.state.models = models
     app.state.jobs = jobs
+    app.state.batches = batches
     return app
 
 

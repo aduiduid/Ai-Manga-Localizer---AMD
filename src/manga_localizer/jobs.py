@@ -65,6 +65,11 @@ class _JobGate:
         with self._condition:
             return self._paused
 
+    @property
+    def cancelled(self) -> bool:
+        with self._condition:
+            return self._cancelled
+
     def pause(self) -> bool:
         with self._condition:
             if self._cancelled or self._paused:
@@ -214,13 +219,35 @@ class JobService:
                 )
                 self.store.save(job)
 
-    def submit(self, request: PipelineRequest, total: int = 0) -> dict:
+    def create_job(self, request: PipelineRequest, total: int = 0) -> dict:
+        """Write the queued record and wire its gate, without starting work.
+
+        Split out of submit() so a batch can show its whole queue up front and
+        hand each record to the worker only when that folder's turn comes.
+        """
         # Store the page count before the worker can start, avoiding an API-side
         # follow-up save that could race and overwrite live progress fields.
         job = self.store.create(request, total=total)
         with self._gate_lock:
             self._gates[job["id"]] = _JobGate()
-        self.executor.submit(self._run, job["id"], request)
+        return job
+
+    def start(self, job_id: str, request: PipelineRequest):
+        """Hand an already-created record to the single worker thread."""
+        return self.executor.submit(self._run, job_id, request)
+
+    def discard(self, job_id: str) -> None:
+        """Forget the gate of a record that will never be started.
+
+        A queued job dropped by its batch never reaches _run(), which is the one
+        place that would otherwise pop the gate.
+        """
+        with self._gate_lock:
+            self._gates.pop(job_id, None)
+
+    def submit(self, request: PipelineRequest, total: int = 0) -> dict:
+        job = self.create_job(request, total=total)
+        self.start(job["id"], request)
         return job
 
     def pause(self, job_id: str) -> dict | None:
@@ -278,6 +305,14 @@ class JobService:
             return
         with self._gate_lock:
             gate = self._gates.get(job_id) or _JobGate()
+        # Cancelled before the worker got here (an abandoned batch entry): stop
+        # now, so no OCR or render work is started for a job nobody wants.
+        if gate.cancelled:
+            job.update(status="cancelled", phase="cancelled", message="已结束")
+            self.store.save(job)
+            with self._gate_lock:
+                self._gates.pop(job_id, None)
+            return
         # A pause issued while the job was still queued must survive the start.
         if not gate.paused:
             job.update(status="running", phase="prepare", message="准备本地化")

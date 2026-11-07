@@ -68,8 +68,17 @@ class AppPaths:
             settings=root / "settings.json",
         )
 
+    @property
+    def batches(self) -> Path:
+        """Where batch (queue) records live, one JSON per batch.
+
+        A property rather than a field because AppPaths is built positionally by
+        older callers, and a batch is just another record store next to jobs.
+        """
+        return self.root / "batches"
+
     def ensure(self) -> "AppPaths":
-        for path in (self.root, self.models, self.cache, self.jobs):
+        for path in (self.root, self.models, self.cache, self.jobs, self.batches):
             path.mkdir(parents=True, exist_ok=True)
         return self
 

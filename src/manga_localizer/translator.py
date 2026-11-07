@@ -1279,6 +1279,26 @@ class HyMTTranslator(PromptTranslator):
             self.torch.cuda.empty_cache()
 
 
+def release_ollama_model(base_url: str, model: str) -> bool:
+    """Ask Ollama to evict ``model`` now, which is what ``ollama stop`` does.
+
+    Ollama keeps a model resident for five minutes after its last request, so a
+    finished run still pins several GB of VRAM / system memory.  Releasing is
+    best effort by design: a failed release must never fail the caller, which is
+    why this reports success instead of raising.
+    """
+    if not model.strip():
+        return False
+    try:
+        _json_request(
+            _endpoint(base_url, "/api/chat"),
+            {"model": model, "messages": [], "stream": False, "keep_alive": 0},
+        )
+    except InferenceConnectionError:
+        return False
+    return True
+
+
 class OllamaTranslator(PromptTranslator):
     def __init__(
         self,
@@ -1324,20 +1344,10 @@ class OllamaTranslator(PromptTranslator):
         if not self._loaded:
             return
         try:
-            _json_request(
-                _endpoint(self.base_url, "/api/chat"),
-                {
-                    "model": self.model,
-                    "messages": [],
-                    "stream": False,
-                    "keep_alive": 0,
-                },
-            )
-        except InferenceConnectionError:
+            release_ollama_model(self.base_url, self.model)
+        finally:
             # Unloading is an optimization. A failed best-effort release must
             # not discard an otherwise valid translation draft.
-            return
-        finally:
             self._loaded = False
 
     def _generate_json(

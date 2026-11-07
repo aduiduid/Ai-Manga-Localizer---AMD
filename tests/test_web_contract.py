@@ -199,10 +199,182 @@ def test_sidebar_shows_the_job_clock():
     assert ".job-clock{" in css
 
 
-def test_derive_output_lands_under_the_picked_output_root():
+def test_output_root_is_no_longer_derived_per_folder():
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
-    assert 'if(target==="#outputPath"&&$("#sourcePath").value.trim())await deriveOutput()' in javascript
-    assert 'body:JSON.stringify({initial:source,output:$("#outputPath").value.trim()||null})' in javascript
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    # The output field is a *root* now: the backend appends "<name>--已汉化" per folder, so a
+    # pre-filled suffix would nest twice. The per-folder derivation endpoint is not called at all.
+    assert "derive-output" not in javascript
+    assert "deriveOutput" not in javascript
+    assert "function taskOutputPath(source,root)" in javascript
+    assert "--已汉化" in javascript
+    assert 'id="outputPath"' in html
+
+
+def test_batch_queue_panel_and_multi_folder_entry_points():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    assert 'data-testid="batch-queue"' in html
+    assert 'data-testid="batch-tasks"' in html
+    assert 'id="batchTasks"' in html
+    assert 'id="batchSummary"' in html
+    assert 'id="batchStateChip"' in html
+    assert 'id="batchCancel"' in html
+    # Three ways to add folders: dialog, subfolder checklist, and pasting lines.
+    assert 'id="folderPicker"' in html
+    assert 'id="folderBulk"' in html
+    assert 'id="folderChildren"' in html
+    assert 'id="folderChildrenList"' in html
+    assert 'id="folderChildrenConfirm"' in html
+    # The source box is a textarea holding one absolute folder path per line.
+    assert re.search(r'<textarea[^>]*id="sourcePath"', html)
+    assert 'data-i18n-placeholder="setup.source.placeholder"' in html
+    assert 'id="sourcePicker"' not in html
+
+
+def test_batch_queue_renders_rows_with_remove_and_wires_its_controls():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "function isBatch(job){return !!job&&Array.isArray(job.tasks)}" in javascript
+    assert "function parseQueueText(text)" in javascript
+    assert "function addQueuePaths(paths)" in javascript
+    assert "function batchTaskRow(task,index,batch)" in javascript
+    assert 'data-index="${index}"' in javascript
+    assert 'data-remove="${index}"' in javascript
+    assert "function batchQueueClick(event)" in javascript
+    assert 'const remove=event.target.closest("[data-remove]")' in javascript
+    assert "function removeQueueAt(index)" in javascript
+    assert "function selectTask(index)" in javascript
+    assert "function pickChildFolders()" in javascript
+    assert "function renderChildOptions(parent)" in javascript
+    assert "function confirmChildFolders()" in javascript
+    assert "const added=addQueuePaths(picked)" in javascript
+    assert '$("#batchTasks").addEventListener("click",batchQueueClick)' in javascript
+    assert '$("#batchCancel").addEventListener("click",cancelBatch)' in javascript
+    assert '$("#folderBulk").addEventListener("click",pickChildFolders)' in javascript
+    assert '$("#folderChildrenConfirm").addEventListener("click",confirmChildFolders)' in javascript
+    assert '$("#sourcePath").addEventListener("input",()=>applySourceText(false))' in javascript
+    # Browsers only expose relative names through directory pickers, and the backend needs an
+    # absolute path it can open, so the UI explains why it uses the native dialog instead.
+    assert "webkitdirectory" in javascript
+    assert "showDirectoryPicker" in javascript
+
+
+def test_batch_submission_goes_through_the_batches_endpoint_with_validation():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'await api("/api/batches",{method:"POST"' in javascript
+    assert "output:root,...collectSettings()" in javascript
+    assert "function showSetupError(message)" in javascript
+    assert 'showSetupError(t("batch.empty"))' in javascript
+    assert 'showSetupError(t("batch.outputConflict",{path:clash}))' in javascript
+    assert "!state.queue.length||missing||missingName||running" in javascript
+
+
+def test_batch_cancel_stops_pending_rows_and_reuses_the_cancel_endpoint():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "function cancelBatch()" in javascript
+    assert 'await api(`/api/jobs/${batch.id}/cancel`,{method:"POST"})' in javascript
+    assert 'task.status="cancelled"' in javascript
+    assert 'if(isBatch(job)){await cancelBatch();return}' in javascript
+    assert 'window.confirm(t("batch.cancelConfirm"))' in javascript
+    # Pause and resume keep targeting the current child job behind the batch id.
+    assert "function jobPaused(job)" in javascript
+    assert "const paused=jobPaused(job)" in javascript
+
+
+def test_refresh_restores_an_active_batch_from_the_server():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'const data=await api("/api/batches")' in javascript
+    assert 'batches.find(batch=>batch.status==="queued"||batch.status==="running")' in javascript
+    assert "function resumeBatch()" in javascript
+    assert "const resumed=await resumeBatch();if(!resumed)await resumeJob()" in javascript
+    assert "function renderBatchJob(batch,{quiet=false}={})" in javascript
+    assert "if(Array.isArray(job.request.source))job.request.source=job.request.source.join" in javascript
+
+
+def test_resume_restores_the_setup_form_from_the_batch_request():
+    # A mid-run refresh used to restore the queue rows but leave #outputPath empty, so the
+    # next submitted batch wrote beside each source folder instead of to the chosen root.
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "function restoreJobForm(job)" in javascript
+    assert '$("#sourcePath").value=job.request.source' in javascript
+    assert '$("#outputPath").value=job.request.output' in javascript
+    assert "state.queue=parseQueueText(job.request.source)" in javascript
+    restored = javascript[javascript.index("function restoreJobForm(job)"):]
+    restored = restored[: restored.index("async function openJob(jobId)")]
+    # Legacy records created before the backend carried `request` fall back to their tasks.
+    assert "if(!job.request)job.request={}" in restored
+    assert 'if(job.request.source===undefined)job.request.source=(job.tasks||[]).map(task=>task.source).join("\\n")' in restored
+    assert 'if(job.request.output===undefined||job.request.output===null)job.request.output=""' in restored
+    assert "writeQueueText();clearSetupError();renderBatchQueue()" in restored
+    # Both entry points must share the helper so they cannot drift apart again.
+    assert javascript.count("restoreJobForm(") == 3
+    active_branch = javascript[javascript.index('if(active){state.taskIndex=-1;restoreJobForm(active)'):]
+    assert active_branch.startswith('if(active){state.taskIndex=-1;restoreJobForm(active);renderJob(active);pollJob()}')
+
+
+def test_preview_follows_the_selected_batch_task():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "function previewTarget()" in javascript
+    assert "function previewTotal()" in javascript
+    assert "if(!task||!task.job_id)return null" in javascript
+    assert "const job=previewTarget();if(!job||!job.total){resetPreview();return}" in javascript
+    assert "function resetPreview()" in javascript
+    assert "previewTotal()||1" in javascript
+
+
+def test_batch_terminal_state_rings_the_chime_once():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    batch_branch = javascript[javascript.index("if(isBatch(job)){"):]
+    assert 'if(job.status==="completed"){announceJobEnd("complete")' in batch_branch
+    assert 'else if(job.status==="failed"){announceJobEnd("failure")' in batch_branch
+    assert 'else if(job.status==="cancelled"){announceJobEnd("failure")' in batch_branch
+    # A finished batch is not polled again: only live batches reschedule.
+    assert "else state.pollTimer=setTimeout(pollJob,1000);return}" in batch_branch
+
+
+def test_batch_translations_cover_every_locale():
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    keys = [
+        "batch.title",
+        "batch.empty",
+        "batch.add",
+        "batch.addChildren",
+        "batch.remove",
+        "batch.cancel",
+        "batch.cancelConfirm",
+        "batch.sourceHint",
+        "batch.outputRoot.hint",
+        "batch.duplicates",
+        "batch.outputConflict",
+        "batch.running",
+        "batch.detail",
+        "batch.sidebarDetail",
+        "batch.summary.count",
+        "batch.summary.running",
+        "batch.summary.result",
+        "batch.summary.cancelled",
+        "batch.pickChildren.title",
+        "batch.pickChildren.detail",
+        "batch.pickChildren.empty",
+        "batch.pickChildren.images",
+        "batch.pickChildren.none",
+        "batch.pickChildren.confirm",
+        "batch.pickChildren.cancel",
+    ]
+    keys += [f"batch.status.{status}" for status in ("queued", "running", "completed", "failed", "cancelled")]
+    keys += [f"batch.task.{status}" for status in ("queued", "running", "paused", "complete", "failed", "cancelled")]
+    for key in keys:
+        assert i18n.count(f'"{key}":') == 3, key
+
+
+def test_batch_queue_styles_reuse_the_design_variables():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    assert "grid-template-columns:1fr 1fr 140px 140px" in css
+    assert ".path-field.multiline{" in css
+    assert ".setup-error{" in css
+    assert ".batch-task.running{" in css
+    assert ".batch-task.selected{" in css
+    assert ".batch-task-error{" in css
+    assert ".child-option.disabled{" in css
 
 
 def test_cpu_thread_picker_is_built_from_the_detected_cpu():
