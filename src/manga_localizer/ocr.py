@@ -30,6 +30,12 @@ def manga_force_cpu(device: str, cuda_available: bool) -> bool:
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 JP_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+# The user can declare what the book is written in.  "auto" keeps the detector's
+# own Latin/Japanese arbitration, which is right for mixed books; declaring the
+# script makes the recognizer choice deterministic and stops MangaOCR from
+# inventing kana on an English page or Paddle from dropping kana-only lines on a
+# Japanese one.
+SOURCE_LANGUAGES = ("auto", "en", "ja")
 KATAKANA_RE = re.compile(r"^[\u30a0-\u30ffー・…ッっ♡♥！？!?.．]+$")
 EXPLICIT_SKIP_REASONS = frozenset({"duplicate", "noise", "decorative", "preserve"})
 URL_RE = re.compile(
@@ -689,6 +695,45 @@ def is_latin_page(regions: list[dict]) -> bool:
     return latin > 0 and latin > script * 2
 
 
+def language_label(source_language: str) -> str:
+    """Human name of a declared source language, for prompts and logs."""
+    return {"en": "English", "ja": "Japanese"}.get(source_language, "auto")
+
+
+def language_label_zh(source_language: str) -> str:
+    """The same label in the language the Chinese semantic prompts are written in."""
+    return {"en": "英语", "ja": "日语"}.get(source_language, "日语")
+
+
+def page_reads_as_latin(regions: list[dict], source_language: str = "auto") -> bool:
+    """Whether this page's regions should be read as Latin rather than Japanese.
+
+    An explicit source language wins over the detector's own guess: on a declared
+    English book a page of shouted Cyrillic-looking effects or a half-empty page
+    no longer has to score as "mostly Latin" before Paddle's text is trusted, and
+    on a declared Japanese book a page that happens to contain a long Latin sign
+    no longer throws the whole page onto the Latin path.
+    """
+    if source_language == "en":
+        return True
+    if source_language == "ja":
+        return False
+    return is_latin_page(regions)
+
+
+def is_source_text(text: str, source_language: str = "auto") -> bool:
+    """Whether a reading is written in the declared source language.
+
+    ``auto`` keeps the historical behaviour, where every accepted reading had to
+    contain Japanese.  A declared English book instead requires Latin letters --
+    the vision model sometimes answers a Japanese caption in English, and that
+    had to be dropped rather than treated as the original.
+    """
+    if source_language == "en":
+        return bool(re.search(r"[A-Za-z\u00c0-\u024f]", text))
+    return bool(JP_RE.search(text))
+
+
 def _is_latin_region(text: str, score: float) -> bool:
     """Decide whether a region holds Latin-script dialogue rather than Japanese.
 
@@ -1174,7 +1219,13 @@ class PaddleMangaOCR:
     ``fast`` keeps the detection-only path for previews and low-end machines.
     """
 
-    def __init__(self, paths: AppPaths, device: str = "auto", profile: str = "quality"):
+    def __init__(
+        self,
+        paths: AppPaths,
+        device: str = "auto",
+        profile: str = "quality",
+        source_language: str = "auto",
+    ):
         configure_model_caches(paths)
         try:
             from manga_ocr import MangaOcr
@@ -1192,7 +1243,10 @@ class PaddleMangaOCR:
         resolved_device = self._resolve_device(device)
         if profile not in {"quality", "fast"}:
             raise ValueError(f"Unknown OCR profile: {profile}")
+        if source_language not in SOURCE_LANGUAGES:
+            raise ValueError(f"Unknown source language: {source_language}")
         self.profile = profile
+        self.source_language = source_language
         with _suppress_optional_ccache_warning():
             # Recognition-independent detection is the source of truth.  A
             # Chinese recognizer can score valid Japanese too low, so its
@@ -1326,6 +1380,11 @@ class PaddleMangaOCR:
         return bool(_cover_title_units(page.units, page.width, page.height))
 
     def refine_cover_title(self, image_path: Path, page: PageOCR) -> PageOCR:
+        if self._declared_language() == "en":
+            # The merge exists to give MangaOCR one crop of a stylised Japanese
+            # title.  On a declared English book MangaOCR would invent kana for
+            # it, so the per-box Paddle readings must be left as they are.
+            return page
         candidates = _cover_title_units(page.units, page.width, page.height)
         if not candidates:
             return page
@@ -1453,6 +1512,28 @@ class PaddleMangaOCR:
             readings.append(self.reader(variant).strip())
         return rescue_reading_is_stable(readings)
 
+    def _declared_language(self) -> str:
+        """The user-declared input language, defaulting to auto-detection.
+
+        Instances rebuilt through ``__new__`` in tests predate the setting, so the
+        attribute is looked up defensively instead of read directly.
+        """
+        return getattr(self, "source_language", "auto")
+
+    def _reads_latin(self, text: str, score: float) -> bool:
+        """Whether a recognized string should be taken as the Latin original.
+
+        With the input language declared the answer is fixed: on an English book
+        Paddle's Latin reading is always preferred, and on a Japanese book a
+        stray Latin sign must never pull a kana-only line onto the Latin path.
+        """
+        declared = self._declared_language()
+        if declared == "en":
+            return bool(str(text).strip())
+        if declared == "ja":
+            return False
+        return _is_latin_region(text, score)
+
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
         image = Image.open(image_path).convert("RGB")
         results = list(self.detector.predict(str(image_path)))
@@ -1489,7 +1570,7 @@ class PaddleMangaOCR:
         # one unit, so a caption and a speech bubble were translated as a single
         # line.  Paddle's recognizer reads Latin text reliably, so a Latin page
         # keeps only the boxes that actually carry a string.
-        if is_latin_page(regions):
+        if page_reads_as_latin(regions, self._declared_language()):
             regions = [item for item in regions if str(item.get("text", "")).strip()]
         groups = _groups(regions)
         groups.sort(
@@ -1505,7 +1586,7 @@ class PaddleMangaOCR:
             # own text; Japanese regions keep MangaOCR, which is far better at
             # kana than the Chinese/English recognizer.
             paddle_text, paddle_score = _best_recognized_text(group)
-            if _is_latin_region(paddle_text, paddle_score):
+            if self._reads_latin(paddle_text, paddle_score):
                 # On an English page the detector's text-less boxes are often
                 # artwork (a mane, a garment) that merely sat next to a caption.
                 # Keeping them inflated the unit to the artwork's size, so the
@@ -1545,23 +1626,32 @@ class PaddleMangaOCR:
             # carries a recognized string from one of the two passes.
             if not paddle_text and _area(box) < 4_000:
                 continue
-            manga_text = self.reader(crop).strip()
-            if _is_latin_region(paddle_text, paddle_score):
-                refined = paddle_text
-            elif JP_RE.search(manga_text):
-                # Large display lettering can defeat both Paddle passes, so the
-                # area gate above deliberately lets MangaOCR rescue a text-less
-                # box -- but MangaOCR never says "nothing", and its inventions
-                # also pass JP_RE.  Ask for the same reading from shifted crops.
-                if not paddle_text and not self._rescue_reading_is_stable(
-                    image, box, reverse, manga_text
-                ):
+            if self._declared_language() == "en":
+                # A declared English book never needs the Japanese recognizer:
+                # given Latin bubbles it invents fluent kana, and given artwork it
+                # invents dates.  Paddle's own reading is the original text, so a
+                # box it could not read is a box with no text at all.
+                if not paddle_text.strip():
                     continue
-                refined = manga_text
-            elif _is_latin_region(manga_text, paddle_score):
-                refined = manga_text
+                refined = paddle_text
             else:
-                continue
+                manga_text = self.reader(crop).strip()
+                if self._reads_latin(paddle_text, paddle_score):
+                    refined = paddle_text
+                elif JP_RE.search(manga_text):
+                    # Large display lettering can defeat both Paddle passes, so the
+                    # area gate above deliberately lets MangaOCR rescue a text-less
+                    # box -- but MangaOCR never says "nothing", and its inventions
+                    # also pass JP_RE.  Ask for the same reading from shifted crops.
+                    if not paddle_text and not self._rescue_reading_is_stable(
+                        image, box, reverse, manga_text
+                    ):
+                        continue
+                    refined = manga_text
+                elif self._reads_latin(manga_text, paddle_score):
+                    refined = manga_text
+                else:
+                    continue
             score = max((item["score"] for item in group), default=0.0)
             clean = refined.strip()
             # A vertical Japanese bubble is one column per detector box.  Paddle
@@ -1572,7 +1662,7 @@ class PaddleMangaOCR:
             erase_boxes = [item["box"] for item in group]
             if (
                 JP_RE.search(clean)
-                and not _is_latin_region(paddle_text, paddle_score)
+                and not self._reads_latin(paddle_text, paddle_score)
                 and not reverse
             ):
                 widened_text, extra_boxes = self._adjacent_column_reading(
@@ -1618,6 +1708,12 @@ class PaddleMangaOCR:
         MangaOCR independently recognizes Japanese in the recovered geometry.
         """
         if not missing:
+            return page
+        if self._declared_language() == "en":
+            # Recovery is validated by asking MangaOCR for Japanese inside the
+            # enlarged crop; on a declared English book that question is wrong, so
+            # the VLM's own report is all we would have -- and it must not enlarge
+            # an erase mask on its own.
             return page
         image = Image.open(image_path).convert("RGB")
         recovered_regions: list[dict] = []
@@ -1937,10 +2033,19 @@ class OllamaVisionOCR:
     local service boundary for OCR and translation without any cloud API.
     """
 
-    def __init__(self, base_url: str, model: str, timeout: int = 300):
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: int = 300,
+        source_language: str = "auto",
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model.strip()
         self.timeout = timeout
+        if source_language not in SOURCE_LANGUAGES:
+            raise ValueError(f"Unknown source language: {source_language}")
+        self.source_language = source_language
         if not self.model:
             raise ValueError("An Ollama vision model is required for Ollama OCR")
 
@@ -2042,7 +2147,8 @@ class OllamaVisionOCR:
         with Image.open(image_path) as image:
             width, height = image.size
         prompt = (
-            "Detect every Japanese text region in this manga page, including dialogue, "
+            f"Detect every {language_label(self.source_language) if self.source_language != 'auto' else 'Japanese'} "
+            "text region in this manga page, including dialogue, "
             "narration and sound effects. Furigana annotating kanji is reading evidence, "
             "not a second copy of the text: return the main kanji expression once. "
             "Return JSON only as "
@@ -2099,7 +2205,11 @@ class OllamaVisionOCR:
                 text = str(region.get("text", "")).strip()
             except (KeyError, TypeError, ValueError):
                 continue
-            if box[2] <= box[0] or box[3] <= box[1] or not JP_RE.search(text):
+            if (
+                box[2] <= box[0]
+                or box[3] <= box[1]
+                or not is_source_text(text, self.source_language)
+            ):
                 continue
             pad_x = max(8, round((box[2] - box[0]) * 0.04))
             pad_y = max(8, round((box[3] - box[1]) * 0.03))
@@ -2164,14 +2274,14 @@ class OllamaVisionOCR:
             f"{index}. {unit.id}: {unit.ja}"
             for index, unit in enumerate(page.units, start=1)
         )
-        prompt = f"""你会收到同一张日语漫画的两幅图：第一幅是无标记原图，第二幅有红色编号框。
+        prompt = f"""你会收到同一张{language_label_zh(self.source_language)}漫画的两幅图：第一幅是无标记原图，第二幅有红色编号框。
 逐框结合整页上下文校正 OCR。红框和数字是程序标记，不属于漫画文字。
-必须为每个 id 返回一项；不要翻译。text 只写框内日文，保留标点和语气符号。
+必须为每个 id 返回一项；不要翻译。text 只写框内{language_label_zh(self.source_language)}，保留标点和语气符号。
 汉字旁或上方的振假名只用于确认读音，不得把“振假名＋汉字正文”重复写入 text；保留汉字正文一次。只有不属于汉字注音的独立假名才抄写。
 role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/效果字）、artwork（衣服印花、商标、招牌或画面道具文字）和 noise（误检）。
 衣服、包装和背景物件上的装饰字属于 artwork，不能当对白；一个框同时含对白和 artwork 时只抄对白并选 dialogue。
 仅 role=sfx 时填写最接近的 effect_kind，否则填 none。
-如果页面上还有未被任何红框覆盖的可见日文，写入 missing，bbox 使用 0 到 1000 的归一化整数；没有则返回空数组。
+如果页面上还有未被任何红框覆盖的可见{language_label_zh(self.source_language)}，写入 missing，bbox 使用 0 到 1000 的归一化整数；没有则返回空数组。
 
 当前机器 OCR 候选：
 {candidates}"""
@@ -2279,7 +2389,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
             item
             for item in payload.get("missing", [])
             if isinstance(item, dict)
-            and JP_RE.search(str(item.get("text", "")))
+            and is_source_text(str(item.get("text", "")), self.source_language)
             and float(item.get("score", 0.0)) >= 0.75
         ]
         return page, missing
@@ -2312,9 +2422,9 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
             },
             "required": ["missing"],
         }
-        prompt = """第一张是日语漫画原图，第二张有红色编号框。此任务只做漏字召回，不校正红框 id。
+        prompt = f"""第一张是{language_label_zh(self.source_language)}漫画原图，第二张有红色编号框。此任务只做漏字召回，不校正红框 id。
 逐处检查原图里所有没有被红框完整覆盖、或只被红框覆盖一部分的可见文字，特别注意白色填充黑色描边、斜排、竖排、拟声词和标点效果字。
-missing.text 必须逐字抄写完整日文，不翻译；bbox 使用 0 到 1000 的整页归一化整数并包住完整文字。已经被红框完整覆盖的文字不要重复。没有遗漏才返回空数组。"""
+missing.text 必须逐字抄写完整{language_label_zh(self.source_language)}，不翻译；bbox 使用 0 到 1000 的整页归一化整数并包住完整文字。已经被红框完整覆盖的文字不要重复。没有遗漏才返回空数组。"""
         payload = self._chat(
             [image_path.read_bytes(), self._annotated_image(image, page)],
             prompt,
@@ -2324,7 +2434,7 @@ missing.text 必须逐字抄写完整日文，不翻译；bbox 使用 0 到 1000
             item
             for item in payload.get("missing", [])
             if isinstance(item, dict)
-            and JP_RE.search(str(item.get("text", "")))
+            and is_source_text(str(item.get("text", "")), self.source_language)
             and float(item.get("score", 0.0)) >= 0.72
         ]
 
@@ -2780,10 +2890,12 @@ class HybridMangaOCR:
         model: str = DEFAULT_OLLAMA_VISION_MODEL,
         device: str = "auto",
         profile: str = "quality",
+        source_language: str = "auto",
     ):
-        self.geometry = PaddleMangaOCR(paths, device, profile)
-        self.semantics = OllamaVisionOCR(base_url, model)
+        self.geometry = PaddleMangaOCR(paths, device, profile, source_language)
+        self.semantics = OllamaVisionOCR(base_url, model, source_language=source_language)
         self.profile = profile
+        self.source_language = source_language
         self.last_missing: list[dict] = []
 
     @staticmethod

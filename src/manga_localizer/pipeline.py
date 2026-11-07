@@ -103,6 +103,7 @@ class PipelineRequest:
     source: Path
     output: Path
     target_language: str = "简体中文"
+    source_language: str = "auto"
     story_context: bool = True
     context_pages: int = 6
     preserve_sfx: bool = False
@@ -153,6 +154,7 @@ class LocalizerPipeline:
         ocr_backend: str = "builtin",
         quality_profile: str = "quality",
         ocr_model: str = "",
+        source_language: str = "auto",
     ) -> PageOCR | None:
         cache_path = work / f"{image_path.stem}.ocr.json"
         if not cache_path.is_file():
@@ -176,6 +178,10 @@ class LocalizerPipeline:
             if metadata.get("ocr_backend") != ocr_backend:
                 return None
             if metadata.get("quality_profile") != quality_profile:
+                return None
+            # The declared input language changes which recognizer owns each box,
+            # so a page cached under another declaration is not reusable.
+            if metadata.get("source_language", "auto") != source_language:
                 return None
             if (
                 ocr_backend in {"hybrid", "ollama"}
@@ -244,6 +250,7 @@ class LocalizerPipeline:
                         if request.ocr_backend in {"hybrid", "ollama"}
                         else ""
                     ),
+                    request.source_language,
                 )
                 for index, image_path in enumerate(files, start=1)
             ]
@@ -259,7 +266,10 @@ class LocalizerPipeline:
             if any(page is None for page in cached_pages) or any(title_refinements):
                 if request.ocr_backend == "builtin":
                     ocr = PaddleMangaOCR(
-                        self.paths, request.device, request.quality_profile
+                        self.paths,
+                        request.device,
+                        request.quality_profile,
+                        request.source_language,
                     )
                 elif request.ocr_backend == "hybrid":
                     self._emit(emit, "ocr", 0, total, "检查本地视觉语义模型")
@@ -272,10 +282,13 @@ class LocalizerPipeline:
                         request.ollama_ocr_model,
                         request.device,
                         request.quality_profile,
+                        request.source_language,
                     )
                 elif request.ocr_backend == "ollama":
                     ocr = OllamaVisionOCR(
-                        request.ollama_base_url, request.ollama_ocr_model
+                        request.ollama_base_url,
+                        request.ollama_ocr_model,
+                        source_language=request.source_language,
                     )
                 else:
                     raise ValueError(f"Unknown OCR backend: {request.ocr_backend}")
@@ -322,6 +335,7 @@ class LocalizerPipeline:
                         ),
                         "source_size": source_stat.st_size,
                         "source_mtime_ns": source_stat.st_mtime_ns,
+                        "source_language": request.source_language,
                     }
                     (work / f"{image_path.stem}.ocr.json").write_text(
                         json.dumps(page_payload, ensure_ascii=False, indent=2),
@@ -539,6 +553,7 @@ def request_from_settings(
         source=source,
         output=output,
         target_language=settings.target_language,
+        source_language=settings.source_language,
         story_context=settings.story_context,
         context_pages=settings.context_pages,
         preserve_sfx=settings.preserve_sfx,

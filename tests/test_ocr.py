@@ -13,6 +13,7 @@ from manga_localizer.ocr import (
     OllamaVisionOCR,
     PageOCR,
     PaddleMangaOCR,
+    SOURCE_LANGUAGES,
     TextUnit,
     _best_recognized_text,
     _connects,
@@ -24,6 +25,9 @@ from manga_localizer.ocr import (
     duplicate_tiny_fragment,
     deduplicate_nested_region_groups,
     is_latin_page,
+    is_source_text,
+    language_label,
+    language_label_zh,
     likely_sfx_text,
     link_block_text,
     list_images,
@@ -32,6 +36,7 @@ from manga_localizer.ocr import (
     merge_region_candidates,
     merge_semantic_missing,
     overlapping_sfx_echo,
+    page_reads_as_latin,
     page_spanning_display_artwork,
     prefer_semantic_ocr,
     prune_nested_duplicate_units,
@@ -1207,6 +1212,89 @@ def test_widened_reading_is_rejected_when_it_loses_the_original_text(tmp_path):
 
     page = service.analyze(source, 1)
     assert [unit.ja for unit in page.units] == ["それなのにわざわざ私に"]
+
+
+def test_declared_source_language_overrides_latin_detection():
+    """Declaring the input script settles what ``auto`` has to infer.
+
+    ``auto`` still asks the page; ``en`` forces the Latin path and ``ja`` forces
+    the Japanese one, so a single English sign in a Japanese book cannot drag a
+    kana line onto the Latin path and an all-kana English page still gets OCRed.
+    """
+    japanese = [{"box": [0, 0, 90, 90], "text": "それは", "score": 0.9}]
+    latin = [{"box": [0, 0, 300, 40], "text": "ASK YOUR MOTHER", "score": 0.94}]
+
+    assert page_reads_as_latin(japanese) is False
+    assert page_reads_as_latin(latin) is True
+    assert page_reads_as_latin(japanese, "en") is True
+    assert page_reads_as_latin(latin, "ja") is False
+    assert page_reads_as_latin(japanese, "auto") is False
+
+    assert is_source_text("それは", "auto") is True
+    assert is_source_text("ASK YOUR MOTHER", "auto") is False
+    assert is_source_text("ASK YOUR MOTHER", "en") is True
+    assert is_source_text("それは", "en") is False
+    assert is_source_text("それは", "ja") is True
+
+    assert language_label("en") == "English"
+    assert language_label("ja") == "Japanese"
+    assert language_label("auto") == "auto"
+    assert language_label_zh("en") == "英语"
+    assert language_label_zh("ja") == "日语"
+
+
+def test_declared_english_book_never_calls_the_japanese_recognizer(tmp_path):
+    """MangaOCR only reads Japanese; on a declared English book it can only
+    invent kana, so the recognizer must not be consulted at all."""
+    source = tmp_path / "page.png"
+    Image.new("RGB", (800, 1129), "white").save(source)
+
+    class Detector:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "rec_boxes": [[40, 60, 760, 110], [40, 300, 700, 420]],
+                        "rec_texts": ["ASK YOUR MOTHER ABOUT THE STARS", ""],
+                        "rec_scores": [0.94, 0.62],
+                    }
+                }
+            ]
+
+    def refuse(_crop):
+        raise AssertionError("the Japanese recognizer must not run on an English book")
+
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.detector = Detector()
+    service.recognition_detector = None
+    service.reader = refuse
+    service.source_language = "en"
+
+    page = service.analyze(source, 1)
+    assert [unit.ja for unit in page.units] == ["ASK YOUR MOTHER ABOUT THE STARS"]
+
+
+def test_declared_japanese_book_treats_latin_reading_as_not_latin():
+    """A stray Latin sign must not reroute a kana-only line."""
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.source_language = "ja"
+    assert service._reads_latin("ASK YOUR MOTHER", 0.95) is False
+    assert service._reads_latin("それは", 0.95) is False
+
+    service.source_language = "en"
+    assert service._reads_latin("ASK YOUR MOTHER", 0.10) is True
+    assert service._reads_latin("", 0.95) is False
+
+    # Instances rebuilt through __new__ predate the setting.
+    del service.source_language
+    assert service._declared_language() == "auto"
+    assert service._reads_latin("ASK YOUR MOTHER", 0.95) is True
+
+
+def test_unknown_source_language_is_rejected():
+    """A typo in the setting must fail loudly, not silently fall back to auto."""
+    assert "klingon" not in SOURCE_LANGUAGES
+    assert SOURCE_LANGUAGES == ("auto", "en", "ja")
 
 
 def test_link_blocks_are_preserved_instead_of_translated():

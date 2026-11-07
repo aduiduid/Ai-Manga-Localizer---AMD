@@ -44,6 +44,7 @@ class AppPaths:
 @dataclass
 class UserSettings:
     target_language: str = "简体中文"
+    source_language: str = "auto"
     story_context: bool = True
     context_pages: int = 6
     preserve_sfx: bool = False

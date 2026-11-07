@@ -55,6 +55,17 @@ def test_target_language_values_are_stable_across_ui_locales():
     assert '<option value="English" data-i18n="target.english">' in html
 
 
+def test_source_language_values_are_stable_across_ui_locales():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    assert 'id="sourceLanguage"' in html
+    assert '<option value="auto" data-i18n="source.auto">' in html
+    assert '<option value="en" data-i18n="source.en">' in html
+    assert '<option value="ja" data-i18n="source.ja">' in html
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    # The setup row gained a fourth control, so the grid must have four tracks.
+    assert "grid-template-columns:1fr 1fr 140px 140px" in css
+
+
 def test_every_static_translation_key_exists_in_all_locales():
     html = (WEB / "index.html").read_text(encoding="utf-8")
     javascript = (WEB / "app.js").read_text(encoding="utf-8")

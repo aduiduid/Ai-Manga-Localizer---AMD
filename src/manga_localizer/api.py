@@ -35,6 +35,7 @@ class FolderRequest(BaseModel):
 
 class SettingsPayload(BaseModel):
     target_language: str = "简体中文"
+    source_language: Literal["auto", "en", "ja"] = "auto"
     story_context: bool = True
     context_pages: int = Field(6, ge=0, le=12)
     preserve_sfx: bool = False
@@ -349,6 +350,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             source=source,
             output=output,
             target_language=payload.target_language,
+            source_language=payload.source_language,
             story_context=payload.story_context,
             context_pages=payload.context_pages,
             preserve_sfx=payload.preserve_sfx,

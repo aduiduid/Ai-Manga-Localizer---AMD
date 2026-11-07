@@ -41,6 +41,7 @@
               <label><span data-i18n="setup.source">源图片文件夹</span><div class="path-field"><i>▰</i><input id="sourcePath" autocomplete="off" placeholder="选择包含漫画图片的文件夹" data-i18n-placeholder="setup.source.placeholder"><button id="sourcePicker" data-i18n="setup.pickFolder">选择文件夹</button></div></label>
               <label><span data-i18n="setup.output">输出目录</span><div class="path-field"><i>▱</i><input id="outputPath" autocomplete="off" placeholder="不会覆盖源图片" data-i18n-placeholder="setup.output.placeholder"><button id="outputPicker" data-i18n="setup.pickFolder">选择文件夹</button></div></label>
               <label><span data-i18n="setup.target">目标语言</span><select id="targetLanguage"><option value="简体中文" data-i18n="target.zhHans">简体中文</option><option value="繁体中文" data-i18n="target.zhHant">繁体中文</option><option value="English" data-i18n="target.english">English</option></select></label>
+              <label><span data-i18n="setup.sourceLanguage">输入语言</span><select id="sourceLanguage"><option value="auto" data-i18n="source.auto">自动</option><option value="en" data-i18n="source.en">英文</option><option value="ja" data-i18n="source.ja">日文</option></select></label>
             </div>
             <details class="review-import"><summary data-i18n="setup.reviewed">高级：导入已审校 transcript.json</summary><input id="reviewedTranscript" autocomplete="off" placeholder="可选；导入后跳过 OCR 和翻译，直接安全重排" data-i18n-placeholder="setup.reviewed.placeholder" oninput="updateStartState()"></details>
           </section>
