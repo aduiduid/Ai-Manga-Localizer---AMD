@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import AppPaths, UserSettings
+from .hardware import detect_cpu, normalize_cpu_threads
 from .jobs import JobService
 from .model_manager import ModelManager, OllamaRuntime, ollama_tags
 from .ocr import DEFAULT_OLLAMA_VISION_MODEL, list_images
@@ -43,6 +44,10 @@ class SettingsPayload(BaseModel):
     output_format: Literal["webp", "png"] = "webp"
     prefer_modelscope: bool = True
     device: str = "auto"
+    # 0 means "let each library use every logical core", which is the behaviour
+    # the app had before the thread budget existed.  The upper bound is only a
+    # sanity limit; /api/system publishes the real choices for this machine.
+    cpu_threads: int = Field(0, ge=0, le=256)
     ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
     inference_backend: Literal["builtin", "ollama", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -114,6 +119,9 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         if payload.online_api_key is not None:
             secrets["online_api_key"] = payload.online_api_key.strip()
         values = payload.model_dump(exclude={"online_api_key"})
+        # Clamp to this machine: a settings file copied from a 32-thread desktop
+        # must not ask a 4-core laptop for 32 threads.
+        values["cpu_threads"] = normalize_cpu_threads(values.get("cpu_threads"))
         active = UserSettings(**values)
         active.save(paths.settings)
         return active
@@ -125,12 +133,21 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     @app.get("/api/system")
     def system_info():
         active = UserSettings.load(paths.settings)
+        cpu = detect_cpu()
         return {
             "version": __version__,
             "platform": platform.platform(),
             "python": platform.python_version(),
             "home": str(paths.root),
             "local_only": active.inference_backend != "online",
+            # The settings panel builds its thread dropdown from this, so the
+            # numbers come from the machine rather than a hard-coded list.
+            "cpu": {
+                "name": cpu.name,
+                "physical_cores": cpu.physical_cores,
+                "logical_cores": cpu.logical_cores,
+                "thread_choices": cpu.choices,
+            },
             "settings": public_settings(active),
         }
 
@@ -357,6 +374,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             quality_profile=payload.quality_profile,
             output_format=payload.output_format,
             device=payload.device,
+            cpu_threads=active.cpu_threads,
             inference_backend=active.inference_backend,
             ocr_backend=active.ocr_backend,
             ollama_base_url=active.ollama_base_url,

@@ -204,6 +204,20 @@ def test_derive_output_lands_under_the_picked_output_root():
     assert 'body:JSON.stringify({initial:source,output:$("#outputPath").value.trim()||null})' in javascript
 
 
+def test_cpu_thread_picker_is_built_from_the_detected_cpu():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    assert 'id="cpuThreads"' in html
+    assert 'data-i18n="settings.cpuThreads"' in html
+    # Options are not hard-coded: the panel renders whatever /api/system found.
+    assert "function renderCpuChoices(cpu,selected){" in javascript
+    assert "(cpu&&cpu.thread_choices)||[]" in javascript
+    assert 'cpu_threads:Number($("#cpuThreads").value||0)' in javascript
+    assert '"#cpuThreads"' in javascript
+    assert ".settings-form .field-hint{" in css
+
+
 def test_ml_bootstrap_installs_matching_torchvision_backend():
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     powershell = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")

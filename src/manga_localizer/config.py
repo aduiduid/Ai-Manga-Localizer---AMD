@@ -85,6 +85,9 @@ class UserSettings:
     output_format: str = "webp"
     prefer_modelscope: bool = True
     device: str = "auto"
+    # 0 keeps every library on its own default (all logical cores for each
+    # backend, which is what this app always did before the setting existed).
+    cpu_threads: int = 0
     ocr_backend: str = "hybrid"
     inference_backend: str = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"

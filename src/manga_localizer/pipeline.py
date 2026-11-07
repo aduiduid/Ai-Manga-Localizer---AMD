@@ -10,6 +10,7 @@ from typing import Callable
 from PIL import Image
 
 from .config import AppPaths, UserSettings
+from .hardware import apply_cpu_threads
 from .name_dictionary import JapaneseNameDictionary
 from .ocr import (
     DEFAULT_OLLAMA_VISION_MODEL,
@@ -110,6 +111,7 @@ class PipelineRequest:
     quality_profile: str = "quality"
     output_format: str = "webp"
     device: str = "auto"
+    cpu_threads: int = 0
     glossary: dict[str, str] | None = None
     inference_backend: str = "ollama"
     ocr_backend: str = "hybrid"
@@ -211,6 +213,9 @@ class LocalizerPipeline:
         self, request: PipelineRequest, callback: ProgressCallback | None = None
     ) -> dict:
         emit = callback or (lambda _phase, _current, _total, _message: None)
+        # Every recognizer in this run sizes its own thread pool, so the budget
+        # has to be in place before the first model is constructed.
+        apply_cpu_threads(request.cpu_threads)
         source = request.source.expanduser().resolve()
         output = request.output.expanduser().resolve()
         if source == output:
@@ -560,6 +565,7 @@ def request_from_settings(
         quality_profile=settings.quality_profile,
         output_format=settings.output_format,
         device=settings.device,
+        cpu_threads=settings.cpu_threads,
         inference_backend=settings.inference_backend,
         ocr_backend=settings.ocr_backend,
         ollama_base_url=settings.ollama_base_url,
