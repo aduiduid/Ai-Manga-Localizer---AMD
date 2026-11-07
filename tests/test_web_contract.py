@@ -267,6 +267,24 @@ def test_notification_volume_scales_the_cues_and_survives_reload():
     assert ".settings-form .sound-volume-row{" in css
 
 
+def test_notification_cues_keep_amplitude_headroom():
+    """The cue ceiling may only rise while overlapping notes still fit."""
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    cues = re.search(r"const SOUND_CUES=\{(.*?)\};", javascript, re.S).group(1)
+    gains = [
+        [float(value) for value in re.findall(r"[\d.]+", group)]
+        for group in re.findall(r"gains:\[([^\]]*)\]", cues)
+    ]
+    assert len(gains) == 2
+    # Notes of a cue overlap, so the in-phase worst case is the sum of their peak
+    # gains; past 1.0 the graph output would clip on the loudest setting. This is
+    # the bound that decides how far the volume ceiling can be raised.
+    for peak_gains in gains:
+        assert sum(peak_gains) <= 1.0
+    # And the loud cues stay loud: the ceiling is twice the original fixed level.
+    assert min(sum(peak_gains) for peak_gains in gains) >= 0.7
+
+
 def test_ml_bootstrap_installs_matching_torchvision_backend():
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     powershell = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")

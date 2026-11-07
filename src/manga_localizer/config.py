@@ -94,10 +94,11 @@ class UserSettings:
     # failure is what the user actually waits for.
     notify_on_complete: bool = True
     notify_on_failure: bool = True
-    # Percent of the cue's own peak level.  The cue tables are calibrated so 100
-    # is as loud as this app ever gets, which keeps the default (70) close to the
-    # fixed level the chime had before it was adjustable while leaving room to
-    # turn it up on a quiet laptop speaker.
+    # Percent of the cue's own peak level, whose ceiling is set in the cue table
+    # in app.js.  The table is sized so the loudest cue still peaks well under
+    # full scale with its notes overlapping, which is what lets 100 be twice the
+    # level the chime used before it was adjustable; the default (70) sits a
+    # little above that old fixed level so a quiet laptop speaker has headroom.
     notify_volume: int = 70
     ocr_backend: str = "hybrid"
     inference_backend: str = "ollama"

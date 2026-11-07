@@ -6,7 +6,11 @@ function renderCpuChoices(cpu,selected){const select=$("#cpuThreads");const deta
 // three-note major arpeggio for success, a falling two-note minor second for
 // failure.  Tones are synthesised instead of shipped as files so the app keeps
 // its single-binary, no-assets layout and works offline.
-const SOUND_CUES={complete:{type:"sine",gains:[0.16,0.16,0.18],notes:[[523.25,0],[659.25,0.11],[783.99,0.22]],duration:0.46},failure:{type:"triangle",gains:[0.18,0.18],notes:[[392,0],[261.63,0.19]],duration:0.62}};
+// The gains are the level at 100% volume.  Overlapping notes add up, so they are
+// kept so that even the in-phase bound stays at full scale: the loudest cue
+// measures a peak of 0.36, which leaves about 9 dB of headroom and is why the
+// ceiling can be twice the level the chime used before it was adjustable.
+const SOUND_CUES={complete:{type:"sine",gains:[0.32,0.32,0.36],notes:[[523.25,0],[659.25,0.11],[783.99,0.22]],duration:0.46},failure:{type:"triangle",gains:[0.36,0.36],notes:[[392,0],[261.63,0.19]],duration:0.62}};
 let soundContext=null;
 // Volume is a percentage of the cue's own peak level, and it is read from the
 // slider rather than from the saved settings so dragging gives immediate
