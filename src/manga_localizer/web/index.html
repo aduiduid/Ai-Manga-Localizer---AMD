@@ -126,12 +126,16 @@
             <label><span data-i18n="settings.cpuThreads">CPU 核心数</span><select id="cpuThreads"></select><small id="cpuThreadsDetail" class="field-hint"></small></label>
             <label class="toggle-row"><span><b data-i18n="settings.sound.complete">任务完成时提醒</b><small data-i18n="settings.sound.complete.detail">整本书跑完后响一声</small></span><input id="notifyComplete" type="checkbox"><i></i></label>
             <label class="toggle-row"><span><b data-i18n="settings.sound.failure">任务出错时提醒</b><small data-i18n="settings.sound.failure.detail">任务失败或取消时用另一个声音提醒</small></span><input id="notifyFailure" type="checkbox"><i></i></label>
+            <div class="sound-volume-row">
+              <span data-i18n="settings.sound.volume">提示音音量</span>
+              <input id="notifyVolume" type="range" min="0" max="100" step="5" value="70" aria-label="提示音音量" data-i18n-aria-label="settings.sound.volume">
+              <b id="notifyVolumeLabel">70%</b>
+            </div>
             <div class="sound-preview-row">
               <span data-i18n="settings.sound.preview">试听提示音</span>
               <button id="previewComplete" type="button" class="secondary-button" data-i18n="settings.sound.preview.complete">完成音</button>
               <button id="previewFailure" type="button" class="secondary-button" data-i18n="settings.sound.preview.failure">出错音</button>
-            </div>
-            <label class="toggle-row"><span><b data-i18n="settings.modelscope">ModelScope 优先</b><small data-i18n="settings.modelscope.detail">适合中国大陆网络环境</small></span><input id="preferModelscope" type="checkbox"><i></i></label>
+            </div>            <label class="toggle-row"><span><b data-i18n="settings.modelscope">ModelScope 优先</b><small data-i18n="settings.modelscope.detail">适合中国大陆网络环境</small></span><input id="preferModelscope" type="checkbox"><i></i></label>
             <p id="appHome"></p>
             <div class="danger-zone">
               <div><b data-i18n="settings.quit.title">退出程序</b><small data-i18n="settings.quit.detail">关闭本机服务并停止正在运行的任务，已完成的页面会保留。</small></div>

@@ -50,6 +50,9 @@ class SettingsPayload(BaseModel):
     cpu_threads: int = Field(0, ge=0, le=256)
     notify_on_complete: bool = True
     notify_on_failure: bool = True
+    # Percent, so a hand-edited settings.json cannot ask for a gain the Web Audio
+    # graph would clip.
+    notify_volume: int = Field(70, ge=0, le=100)
     ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
     inference_backend: Literal["builtin", "ollama", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"

@@ -302,6 +302,21 @@ def test_notification_switches_round_trip_through_settings(tmp_path):
     assert reloaded["notify_on_failure"] is True
 
 
+def test_notification_volume_round_trips_and_rejects_out_of_range(tmp_path):
+    app_paths = make_paths(tmp_path)
+    client = TestClient(create_app(app_paths, pipeline_factory=FakePipeline))
+    assert client.get("/api/settings").json()["notify_volume"] == 70
+    response = client.put("/api/settings", json={"notify_volume": 25})
+    assert response.status_code == 200
+    assert response.json()["notify_volume"] == 25
+    assert json.loads(app_paths.settings.read_text(encoding="utf-8"))["notify_volume"] == 25
+    # A percentage outside 0-100 would drive the gain past full scale.
+    for invalid in (-10, 150):
+        rejected = client.put("/api/settings", json={"notify_volume": invalid})
+        assert rejected.status_code == 422
+    assert client.get("/api/settings").json()["notify_volume"] == 25
+
+
 def test_models_page_lists_the_ollama_tags_that_actually_run(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "manga_localizer.api.ollama_tags",

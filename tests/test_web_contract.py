@@ -246,6 +246,27 @@ def test_notification_sounds_are_separate_opt_in_switches():
     assert ".settings-form .sound-preview-row{" in css
 
 
+def test_notification_volume_scales_the_cues_and_survives_reload():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    assert 'id="notifyVolume"' in html
+    assert 'data-i18n="settings.sound.volume"' in html
+    assert 'id="notifyVolumeLabel"' in html
+    # 0 must mean silence rather than a zero-length ramp: an exponential ramp to
+    # 0 throws, so the cue is skipped before any oscillator is built.
+    assert "const volume=notifyVolumeValue();if(!(volume>0))return;" in javascript
+    # The peak gain is scaled by the slider, and the label tracks it live.
+    assert "(cue.gains[index]||0.16)*volume" in javascript
+    assert "function renderVolumeLabel(){" in javascript
+    assert '$("#notifyVolume").addEventListener("input",renderVolumeLabel)' in javascript
+    # Saved like every other setting, and restored from the server on load.
+    assert 'notify_volume:Number($("#notifyVolume").value||0)' in javascript
+    assert '"#notifyVolume"' in javascript
+    assert '$("#notifyVolume").value=String(' in javascript
+    assert ".settings-form .sound-volume-row{" in css
+
+
 def test_ml_bootstrap_installs_matching_torchvision_backend():
     project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     powershell = (ROOT / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8")
