@@ -17,6 +17,7 @@ from .config import (
     DEFAULT_OLLAMA_MODEL,
     OLLAMA_CONTEXT_TOKENS,
     OLLAMA_MAX_OUTPUT_TOKENS,
+    ollama_timeout,
 )
 from .model_manager import ModelDependencyError
 from .name_dictionary import JapaneseNameDictionary, NameCandidate
@@ -1358,6 +1359,9 @@ class OllamaTranslator(PromptTranslator):
         payload = {}
         for token_budget in budgets:
             self._loaded = True
+            # The timeout has to cover the whole reply: a 64K budget at ~110
+            # tok/s needs ten minutes, so a fixed 180 s would cut off precisely
+            # the long generation the raised ceiling now allows.
             payload = _json_request(
                 _endpoint(self.base_url, "/api/chat"),
                 {
@@ -1372,7 +1376,7 @@ class OllamaTranslator(PromptTranslator):
                         "num_predict": token_budget,
                     },
                 },
-                timeout=600 if think else 180,
+                timeout=max(600 if think else 180, ollama_timeout(token_budget)),
             )
             if payload.get("done_reason") != "length":
                 break

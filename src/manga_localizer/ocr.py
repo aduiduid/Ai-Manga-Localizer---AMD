@@ -24,6 +24,7 @@ from .config import (
     OLLAMA_MAX_OUTPUT_TOKENS,
     AppPaths,
     configure_model_caches,
+    ollama_timeout,
 )
 from .model_manager import ModelDependencyError
 from .sfx import lookup_sfx
@@ -2117,7 +2118,13 @@ class OllamaVisionOCR:
                 method="POST",
             )
             try:
-                with urlopen(request, timeout=self.timeout) as response:
+                # The budget escalates to the shared 64K ceiling, so the wait has
+                # to escalate with it: a fixed 300 s would abort exactly the
+                # dense page whose reply needed the larger budget.
+                attempt_timeout = max(
+                    self.timeout, ollama_timeout(prediction_budgets[attempt])
+                )
+                with urlopen(request, timeout=attempt_timeout) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if payload.get("done_reason") == "length":
                     # Truncation is answered by the next (larger) budget, not by

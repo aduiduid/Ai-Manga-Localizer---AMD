@@ -22,6 +22,27 @@ DEFAULT_OLLAMA_MODEL = "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:la
 OLLAMA_CONTEXT_TOKENS = 65_536
 OLLAMA_MAX_OUTPUT_TOKENS = 65_536
 
+# A request timeout has to cover the whole generation, so it scales with the
+# budget instead of staying at the 180 s that was right for a 2K reply.  At the
+# ~110 tok/s this 9B reaches on one Vulkan GPU, 64K output would need ~10 min;
+# 1200 s leaves headroom for a cold model load and a slower prefill.  Without
+# this, raising the ceiling would only replace "truncated at 2048" with
+# "timed out at 180 s" on exactly the long replies the raised ceiling allows.
+OLLAMA_REQUEST_TIMEOUT_S = 1_200
+
+
+def ollama_timeout(token_budget: int) -> int:
+    """Seconds to wait for a reply of ``token_budget`` output tokens.
+
+    Scales the historical 180 s at 2K tokens up to OLLAMA_REQUEST_TIMEOUT_S for
+    a full-ceiling reply, so a small batch keeps its old responsiveness while a
+    large one is not cut off mid-generation.
+    """
+    scaled = OLLAMA_REQUEST_TIMEOUT_S * min(
+        1.0, max(2_048, token_budget) / OLLAMA_MAX_OUTPUT_TOKENS
+    )
+    return max(180, int(scaled))
+
 
 @dataclass(frozen=True)
 class AppPaths:

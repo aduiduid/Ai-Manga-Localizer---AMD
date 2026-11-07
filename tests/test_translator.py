@@ -3,6 +3,7 @@ import json
 import pytest
 
 from manga_localizer import translator
+from manga_localizer.config import ollama_timeout
 from manga_localizer.name_dictionary import NameCandidate
 from manga_localizer.ocr import PageOCR, TextUnit
 from manga_localizer.translator import (
@@ -1191,7 +1192,49 @@ def test_reasoning_json_retries_with_bounded_output_budget_when_truncated(monkey
     assert result == {"ok": True}
     assert budgets == [8_192, 16_384, 32_768]
     assert contexts == [65_536, 65_536, 65_536]
+    # The wait tracks the budget: a 32K reply at ~110 tok/s is five minutes of
+    # generation, which the old flat 600 s barely covered once prefill was added.
     assert timeouts == [600, 600, 600]
+
+
+def test_request_timeout_grows_with_the_output_budget():
+    # Raising the ceiling to 64K without raising the wait would just replace
+    # "truncated at 2048" with an aborting socket timeout on the long replies the
+    # ceiling now permits.
+    assert ollama_timeout(2_048) == 180
+    assert ollama_timeout(8_192) == 180
+    assert ollama_timeout(16_384) == 300
+    assert ollama_timeout(32_768) == 600
+    assert ollama_timeout(65_536) == 1_200
+    # Never beyond the shared ceiling, and never below the historical wait.
+    assert ollama_timeout(131_072) == 1_200
+    assert ollama_timeout(0) == 180
+
+
+def test_non_thinking_json_waits_long_enough_for_its_grown_budget(monkeypatch):
+    # think=False used to be pinned to 180 s, which a grown non-thinking budget
+    # cannot honour: this asserts the wait follows the escalations.
+    budgets = []
+    timeouts = []
+
+    def fake_request(_url, payload, timeout=180):
+        budgets.append(payload["options"]["num_predict"])
+        timeouts.append(timeout)
+        if len(budgets) < 3:
+            return {"done_reason": "length"}
+        return {"done_reason": "stop", "message": {"content": '{"items": []}'}}
+
+    monkeypatch.setattr(translator, "_json_request", fake_request)
+    service = OllamaTranslator("http://localhost:11434", "local-9b")
+    result = service._generate_json(
+        "judge",
+        {"type": "object", "properties": {"items": {"type": "array"}}},
+        max_new_tokens=16_384,
+        think=False,
+    )
+    assert result == {"items": []}
+    assert budgets == [16_384, 32_768, 65_536]
+    assert timeouts == [300, 600, 1_200]
 
 
 def test_non_reasoning_json_also_grows_its_output_budget_when_truncated(monkeypatch):
