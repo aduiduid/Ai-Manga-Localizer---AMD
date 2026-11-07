@@ -37,22 +37,16 @@ class CpuInfo:
 
     @property
     def choices(self) -> list[int]:
-        """Thread counts worth offering, largest first.
+        """Every thread count from ``N`` down to 1, largest first.
 
-        Only physical cores are listed as the headline numbers, because
-        hyper-threading gives little back on these matrix workloads and the
-        logical count would just invite oversubscription.  The full logical
-        count stays available as the top choice for users who want it.
+        Every value in the range is offered rather than only multiples or only
+        the physical core count: a user offloading a long batch may want 3 of 12
+        threads on one machine and 10 of 16 on another, and a coarse ladder
+        would silently deny both.  ``N`` is the logical count because that is the
+        true ceiling of the thread pools this setting drives.
         """
-        options = {1}
-        cores = max(1, self.physical_cores)
-        if cores <= 8:
-            options.update(range(2, cores + 1))
-        else:
-            options.update(range(2, cores + 1, 2))
-            options.add(cores)
-        options.add(max(1, self.logical_cores))
-        return sorted(options, reverse=True)
+        ceiling = max(1, self.logical_cores)
+        return list(range(ceiling, 0, -1))
 
 
 def _windows_cpu_name() -> str:

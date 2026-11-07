@@ -1,5 +1,3 @@
-import pytest
-
 from manga_localizer.hardware import (
     CpuInfo,
     apply_cpu_threads,
@@ -17,16 +15,17 @@ def test_detect_cpu_reports_a_usable_machine():
     assert 1 <= cpu.physical_cores <= cpu.logical_cores
 
 
-def test_thread_choices_cover_cores_and_stay_descending():
+def test_thread_choices_list_every_count_down_to_one():
     cpu = CpuInfo(name="Test CPU", physical_cores=4, logical_cores=8)
-    assert cpu.choices == [8, 4, 3, 2, 1]
+    assert cpu.choices == [8, 7, 6, 5, 4, 3, 2, 1]
 
 
-def test_thread_choices_do_not_list_every_core_on_large_machines():
-    # A 32-core host would otherwise produce a 33-entry dropdown.
-    cpu = CpuInfo(name="Test CPU", physical_cores=32, logical_cores=64)
-    assert cpu.choices == [64, 32, 30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 1]
-    assert 31 not in cpu.choices
+def test_thread_choices_keep_every_step_on_large_machines():
+    # A coarse ladder would deny "use 10 of 16" and "pin to 3 of 12", so every
+    # value in the range is offered even though the dropdown gets long.
+    cpu = CpuInfo(name="Test CPU", physical_cores=16, logical_cores=32)
+    assert cpu.choices == list(range(32, 0, -1))
+    assert 31 in cpu.choices and 29 in cpu.choices and 3 in cpu.choices
 
 
 def test_zero_means_library_defaults():
