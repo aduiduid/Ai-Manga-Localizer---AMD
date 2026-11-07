@@ -13,7 +13,11 @@ from urllib.request import Request, urlopen
 
 from opencc import OpenCC
 
-from .config import DEFAULT_OLLAMA_MODEL
+from .config import (
+    DEFAULT_OLLAMA_MODEL,
+    OLLAMA_CONTEXT_TOKENS,
+    OLLAMA_MAX_OUTPUT_TOKENS,
+)
 from .model_manager import ModelDependencyError
 from .name_dictionary import JapaneseNameDictionary, NameCandidate
 from .ocr import PageOCR, TextUnit
@@ -1302,8 +1306,8 @@ class OllamaTranslator(PromptTranslator):
                 "think": False,
                 "options": {
                     "temperature": 0.2,
-                    "num_ctx": 32_768,
-                    "num_predict": max_new_tokens,
+                    "num_ctx": OLLAMA_CONTEXT_TOKENS,
+                    "num_predict": min(max_new_tokens, OLLAMA_MAX_OUTPUT_TOKENS),
                 },
             },
         )
@@ -1342,13 +1346,15 @@ class OllamaTranslator(PromptTranslator):
         max_new_tokens: int = 4096,
         think: bool = False,
     ) -> dict:
-        budgets = [max_new_tokens]
-        # Reasoning tokens share ``num_predict`` with the visible JSON. A
-        # single 2x retry still truncated real 9B reviews before any JSON was
-        # emitted, so grow adaptively while keeping ordinary non-thinking
-        # calls on their small fixed budget. This is independent from num_ctx.
-        while think and budgets[-1] < 32_768:
-            budgets.append(min(32_768, budgets[-1] * 2))
+        budgets = [min(max_new_tokens, OLLAMA_MAX_OUTPUT_TOKENS)]
+        # Reasoning tokens share ``num_predict`` with the visible JSON, and a
+        # structured reply can legitimately be longer than the first guess: a
+        # judge batch carries the source, the draft and both alternatives for
+        # every line.  Grow on truncation regardless of ``think`` -- the
+        # non-thinking passes used to stop at their initial budget and raise,
+        # which aborted the whole book after all the cheap work was done.
+        while budgets[-1] < OLLAMA_MAX_OUTPUT_TOKENS:
+            budgets.append(min(OLLAMA_MAX_OUTPUT_TOKENS, budgets[-1] * 2))
         payload = {}
         for token_budget in budgets:
             self._loaded = True
@@ -1362,7 +1368,7 @@ class OllamaTranslator(PromptTranslator):
                     "format": schema,
                     "options": {
                         "temperature": 0,
-                        "num_ctx": 32_768,
+                        "num_ctx": OLLAMA_CONTEXT_TOKENS,
                         "num_predict": token_budget,
                     },
                 },
@@ -1540,6 +1546,11 @@ class OllamaTranslator(PromptTranslator):
                 },
                 "required": ["items"],
             }
+            # A first guess sized to the actual batch, so ordinary groups end at
+            # EOS on the first attempt.  ``_generate_json`` doubles this up to
+            # OLLAMA_MAX_OUTPUT_TOKENS when the reply is truncated, which is what
+            # makes the 2K ceiling safe: reaching it now costs one retry instead
+            # of raising and abandoning the book.
             token_budget = (
                 8_192
                 if deep_reasoning
@@ -1668,10 +1679,12 @@ class OllamaTranslator(PromptTranslator):
                 },
                 "required": ["items"],
             }
-            # ``num_ctx`` and ``num_predict`` are independent. A 32K working
-            # context is ample for these four-line batches; generation stays
-            # sized to the actual source instead of reserving the model's full
-            # advertised context window.
+            # ``num_ctx`` and ``num_predict`` are independent. 64K of working
+            # context is ample for these four-line batches, while the first
+            # generation budget stays sized to the actual source instead of
+            # reserving the model's full advertised context.  ``_generate_json``
+            # doubles it up to OLLAMA_MAX_OUTPUT_TOKENS if that guess truncates,
+            # so a batch that really needs more no longer aborts the book.
             source_size = sum(len(unit.ja) for _page, unit in batch)
             has_semantic_risk = any(
                 SEMANTIC_RISK_RE.search(unit.ja) for _page, unit in batch
@@ -1686,7 +1699,7 @@ class OllamaTranslator(PromptTranslator):
                 schema,
                 max_new_tokens=token_budget,
                 # The unrestricted 9B build can loop in its hidden reasoning
-                # channel until even 32K output tokens are exhausted without
+                # channel until even the output ceiling is exhausted without
                 # emitting JSON. The prompt already enumerates every semantic
                 # check, so deterministic non-thinking JSON is both bounded
                 # and empirically more reliable for this verifier role.

@@ -10,6 +10,18 @@ from pathlib import Path
 # 用严格字符串匹配 /api/tags 返回的名字。
 DEFAULT_OLLAMA_MODEL = "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest"
 
+# Ollama takes the working context and the generation ceiling as independent
+# options: ``num_ctx`` bounds prompt + generated tokens, ``num_predict`` bounds
+# the reply alone.  Both are 64K because a structured JSON reply travels with a
+# long prompt attached, and the judge/retranslate passes used to stop at 2048
+# output tokens -- a ceiling a real batch carrying the source, the draft and two
+# alternatives per line can exceed, which aborted the whole book after all the
+# expensive work was already done.  A ceiling costs nothing when the reply ends
+# at EOS, so these only need to be generous, not precise.  The model advertises
+# 262K; staying at 64K keeps the KV cache affordable on one local GPU.
+OLLAMA_CONTEXT_TOKENS = 65_536
+OLLAMA_MAX_OUTPUT_TOKENS = 65_536
+
 
 @dataclass(frozen=True)
 class AppPaths:

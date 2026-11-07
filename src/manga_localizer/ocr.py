@@ -18,7 +18,13 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
-from .config import DEFAULT_OLLAMA_MODEL, AppPaths, configure_model_caches
+from .config import (
+    DEFAULT_OLLAMA_MODEL,
+    OLLAMA_CONTEXT_TOKENS,
+    OLLAMA_MAX_OUTPUT_TOKENS,
+    AppPaths,
+    configure_model_caches,
+)
 from .model_manager import ModelDependencyError
 from .sfx import lookup_sfx
 
@@ -2067,11 +2073,20 @@ class OllamaVisionOCR:
             ],
         }
         retry_delays = (0.5, 2.0)
-        prediction_budgets = (8192, 12_288, 16_384)
-        for attempt in range(len(retry_delays) + 1):
+        # The first attempt stays on the historical budget so ordinary pages are
+        # not slowed down; a truncated reply escalates towards the shared output
+        # ceiling instead of failing after three tries.  A dense text page can
+        # legitimately need more than 16K of JSON.
+        prediction_budgets = (
+            8192,
+            16_384,
+            32_768,
+            OLLAMA_MAX_OUTPUT_TOKENS,
+        )
+        for attempt in range(len(prediction_budgets)):
             options = {
                 "temperature": 0,
-                "num_ctx": 32_768,
+                "num_ctx": OLLAMA_CONTEXT_TOKENS,
                 "num_predict": prediction_budgets[attempt],
             }
             if attempt:
@@ -2105,8 +2120,10 @@ class OllamaVisionOCR:
                 with urlopen(request, timeout=self.timeout) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if payload.get("done_reason") == "length":
-                    if attempt < len(retry_delays):
-                        time.sleep(retry_delays[attempt])
+                    # Truncation is answered by the next (larger) budget, not by
+                    # the transport-retry count, so walk the whole plan.
+                    if attempt < len(prediction_budgets) - 1:
+                        time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)])
                         continue
                     raise RuntimeError(
                         "Ollama OCR output was truncated before valid JSON completed "

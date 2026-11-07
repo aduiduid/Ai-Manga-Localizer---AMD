@@ -1551,17 +1551,19 @@ def test_ollama_vision_ocr_retries_truncated_structured_output(
     # A dense page can degenerate into repeating one glyph with ever-growing
     # coordinates until the budget runs out, so the retry must also penalise
     # repeats; raising the budget alone never terminates.
-    assert calls == [(8192, None), (12_288, 1.3)]
+    assert calls == [(8192, None), (16_384, 1.3)]
 
 
 def test_ollama_vision_ocr_rejects_repeated_truncation(monkeypatch, tmp_path):
     source = tmp_path / "page.png"
     Image.new("RGB", (400, 600), "white").save(source)
     budgets = []
+    contexts = []
 
     def always_truncated(request, timeout):
         body = json.loads(request.data.decode("utf-8"))
         budgets.append(body["options"]["num_predict"])
+        contexts.append(body["options"]["num_ctx"])
         payload = {
             "done_reason": "length",
             "message": {"content": '{"regions":['},
@@ -1571,10 +1573,13 @@ def test_ollama_vision_ocr_rejects_repeated_truncation(monkeypatch, tmp_path):
     monkeypatch.setattr("manga_localizer.ocr.urlopen", always_truncated)
     monkeypatch.setattr("manga_localizer.ocr.time.sleep", lambda _delay: None)
 
-    with pytest.raises(RuntimeError, match="8192, 12288, 16384"):
+    with pytest.raises(RuntimeError, match="8192, 16384, 32768, 65536"):
         OllamaVisionOCR("http://127.0.0.1:11434", "vision-local").analyze(source, 2)
 
-    assert budgets == [8192, 12_288, 16_384]
+    # Truncation walks the whole budget plan, and every attempt asks for the
+    # shared 64K working context so a dense page is never limited by it.
+    assert budgets == [8192, 16_384, 32_768, 65_536]
+    assert contexts == [65_536, 65_536, 65_536, 65_536]
 
 
 def test_tight_crop_audit_does_not_overwrite_confident_sfx(monkeypatch, tmp_path):

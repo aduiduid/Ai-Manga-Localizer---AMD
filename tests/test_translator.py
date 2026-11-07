@@ -7,6 +7,7 @@ from manga_localizer.name_dictionary import NameCandidate
 from manga_localizer.ocr import PageOCR, TextUnit
 from manga_localizer.translator import (
     HyMTTranslator,
+    InferenceConnectionError,
     LocalQualityTranslator,
     OllamaTranslator,
     OpenAICompatibleTranslator,
@@ -1169,9 +1170,11 @@ def test_layout_budget_scales_from_source_density_not_page_identity():
 def test_reasoning_json_retries_with_bounded_output_budget_when_truncated(monkeypatch):
     budgets = []
     timeouts = []
+    contexts = []
 
     def fake_request(_url, payload, timeout=180):
         budgets.append(payload["options"]["num_predict"])
+        contexts.append(payload["options"]["num_ctx"])
         timeouts.append(timeout)
         if len(budgets) < 3:
             return {"done_reason": "length"}
@@ -1187,7 +1190,53 @@ def test_reasoning_json_retries_with_bounded_output_budget_when_truncated(monkey
     )
     assert result == {"ok": True}
     assert budgets == [8_192, 16_384, 32_768]
+    assert contexts == [65_536, 65_536, 65_536]
     assert timeouts == [600, 600, 600]
+
+
+def test_non_reasoning_json_also_grows_its_output_budget_when_truncated(monkeypatch):
+    # The judge and retranslate passes run with think=False and used to keep a
+    # single 2048-token attempt, so one long batch raised
+    # "Ollama 结构化输出在 2048 token 上限下仍被截断" and abandoned the whole book.
+    budgets = []
+
+    def fake_request(_url, payload, timeout=180):
+        budgets.append(payload["options"]["num_predict"])
+        if len(budgets) < 3:
+            return {"done_reason": "length"}
+        return {"done_reason": "stop", "message": {"content": '{"items": []}'}}
+
+    monkeypatch.setattr(translator, "_json_request", fake_request)
+    service = OllamaTranslator("http://localhost:11434", "local-9b")
+    result = service._generate_json(
+        "judge",
+        {"type": "object", "properties": {"items": {"type": "array"}}},
+        max_new_tokens=2048,
+        think=False,
+    )
+    assert result == {"items": []}
+    assert budgets == [2048, 4_096, 8_192]
+
+
+def test_json_output_budget_stops_at_the_shared_ceiling(monkeypatch):
+    budgets = []
+
+    def always_truncated(_url, payload, timeout=180):
+        budgets.append(payload["options"]["num_predict"])
+        return {"done_reason": "length"}
+
+    monkeypatch.setattr(translator, "_json_request", always_truncated)
+    service = OllamaTranslator("http://localhost:11434", "local-9b")
+    with pytest.raises(InferenceConnectionError, match="65536"):
+        service._generate_json(
+            "judge",
+            {"type": "object", "properties": {"items": {"type": "array"}}},
+            max_new_tokens=2048,
+            think=True,
+        )
+    # 2K doubling reaches 65_536 and stops there; it does not grow past the
+    # context the request itself declares.
+    assert budgets == [2048, 4_096, 8_192, 16_384, 32_768, 65_536]
 
 
 def test_local_quality_pipeline_uses_independent_candidate_before_staged_9b_audit():
