@@ -46,7 +46,10 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 10: a text-less detector box only becomes a line when MangaOCR reads it the
 # same way from shifted crops, so a cached illustration page still holds the
 # invented "２０１８年０"/"その" that was stamped onto the drawing.
-OCR_CACHE_VERSION = 10
+# 11: a vertical bubble is re-read together with an uncovered outer column, so a
+# cached page still carries the truncated "それなのにわざわざ私に" whose third
+# column stayed in Japanese under the Chinese text.
+OCR_CACHE_VERSION = 11
 
 
 def unsafe_semantic_missing(page: PageOCR, preserve_sfx: bool) -> list[dict]:

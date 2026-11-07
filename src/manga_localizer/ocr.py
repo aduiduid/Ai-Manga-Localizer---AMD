@@ -589,6 +589,69 @@ def oversized_decorative_sfx(page: PageOCR, unit: TextUnit) -> bool:
     )
 
 
+def _adjacent_column_boxes(
+    gray: np.ndarray,
+    box: list[int],
+    column_width: int,
+    known_boxes: list[list[int]],
+) -> list[list[int]]:
+    """Vertical ink columns next to ``box`` that no recognised box covers.
+
+    Paddle scores the thin outer column of a multi-column Japanese bubble below
+    its detection floor once the page is downscaled, so a three-column bubble
+    can arrive with only its inner columns boxed and the outer column left
+    untranslated.  Lowering that floor globally fixes the bubble but drops real
+    text on other pages, so the missing columns are located from this page's own
+    pixels: a single contiguous glyph-width run of ink beside the group, which
+    no detector or recognizer box claims at all.  Only geometry is returned;
+    ``analyze`` still has to read Japanese from it.
+    """
+    height, width = gray.shape
+    x0, y0, x1, y1 = box
+    if y1 - y0 < max(8, column_width) * 1.5:
+        return []
+    top = max(0, y0 - max(10, round((y1 - y0) * 0.08)))
+    bottom = min(height, y1 + max(10, round((y1 - y0) * 0.08)))
+    columns: list[list[int]] = []
+    edge = x0
+    for _ in range(2):
+        near, far = sorted((edge, edge - max(8, column_width)))
+        if near >= width or far <= 0:
+            break
+        strip = gray[top:bottom, max(0, near) : min(width, far)]
+        if strip.size == 0:
+            break
+        probe = [max(0, near), top, min(width, far), bottom]
+        if any(
+            _axis_overlap(probe[0], probe[2], other[0], other[2])
+            * _axis_overlap(probe[1], probe[3], other[1], other[3])
+            >= _area(probe) * 0.25
+            for other in known_boxes
+        ):
+            break
+        active = (strip < 110).mean(axis=0) >= 0.02
+        runs: list[tuple[int, int]] = []
+        start = None
+        for index, flagged in enumerate(active):
+            if flagged and start is None:
+                start = index
+            elif not flagged and start is not None:
+                runs.append((start, index))
+                start = None
+        if start is not None:
+            runs.append((start, len(active)))
+        runs = [run for run in runs if run[1] - run[0] >= 6]
+        # A single contiguous glyph-width run is a text column; a gutter, a
+        # panel border or scattered artwork is not, so scanning stops there.
+        if len(runs) != 1:
+            break
+        left = max(0, near) + runs[0][0]
+        right = max(0, near) + runs[0][1]
+        columns.append([left, top, right, bottom])
+        edge = left
+    return columns
+
+
 def _best_recognized_text(group: list[dict]) -> tuple[str, float]:
     """Reassemble one region group's recognized text in reading order.
 
@@ -1301,6 +1364,60 @@ class PaddleMangaOCR:
         )
         return PageOCR(page.page, page.file, page.width, page.height, [merged])
 
+    def _adjacent_column_reading(
+        self,
+        image: Image.Image,
+        box: list[int],
+        group: list[dict],
+        known_boxes: list[list[int]],
+        reading: str,
+    ) -> tuple[str, list[list[int]]]:
+        """Re-read a vertical bubble together with the outer columns it lost.
+
+        The group's own boxes give the column width, so the strip beside them is
+        about one column wide.  The widened crop is read once rather than column
+        by column: reading the columns separately re-reads the characters the
+        group already covered ("私に" twice in "わざわざ私に" + "私に化けてくる").
+        The new reading is accepted only when it keeps the original one as a
+        prefix and says more, so a worse re-read leaves the unit untouched.
+        """
+        widths = sorted(item["box"][2] - item["box"][0] for item in group)
+        if not widths:
+            return "", []
+        column_width = widths[len(widths) // 2]
+        gray = np.asarray(image.convert("L"))
+        columns = _adjacent_column_boxes(gray, box, column_width, known_boxes)
+        if not columns:
+            return "", []
+        widened = [
+            min([box[0]] + [column[0] for column in columns]),
+            min([box[1]] + [column[1] for column in columns]),
+            max([box[2]] + [column[2] for column in columns]),
+            max([box[3]] + [column[3] for column in columns]),
+        ]
+        pad_x = max(6, round((widened[2] - widened[0]) * 0.03))
+        pad_y = max(6, round((widened[3] - widened[1]) * 0.03))
+        crop = image.crop(
+            (
+                max(0, widened[0] - pad_x),
+                max(0, widened[1] - pad_y),
+                min(image.width, widened[2] + pad_x),
+                min(image.height, widened[3] + pad_y),
+            )
+        )
+        widened_text = self.reader(crop).strip()
+        if not JP_RE.search(widened_text):
+            return "", []
+        original = re.sub(r"\s+", "", reading)
+        candidate = re.sub(r"\s+", "", widened_text)
+        if not candidate.startswith(original[: max(1, len(original) // 2)]):
+            return "", []
+        if len(candidate) <= len(original):
+            return "", []
+        if not self._rescue_reading_is_stable(image, widened, False, widened_text):
+            return "", []
+        return widened_text, columns
+
     def _rescue_reading_is_stable(
         self, image: Image.Image, box: list[int], reverse: bool, reading: str
     ) -> bool:
@@ -1409,6 +1526,7 @@ class PaddleMangaOCR:
                     )
                 ]
             box = _union_box(group)
+            reverse = any(item.get("reverse", False) for item in group)
             pad_x = max(10, round((box[2] - box[0]) * 0.04))
             pad_y = max(10, round((box[3] - box[1]) * 0.03))
             crop_box = [
@@ -1417,7 +1535,6 @@ class PaddleMangaOCR:
                 min(image.width, box[2] + pad_x),
                 min(image.height, box[3] + pad_y),
             ]
-            reverse = any(item.get("reverse", False) for item in group)
             crop = image.crop(tuple(crop_box))
             if reverse:
                 crop = ImageOps.invert(crop)
@@ -1447,6 +1564,35 @@ class PaddleMangaOCR:
                 continue
             score = max((item["score"] for item in group), default=0.0)
             clean = refined.strip()
+            # A vertical Japanese bubble is one column per detector box.  Paddle
+            # scores its thin outer column below the detection floor once the
+            # page is downscaled, so that column stayed in Japanese beside the
+            # translated text.  The group is re-read with that column folded in;
+            # the new reading is only taken when it extends the old one.
+            erase_boxes = [item["box"] for item in group]
+            if (
+                JP_RE.search(clean)
+                and not _is_latin_region(paddle_text, paddle_score)
+                and not reverse
+            ):
+                widened_text, extra_boxes = self._adjacent_column_reading(
+                    image, box, group, [item["box"] for item in regions], clean
+                )
+                if widened_text:
+                    clean = widened_text
+                    erase_boxes = [item["box"] for item in group] + list(extra_boxes)
+                    box = [
+                        min(item[0] for item in erase_boxes),
+                        min(item[1] for item in erase_boxes),
+                        max(item[2] for item in erase_boxes),
+                        max(item[3] for item in erase_boxes),
+                    ]
+                    crop_box = [
+                        max(0, box[0] - pad_x),
+                        max(0, box[1] - pad_y),
+                        min(image.width, box[2] + pad_x),
+                        min(image.height, box[3] + pad_y),
+                    ]
             units.append(
                 TextUnit(
                     id=f"p{page_number:03d}u{index:02d}",
@@ -1455,7 +1601,7 @@ class PaddleMangaOCR:
                     ja=clean,
                     score=round(score, 4),
                     is_sfx=likely_sfx_text(clean),
-                    erase_boxes=[item["box"] for item in group],
+                    erase_boxes=erase_boxes,
                 )
             )
         page = PageOCR(page_number, image_path.name, image.width, image.height, units)

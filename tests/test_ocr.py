@@ -1122,6 +1122,93 @@ def test_textless_display_lettering_is_rescued_when_every_crop_agrees(tmp_path):
     assert [unit.ja for unit in page.units] == ["調教室地域２４号四番以外立人禁止"]
 
 
+def test_vertical_bubble_recovers_the_outer_column_its_detector_missed(tmp_path):
+    """A three-column bubble arrived with only its two inner columns boxed.
+
+    Paddle scored the thin left column below its detection floor once the page
+    was downscaled, so "化けてくるの" stayed in Japanese on the rendered page.
+    The column is now found from the page's own ink and folded into the reread,
+    while the group's own boxes and readings stay untouched.
+    """
+    # Three vertical columns of dark glyphs on a light balloon.
+    source = tmp_path / "bubble.png"
+    image = Image.new("RGB", (800, 1143), "white")
+    draw = ImageDraw.Draw(image)
+    for left in (455, 486, 517):
+        for top in range(700, 795, 18):
+            draw.rectangle((left, top, left + 22, top + 12), fill=(20, 20, 20))
+    image.save(source)
+
+    class Detector:
+        def predict(self, _image):
+            # Only the two inner columns were boxed; the thin outer one was not.
+            return [
+                {
+                    "res": {
+                        "rec_boxes": [[486, 700, 517, 795], [517, 700, 548, 795]],
+                        "rec_texts": ["それに", "わざわざ"],
+                        "rec_scores": [0.72, 0.85],
+                    }
+                }
+            ]
+
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.detector = Detector()
+    service.recognition_detector = None
+    readings = iter(
+        [
+            "それなのにわざわざ",  # production crop of the boxed columns
+            "それなのにわざわざ私に化けてくるんですもの",  # widened reread
+            # reproducibility crops of the widened box
+            "それなのにわざわざ私に化けてくるんですもの",
+            "それなのにわざわざ私に化けてくるんですもの",
+            "それなのにわざわざ私に化けてくるんですもの",
+        ]
+    )
+    service.reader = lambda _crop: next(readings)
+
+    page = service.analyze(source, 1)
+    assert [unit.ja for unit in page.units] == [
+        "それなのにわざわざ私に化けてくるんですもの"
+    ]
+    # The outer column must be erased too, or its Japanese shows under the text.
+    erase = page.units[0].erase_boxes
+    assert min(box[0] for box in erase) <= 460
+
+
+def test_widened_reading_is_rejected_when_it_loses_the_original_text(tmp_path):
+    """A worse reread must leave the unit exactly as it was."""
+    source = tmp_path / "bubble.png"
+    image = Image.new("RGB", (800, 1143), "white")
+    draw = ImageDraw.Draw(image)
+    for left in (455, 486, 517):
+        for top in range(700, 795, 18):
+            draw.rectangle((left, top, left + 22, top + 12), fill=(20, 20, 20))
+    image.save(source)
+
+    class Detector:
+        def predict(self, _image):
+            # Only the two inner columns were boxed; the thin outer one was not.
+            return [
+                {
+                    "res": {
+                        "rec_boxes": [[486, 700, 517, 795], [517, 700, 548, 795]],
+                        "rec_texts": ["それに", "わざわざ"],
+                        "rec_scores": [0.72, 0.85],
+                    }
+                }
+            ]
+
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.detector = Detector()
+    service.recognition_detector = None
+    readings = iter(["それなのにわざわざ私に", "ぐらい", "ぐらい", "ぐらい", "ぐらい"])
+    service.reader = lambda _crop: next(readings)
+
+    page = service.analyze(source, 1)
+    assert [unit.ja for unit in page.units] == ["それなのにわざわざ私に"]
+
+
 def test_link_blocks_are_preserved_instead_of_translated():
     """A credit page's link list cannot be translated: the model can only echo
     it or replace it with a summary, and both are rejected, so the unit stayed
