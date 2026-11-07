@@ -36,6 +36,7 @@ from manga_localizer.ocr import (
     prefer_semantic_ocr,
     prune_nested_duplicate_units,
     prune_detached_orthogonal_outliers,
+    rescue_reading_is_stable,
     semantic_sfx_classification,
     tiny_low_confidence_nontext,
 )
@@ -1047,6 +1048,78 @@ def test_latin_page_drops_text_less_artwork_boxes():
     ]
     assert is_latin_page(latin) is True
     assert is_latin_page([{"box": [0, 0, 9, 9], "text": "それは", "score": 0.9}]) is False
+
+
+def test_rescue_reading_stability_tells_lettering_from_artwork():
+    """Measured separation on a cover title, a wooden sign and thirteen figures.
+
+    Real lettering agreed at 0.75-1.00, every invention at 0.00-0.40.
+    """
+    assert rescue_reading_is_stable(
+        [
+            "調教室地域２４号四番以外立人禁止",
+            "調教室地隊２４号駅都外立人禁止",
+            "調教室地域２４号県有り外立人禁止",
+            "調教室地域２４号関係者以外立人禁止",
+        ]
+    )
+    assert not rescue_reading_is_stable(
+        ["２０１８年０", "Ｐｏｏｄ", "２０１８年１０月２０日", "２０１８年０"]
+    )
+    # MangaOCR returned nothing for one crop; that is not a stable reading.
+    assert not rescue_reading_is_stable(["その", "", "その"])
+
+
+def _textless_box_service(tmp_path, readings):
+    source = tmp_path / "artwork.png"
+    Image.new("RGB", (800, 1129), "white").save(source)
+
+    class Detector:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "dt_polys": [
+                            [[372, 521], [664, 521], [664, 715], [372, 715]]
+                        ],
+                        "dt_scores": [0.655],
+                    }
+                }
+            ]
+
+    pending = iter(readings)
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.detector = Detector()
+    service.recognition_detector = None
+    service.reader = lambda _crop: next(pending)
+    return service, source
+
+
+def test_textless_artwork_reading_is_dropped_when_crops_disagree(tmp_path):
+    """A ribbon swirl was translated as "２０１８年０" and stamped on the drawing.
+
+    Paddle found the box but read nothing, and MangaOCR invents kana for any
+    texture; when shifted crops disagree there was never a string there.
+    """
+    service, source = _textless_box_service(
+        tmp_path, ["２０１８年０", "Ｐｏｏｄ", "２０１８年１０月２０日", "その"]
+    )
+    assert service.analyze(source, 1).units == []
+
+
+def test_textless_display_lettering_is_rescued_when_every_crop_agrees(tmp_path):
+    """A wooden sign defeats both Paddle passes yet reads the same every time."""
+    service, source = _textless_box_service(
+        tmp_path,
+        [
+            "調教室地域２４号四番以外立人禁止",
+            "調教室地隊２４号駅都外立人禁止",
+            "調教室地域２４号県有り外立人禁止",
+            "調教室地域２４号関係者以外立人禁止",
+        ],
+    )
+    page = service.analyze(source, 1)
+    assert [unit.ja for unit in page.units] == ["調教室地域２４号四番以外立人禁止"]
 
 
 def test_link_blocks_are_preserved_instead_of_translated():

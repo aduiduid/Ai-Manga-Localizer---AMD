@@ -419,6 +419,33 @@ def overlapping_sfx_echo(page: PageOCR, unit: TextUnit) -> bool:
     return False
 
 
+# A detector box that neither Paddle pass could read still reaches MangaOCR,
+# which never reports "no text": pointed at artwork it invents kana that pass
+# JP_RE, so a ribbon swirl became "２０１８年０" and a cutie mark became "その".
+# Real lettering, including stylised display type, survives a change of crop;
+# an invention does not.  Measured on 16 text-less candidates from two books:
+# the three real ones (a cover title, its repeat, a wooden sign) agreed at
+# 0.75-1.00, while all thirteen inventions agreed at 0.00-0.40, so 0.5 splits
+# them with room to spare.
+RESCUE_READING_AGREEMENT = 0.5
+
+
+def rescue_reading_is_stable(readings: list[str]) -> bool:
+    """Whether MangaOCR read the same text from several crops of one region."""
+    normalized = [
+        "".join(character for character in value if character.isalnum())
+        for value in readings
+    ]
+    if not all(normalized):
+        return False
+    for index, left in enumerate(normalized):
+        for right in normalized[index + 1 :]:
+            agreement = difflib.SequenceMatcher(None, left, right).ratio()
+            if agreement < RESCUE_READING_AGREEMENT:
+                return False
+    return True
+
+
 def prefer_semantic_ocr(current: str, candidate: str, score: float) -> bool:
     """Accept contextual OCR corrections without replacing complete text by a prefix."""
     if score < 0.72 or not JP_RE.search(candidate):
@@ -1274,6 +1301,41 @@ class PaddleMangaOCR:
         )
         return PageOCR(page.page, page.file, page.width, page.height, [merged])
 
+    def _rescue_reading_is_stable(
+        self, image: Image.Image, box: list[int], reverse: bool, reading: str
+    ) -> bool:
+        """Whether a text-less box still reads the same way from shifted crops.
+
+        Called only on the rescue path, where neither Paddle pass produced a
+        string and MangaOCR alone proposed ``reading``.  Real lettering -- even
+        display type the recognizers cannot parse -- keeps yielding the same
+        characters when the crop grows, shrinks and zooms; an invention does not.
+        """
+        pad_x = max(10, round((box[2] - box[0]) * 0.04))
+        pad_y = max(10, round((box[3] - box[1]) * 0.03))
+        readings = [reading]
+        for local_pad_x, local_pad_y, scale in (
+            (max(2, pad_x // 3), max(2, pad_y // 3), 1.0),
+            (round(pad_x * 2.5), round(pad_y * 2.5), 1.0),
+            (pad_x, pad_y, 1.5),
+        ):
+            variant_box = (
+                max(0, box[0] - local_pad_x),
+                max(0, box[1] - local_pad_y),
+                min(image.width, box[2] + local_pad_x),
+                min(image.height, box[3] + local_pad_y),
+            )
+            variant = image.crop(variant_box)
+            if reverse:
+                variant = ImageOps.invert(variant)
+            if scale != 1.0:
+                variant = variant.resize(
+                    (round(variant.width * scale), round(variant.height * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+            readings.append(self.reader(variant).strip())
+        return rescue_reading_is_stable(readings)
+
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
         image = Image.open(image_path).convert("RGB")
         results = list(self.detector.predict(str(image_path)))
@@ -1355,8 +1417,9 @@ class PaddleMangaOCR:
                 min(image.width, box[2] + pad_x),
                 min(image.height, box[3] + pad_y),
             ]
+            reverse = any(item.get("reverse", False) for item in group)
             crop = image.crop(tuple(crop_box))
-            if any(item.get("reverse", False) for item in group):
+            if reverse:
                 crop = ImageOps.invert(crop)
             # A detector fragment that Paddle could not read at all is noise
             # (paper grain, a hair strand, a panel border).  MangaOCR still
@@ -1369,6 +1432,14 @@ class PaddleMangaOCR:
             if _is_latin_region(paddle_text, paddle_score):
                 refined = paddle_text
             elif JP_RE.search(manga_text):
+                # Large display lettering can defeat both Paddle passes, so the
+                # area gate above deliberately lets MangaOCR rescue a text-less
+                # box -- but MangaOCR never says "nothing", and its inventions
+                # also pass JP_RE.  Ask for the same reading from shifted crops.
+                if not paddle_text and not self._rescue_reading_is_stable(
+                    image, box, reverse, manga_text
+                ):
+                    continue
                 refined = manga_text
             elif _is_latin_region(manga_text, paddle_score):
                 refined = manga_text

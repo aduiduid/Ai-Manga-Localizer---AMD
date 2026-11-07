@@ -43,7 +43,10 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # version 7 holds MangaOCR's Japanese hallucination for English sources.
 # 9: link blocks are now preserved instead of translated, so a cached credit
 # page still carries the un-skippable unit that failed the whole book.
-OCR_CACHE_VERSION = 9
+# 10: a text-less detector box only becomes a line when MangaOCR reads it the
+# same way from shifted crops, so a cached illustration page still holds the
+# invented "２０１８年０"/"その" that was stamped onto the drawing.
+OCR_CACHE_VERSION = 10
 
 
 def unsafe_semantic_missing(page: PageOCR, preserve_sfx: bool) -> list[dict]:
