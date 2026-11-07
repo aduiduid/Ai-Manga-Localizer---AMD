@@ -124,6 +124,13 @@
             <p id="inferenceStatus" class="inference-status" data-i18n="settings.inference.notChecked">尚未测试连接</p>
             <label><span data-i18n="settings.device">计算设备</span><select id="deviceSetting"><option value="auto" data-i18n="settings.device.auto">自动选择</option><option value="cpu">CPU</option><option value="gpu:0">GPU 0</option></select></label>
             <label><span data-i18n="settings.cpuThreads">CPU 核心数</span><select id="cpuThreads"></select><small id="cpuThreadsDetail" class="field-hint"></small></label>
+            <label class="toggle-row"><span><b data-i18n="settings.sound.complete">任务完成时提醒</b><small data-i18n="settings.sound.complete.detail">整本书跑完后响一声</small></span><input id="notifyComplete" type="checkbox"><i></i></label>
+            <label class="toggle-row"><span><b data-i18n="settings.sound.failure">任务出错时提醒</b><small data-i18n="settings.sound.failure.detail">任务失败或取消时用另一个声音提醒</small></span><input id="notifyFailure" type="checkbox"><i></i></label>
+            <div class="sound-preview-row">
+              <span data-i18n="settings.sound.preview">试听提示音</span>
+              <button id="previewComplete" type="button" class="secondary-button" data-i18n="settings.sound.preview.complete">完成音</button>
+              <button id="previewFailure" type="button" class="secondary-button" data-i18n="settings.sound.preview.failure">出错音</button>
+            </div>
             <label class="toggle-row"><span><b data-i18n="settings.modelscope">ModelScope 优先</b><small data-i18n="settings.modelscope.detail">适合中国大陆网络环境</small></span><input id="preferModelscope" type="checkbox"><i></i></label>
             <p id="appHome"></p>
             <div class="danger-zone">

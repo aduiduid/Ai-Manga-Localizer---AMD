@@ -1,3 +1,4 @@
+import json
 import time
 
 from fastapi.testclient import TestClient
@@ -279,6 +280,26 @@ def test_online_secret_is_memory_only_and_builtin_model_becomes_optional(tmp_pat
     assert "do-not-persist" not in app_paths.settings.read_text(encoding="utf-8")
     models = {item["id"]: item for item in client.get("/api/models").json()["models"]}
     assert models["hy-mt2"]["required"] is False
+
+
+def test_notification_switches_round_trip_through_settings(tmp_path):
+    app_paths = make_paths(tmp_path)
+    client = TestClient(create_app(app_paths, pipeline_factory=FakePipeline))
+    # Both default to on: the app is useless if a long book finishes silently
+    # while the user is in another window.
+    defaults = client.get("/api/settings").json()
+    assert defaults["notify_on_complete"] is True
+    assert defaults["notify_on_failure"] is True
+    response = client.put(
+        "/api/settings",
+        json={"notify_on_complete": False, "notify_on_failure": True},
+    )
+    assert response.status_code == 200
+    assert response.json()["notify_on_complete"] is False
+    assert response.json()["notify_on_failure"] is True
+    reloaded = json.loads(app_paths.settings.read_text(encoding="utf-8"))
+    assert reloaded["notify_on_complete"] is False
+    assert reloaded["notify_on_failure"] is True
 
 
 def test_models_page_lists_the_ollama_tags_that_actually_run(monkeypatch, tmp_path):

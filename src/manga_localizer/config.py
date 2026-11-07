@@ -88,6 +88,12 @@ class UserSettings:
     # 0 keeps every library on its own default (all logical cores for each
     # backend, which is what this app always did before the setting existed).
     cpu_threads: int = 0
+    # A full book takes tens of minutes, so a run that ends while the user is in
+    # another window should announce itself.  Two separate switches because the
+    # two events need different sounds: success is an optional nicety, whereas a
+    # failure is what the user actually waits for.
+    notify_on_complete: bool = True
+    notify_on_failure: bool = True
     ocr_backend: str = "hybrid"
     inference_backend: str = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"

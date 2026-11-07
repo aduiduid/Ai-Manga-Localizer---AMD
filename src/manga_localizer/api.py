@@ -48,6 +48,8 @@ class SettingsPayload(BaseModel):
     # the app had before the thread budget existed.  The upper bound is only a
     # sanity limit; /api/system publishes the real choices for this machine.
     cpu_threads: int = Field(0, ge=0, le=256)
+    notify_on_complete: bool = True
+    notify_on_failure: bool = True
     ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
     inference_backend: Literal["builtin", "ollama", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"

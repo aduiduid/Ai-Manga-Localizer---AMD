@@ -166,8 +166,9 @@ def test_ui_polish_keeps_ollama_tags_and_paused_state_honest():
         "state.models.some(model=>isLocalModel(model)&&model.required&&!model.ready)"
         in javascript
     )
-    # A failed job still needs the history list refreshed.
-    assert 'else if(job.status==="failed"){await refreshJobs()}' in javascript
+    # A failed job still needs the history list refreshed, and it now also
+    # announces itself with the error sound before that refresh.
+    assert 'else if(job.status==="failed"){announceJobEnd("failure");await refreshJobs()}' in javascript
     # The paused state gets its own chip colour and keeps its pipeline step lit.
     assert 'job.status==="paused"?"paused":""' in javascript
     assert ".status-chip.paused{" in css
@@ -216,6 +217,33 @@ def test_cpu_thread_picker_is_built_from_the_detected_cpu():
     assert 'cpu_threads:Number($("#cpuThreads").value||0)' in javascript
     assert '"#cpuThreads"' in javascript
     assert ".settings-form .field-hint{" in css
+
+
+def test_notification_sounds_are_separate_opt_in_switches():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    # One switch per event, so a user who only cares about failures can silence
+    # the success chime without losing the one they actually wait for.
+    assert 'id="notifyComplete"' in html
+    assert 'id="notifyFailure"' in html
+    assert 'data-i18n="settings.sound.complete"' in html
+    assert 'data-i18n="settings.sound.failure"' in html
+    # The two events must not share a waveform: completion is a rising major
+    # arpeggio, failure a falling minor second built from a different oscillator.
+    assert 'complete:{type:"sine"' in javascript
+    assert 'failure:{type:"triangle"' in javascript
+    assert '"#notifyComplete","#notifyFailure"' in javascript
+    assert "notify_on_complete:$(\"#notifyComplete\").checked" in javascript
+    assert "notify_on_failure:$(\"#notifyFailure\").checked" in javascript
+    assert 'announceJobEnd("complete")' in javascript
+    assert 'announceJobEnd("failure")' in javascript
+    # Both sounds are auditable without running a book.
+    assert 'id="previewComplete"' in html
+    assert 'id="previewFailure"' in html
+    assert 'playCue("complete")' in javascript
+    assert 'playCue("failure")' in javascript
+    assert ".settings-form .sound-preview-row{" in css
 
 
 def test_ml_bootstrap_installs_matching_torchvision_backend():
