@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0 - 2026-11-08
+
+- Drop one queued folder from a running batch without cancelling the whole batch: rows that have not started yet carry a dismiss button, confirm before they are removed, and the consumer skips them so the folders after them still run. The counter and the progress bar follow the folders that are still in the queue, so a batch with one folder dropped shows 3 instead of 4.
+- Refuse to drop the folder that is already running, with an error telling the reader to cancel the whole batch instead: only a batch cancel can interrupt work that is on the GPU.
+
 ## 0.6.0 - 2026-11-08
 
 - Queue several source folders as one serial batch: each folder runs the full pipeline in the order it was added, one at a time because Ollama and VRAM are exclusive, and a failing folder no longer aborts the rest of the batch. The batch reports "N succeeded / M failed" when it ends.

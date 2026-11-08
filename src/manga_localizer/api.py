@@ -536,6 +536,21 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             raise HTTPException(404, "Batch not found")
         return batch
 
+    @app.post("/api/batches/{batch_id}/tasks/{task_index}/cancel")
+    def cancel_batch_task(batch_id: str, task_index: int):
+        """Drop one folder that has not started yet.
+
+        Refused with 400 for the folder already running: only a whole-batch
+        cancel can interrupt work that is on the GPU.
+        """
+        try:
+            batch = batches.cancel_task(batch_id, task_index)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        if batch is None:
+            raise HTTPException(404, "Batch not found")
+        return batch
+
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
         # Batches share this poll endpoint so the UI can keep one refresh loop

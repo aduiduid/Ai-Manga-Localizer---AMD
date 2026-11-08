@@ -64,17 +64,48 @@ def summarize(batch: dict) -> None:
 
 
 def batch_progress(tasks: list[dict], total: int) -> int:
-    """Whole-batch percentage: finished folders plus the running one's share."""
+    """Whole-batch percentage: finished folders plus the running one's share.
+
+    Folders dropped from the queue are not counted as done: doing so would jump
+    the bar forward for work that was never performed.
+    """
     if total <= 0:
         return 0
     done = 0.0
     for task in tasks:
         status = task.get("status")
-        if status in TERMINAL_STATUSES:
+        if status in {"complete", "failed"}:
             done += 1
         elif status == "running":
             done += min(max(int(task.get("progress") or 0), 0), 100) / 100
     return round(done / total * 100)
+
+
+def queued_tasks(batch: dict) -> list[dict]:
+    """The folders that still count as part of the run.
+
+    A folder the reader dropped from the queue is cancelled before it ever
+    starts, so it is not work the progress bar or the counter should wait for.
+    Dropping one folder therefore shrinks the denominator from, say, 4 to 3
+    instead of leaving a permanently unfinished quarter.
+    """
+    return [task for task in batch.get("tasks") or [] if task.get("status") != "cancelled"]
+
+
+def queue_position(tasks: list[dict], index: int) -> int:
+    """1-based position of folder ``index`` among the folders still queued.
+
+    The UI names the running folder "1/3", "2/3", so the number has to skip the
+    rows the reader dropped rather than reuse the raw list index.
+    """
+    position = 0
+    for task in tasks:
+        if task.get("status") == "cancelled":
+            continue
+        position += 1
+        if task.get("index") == index:
+            return position
+    return position
 
 
 def batch_current_task(batch: dict, tasks: list[dict]) -> dict | None:
@@ -297,7 +328,15 @@ class BatchService:
                 if field in job:
                     task[field] = job[field]
         summarize(merged)
-        merged["progress"] = batch_progress(tasks, merged.get("total") or len(tasks))
+        merged["total"] = len(tasks)
+        merged["effective_total"] = len(queued_tasks(merged))
+        merged["finished"] = merged["completed"] + merged["failed"]
+        merged["queue_position"] = (
+            queue_position(tasks, merged["current_index"])
+            if isinstance(merged.get("current_index"), int)
+            else None
+        )
+        merged["progress"] = batch_progress(tasks, merged["effective_total"])
         current = batch_current_task(merged, tasks)
         merged["current_task"] = deepcopy(current) if current is not None else None
         merged["current_batch_index"] = current.get("index") if current else None
@@ -337,6 +376,48 @@ class BatchService:
         batch.update(status="cancelled", message="已取消", current_index=None)
         self.store.save(batch)
         return self.view(batch)
+
+    def cancel_task(self, batch_id: str, index: int) -> dict | None:
+        """Drop one folder that has not started yet.
+
+        Refused for the folder that is already running: mid-pipeline cancellation
+        has to go through the job's cooperative gate, which is what ``cancel``
+        does.  Removing a waiting folder is only a status flip, and the consumer
+        loop re-reads the record before every step, so the row is simply skipped.
+
+        The read-modify-write happens under the service lock because the
+        consumer thread writes the same record when a folder finishes; without
+        it a cancel landing in that window would be silently undone.
+        """
+        with self._lock:
+            batch = self.store.get(batch_id)
+            if batch is None:
+                return None
+            if batch.get("status") in BATCH_TERMINAL_STATUSES:
+                raise ValueError("批次已结束，无法取消排队中的任务")
+            tasks = batch.get("tasks") or []
+            task = next((item for item in tasks if item.get("index") == index), None)
+            if task is None:
+                raise ValueError("任务不存在")
+            status = task.get("status") or "queued"
+            if status == "running":
+                raise ValueError("无法取消正在运行的任务，请取消整批")
+            if status != "queued":
+                raise ValueError(f"任务状态为 {status}，无需取消")
+            task.update(
+                status="cancelled",
+                phase="cancelled",
+                progress=0,
+                current=0,
+                message="已取消排队",
+                error=None,
+                finished_at=utc_now(),
+            )
+            # ``total`` keeps counting every row ever queued; the view derives
+            # ``effective_total`` so the counter and the bar forget this row.
+            summarize(batch)
+            self.store.save(batch)
+            return self.view(batch)
 
     def pause(self, batch_id: str) -> dict | None:
         batch = self.store.get(batch_id)
@@ -398,13 +479,22 @@ class BatchService:
             return
         if batch.get("status") != "cancelled":
             summarize(batch)
-            # A folder that failed is recorded and skipped; the batch only
-            # counts as failed when nothing came out of it.
-            batch["status"] = "failed" if not batch["completed"] else "completed"
+            dropped = batch["cancelled"]
+            if not batch["completed"] and not batch["failed"] and dropped:
+                # Every folder was dropped from the queue before it started, so
+                # there is nothing to report as success or failure.
+                batch["status"] = "cancelled"
+                batch["message"] = "已取消"
+            else:
+                # A folder that failed is recorded and skipped; the batch only
+                # counts as failed when nothing came out of it.
+                batch["status"] = "failed" if not batch["completed"] else "completed"
+                batch["message"] = (
+                    f"成功 {batch['completed']} 个 / 失败 {batch['failed']} 个"
+                )
+                if dropped:
+                    batch["message"] += f" / 已取消 {dropped} 个"
             batch["current_index"] = None
-            batch["message"] = (
-                f"成功 {batch['completed']} 个 / 失败 {batch['failed']} 个"
-            )
         settings = (template or {}).get("settings")
         batch["released"] = release_runtime(settings)
         self.store.save(batch)
@@ -429,7 +519,12 @@ class BatchService:
             started_at=utc_now(),
         )
         batch["current_index"] = index
-        batch["message"] = f"正在处理 {index + 1}/{batch['total']}：{task['name']}"
+        # Count only the folders that are still part of the run: rows the reader
+        # dropped from the queue must not leave a gap in "1/3, 2/3".
+        batch["message"] = (
+            f"正在处理 {queue_position(batch['tasks'], index)}"
+            f"/{len(queued_tasks(batch))}：{task['name']}"
+        )
         self.store.save(batch)
         with self._lock:
             self._current[batch_id] = job["id"]

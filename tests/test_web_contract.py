@@ -374,6 +374,46 @@ def test_batch_card_shows_the_running_folder_phase():
         assert i18n.count(f'"{key}":') == 3, key
 
 
+def test_batch_queue_can_drop_one_waiting_folder():
+    # A submitted batch used to be all-or-nothing: the only escape was cancelling the whole run.
+    # The ✕ on a still-waiting row now calls the per-task cancel endpoint, and every counter has to
+    # shrink to `effective_total` so the dropped row stops being waited for (4 queued -> 0/3).
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    assert "async function dropQueuedTask(index)" in javascript
+    assert "dropQueuedTask(Number(drop.dataset.dropTask))" in javascript
+    assert 'const drop=event.target.closest("[data-drop-task]")' in javascript
+    assert 'data-drop-task="${task.index}"' in javascript
+    # The row ✕ only exists for a folder that has not started, and only inside a live batch.
+    assert 'const droppable=status==="queued"&&!!batch&&(batch.status==="running"||batch.status==="queued")' in javascript
+    assert 'const removable=status==="queued"&&!batch' in javascript
+    assert 'window.confirm(t("batch.task.dropConfirm",{name}))' in javascript
+    # The endpoint addresses the folder by its own `index`, never by the array position.
+    drop = javascript[javascript.index("async function dropQueuedTask(index)"):]
+    drop = drop[: drop.index("async function renderChildOptions(parent)")]
+    assert "/api/batches/${batch.id}/tasks/${index}/cancel" in drop
+    assert 'method:"POST"' in drop
+    assert "const task=tasks.find(item=>item.index===index)" in drop
+    assert "renderJob(view)" in drop
+    # Dropped folders leave the denominator, and `finished` (completed + failed) is the numerator.
+    assert "function batchEffectiveTotal(batch)" in javascript
+    assert "if(Number.isFinite(batch.effective_total))return batch.effective_total" in javascript
+    assert "function batchFinishedTotal(batch)" in javascript
+    assert "return Number.isFinite(batch.finished)?batch.finished:batchFinishedCount(batch)" in javascript
+    assert "total:batchEffectiveTotal(batch)" in javascript
+    assert "const total=batchEffectiveTotal(batch)" in javascript
+    assert "`${batchFinishedTotal(batch)} / ${batchEffectiveTotal(batch)}`" in javascript
+    assert "Number.isFinite(batch.queue_position)?batch.queue_position" in javascript
+    assert 'total:batchEffectiveTotal(job),failed:job.failed||0' in javascript
+    # A dropped row stays visible, greyed out, and is no longer offered a ✕.
+    assert 'status==="cancelled"?" cancelled":""' in javascript
+    assert ".batch-task.cancelled{" in css
+    assert ".batch-task-drop{" in css
+    for key in ("batch.task.drop", "batch.task.dropConfirm", "batch.task.dropped"):
+        assert i18n.count(f'"{key}":') == 3, key
+
+
 def test_batch_translations_cover_every_locale():
     i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
     keys = [
@@ -407,6 +447,9 @@ def test_batch_translations_cover_every_locale():
         "batch.task.translate",
         "batch.task.render",
         "batch.task.failure",
+        "batch.task.drop",
+        "batch.task.dropConfirm",
+        "batch.task.dropped",
     ]
     keys += [f"batch.status.{status}" for status in ("queued", "running", "completed", "failed", "cancelled")]
     keys += [f"batch.task.{status}" for status in ("queued", "running", "paused", "complete", "failed", "cancelled")]

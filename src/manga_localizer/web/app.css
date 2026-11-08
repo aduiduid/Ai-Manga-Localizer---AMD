@@ -41,6 +41,10 @@
 .batch-task.running{background:var(--accent-soft);border-color:var(--accent)}
 .batch-task.running:hover{background:var(--accent-soft)}
 .batch-task.selected{box-shadow:inset 0 0 0 1px var(--accent)}
+.batch-task.cancelled{opacity:.6}
+.batch-task.cancelled:hover{background:#faf8f4}
+.batch-task-drop{color:var(--danger);border-color:#f0d3ce}
+.batch-task-drop:hover{border-color:var(--danger);color:#fff;background:var(--danger)}
 .batch-task-index{color:var(--muted);font-size:11px;font-weight:700;text-align:right}
 .batch-task-main{min-width:0}
 .batch-task-main b,.batch-task-output,.batch-task-error{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}

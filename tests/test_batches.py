@@ -322,6 +322,108 @@ def test_a_failed_folder_surfaces_its_error_as_current_task(tmp_path):
     assert finished["current_batch_index"] == 1
 
 
+def test_a_queued_folder_can_be_dropped_without_stopping_the_run(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=SlowPipeline))
+    folders = [
+        make_folder(tmp_path, name, pages=6)
+        for name in ("chapter-01", "chapter-02", "chapter-03", "chapter-04")
+    ]
+    output = tmp_path / "out"
+    batch_id = start_batch(client, folders, output).json()["id"]
+    wait_for_running_task(client, batch_id)
+
+    dropped = client.post(f"/api/batches/{batch_id}/tasks/2/cancel").json()
+
+    # The row the reader dropped never counts again: the counter drops to 3
+    # and the third folder is cancelled while the first keeps running.
+    assert dropped["status"] == "running"
+    assert dropped["tasks"][2]["status"] == "cancelled"
+    assert dropped["tasks"][2]["message"] == "已取消排队"
+    assert dropped["tasks"][0]["status"] == "running"
+    assert dropped["effective_total"] == 3
+    assert dropped["total"] == 4
+    assert dropped["cancelled"] == 1
+    # A dropped folder is not counted as finished, so the bar must not jump:
+    # at most the running folder's own share of the three remaining ones.
+    assert dropped["progress"] <= 33
+
+    batch = wait_for_batch(client, batch_id, timeout=15)
+    assert batch["status"] == "completed"
+    # The consumer skips the dropped row and still runs the last folder.
+    assert [task["status"] for task in batch["tasks"]] == [
+        "complete",
+        "complete",
+        "cancelled",
+        "complete",
+    ]
+    assert (batch["completed"], batch["failed"], batch["cancelled"]) == (3, 0, 1)
+    assert batch["message"] == "成功 3 个 / 失败 0 个 / 已取消 1 个"
+    assert batch["progress"] == 100
+    assert batch["tasks"][2]["job_id"] is None
+    assert (output / "chapter-01--已汉化").exists()
+    assert (output / "chapter-04--已汉化").exists()
+    assert not (output / "chapter-03--已汉化").exists()
+
+
+def test_a_running_folder_cannot_be_dropped_alone(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=SlowPipeline))
+    folders = [
+        make_folder(tmp_path, name, pages=6) for name in ("chapter-01", "chapter-02")
+    ]
+    batch_id = start_batch(client, folders, tmp_path / "out").json()["id"]
+    wait_for_running_task(client, batch_id)
+
+    response = client.post(f"/api/batches/{batch_id}/tasks/0/cancel")
+
+    assert response.status_code == 400
+    assert "无法取消正在运行的任务" in response.json()["detail"]
+    batch = wait_for_batch(client, batch_id, timeout=15)
+    assert batch["status"] == "completed"
+    assert [task["status"] for task in batch["tasks"]] == ["complete", "complete"]
+
+
+def test_dropping_the_last_queued_folder_still_lets_the_batch_finish(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=SlowPipeline))
+    folders = [
+        make_folder(tmp_path, name, pages=6) for name in ("chapter-01", "chapter-02")
+    ]
+    batch_id = start_batch(client, folders, tmp_path / "out").json()["id"]
+    wait_for_running_task(client, batch_id)
+
+    client.post(f"/api/batches/{batch_id}/tasks/1/cancel")
+
+    batch = wait_for_batch(client, batch_id, timeout=15)
+    # With the only waiting folder dropped the batch is a one-folder job, and
+    # the running folder's success is still reported.
+    assert batch["status"] == "completed"
+    assert batch["effective_total"] == 1
+    assert batch["progress"] == 100
+    assert batch["tasks"][1]["job_id"] is None
+
+
+def test_dropping_a_folder_that_is_not_waiting_is_refused(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=SlowPipeline))
+    folders = [
+        make_folder(tmp_path, name, pages=4)
+        for name in ("chapter-01", "chapter-02", "chapter-03")
+    ]
+    batch_id = start_batch(client, folders, tmp_path / "out").json()["id"]
+    # Wait until the second folder runs, so the first one is already complete.
+    wait_for_running_task(client, batch_id, index=1)
+
+    finished_row = client.post(f"/api/batches/{batch_id}/tasks/0/cancel")
+    assert finished_row.status_code == 400
+    assert "无需取消" in finished_row.json()["detail"]
+
+    assert client.post("/api/batches/missing-batch/tasks/0/cancel").status_code == 404
+    assert client.post(f"/api/batches/{batch_id}/tasks/9/cancel").status_code == 400
+
+    done = wait_for_batch(client, batch_id, timeout=15)
+    closed = client.post(f"/api/batches/{done['id']}/tasks/1/cancel")
+    assert closed.status_code == 400
+    assert "批次已结束" in closed.json()["detail"]
+
+
 def test_a_single_string_source_still_creates_one_job(tmp_path):
     client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
     folder = make_folder(tmp_path, "chapter-01")
