@@ -137,8 +137,15 @@ def llama_specs(
     review = (settings.llama_review_model or "").strip()
     if settings.quality_profile == "quality" and review and review != wanted[0][0]:
         wanted.append((review, "review"))
-    if settings.ocr_backend in {"hybrid", "ollama"}:
-        ocr = (settings.ollama_ocr_model or "").strip()
+    # ``hybrid``/``ollama`` read pages through Ollama but the model itself may
+    # already be one of these blobs, so listing it is still honest.  ``llama``
+    # means llama.cpp reads the pages directly, which is exactly this file.
+    if settings.ocr_backend in {"hybrid", "ollama", "llama"}:
+        ocr = (
+            (settings.ollama_ocr_model or "").strip()
+            if settings.ocr_backend != "llama"
+            else (settings.ollama_ocr_model or settings.llama_model or "").strip()
+        )
         if ocr and all(ocr != tag for tag, _ in wanted):
             wanted.append((ocr, "ocr"))
     rows = []
@@ -155,7 +162,11 @@ def llama_specs(
                 "role": {
                     "translation": "llama.cpp 主翻译模型",
                     "review": "独立候选译文（质量模式第二遍）",
-                    "ocr": "视觉 OCR（仍由 Ollama 提供）",
+                    "ocr": (
+                        "llama.cpp 视觉 OCR（整页读字）"
+                        if settings.ocr_backend == "llama"
+                        else "视觉 OCR 候选（仍由 Ollama 提供）"
+                    ),
                 }[role],
                 "role_key": f"models.role.{role}",
                 "provider": "llama.cpp",
@@ -274,8 +285,10 @@ class ModelManager:
                     )
                     and (spec.id != "lama" or quality_profile == "quality")
                     and (
+                        # llama.cpp vision OCR still uses the Paddle/MangaOCR
+                        # detector for geometry, so those weights stay required.
                         spec.id not in {"paddleocr", "manga-ocr"}
-                        or ocr_backend in {"builtin", "hybrid"}
+                        or ocr_backend in {"builtin", "hybrid", "llama"}
                     )
                 ),
                 "ready": self.is_ready(spec.id),

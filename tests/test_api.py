@@ -398,6 +398,83 @@ def test_quality_inference_check_reuses_the_selected_9b_model(monkeypatch, tmp_p
     }
 
 
+def _vision_manager(monkeypatch, projector: bool):
+    """A manager that resolves the vision tag, with or without a projector."""
+    from pathlib import Path
+
+    from manga_localizer.llama_server import OllamaModelFiles
+
+    files = OllamaModelFiles(
+        "vision:q8",
+        Path("vision.gguf"),
+        Path("vision-mmproj.gguf") if projector else None,
+    )
+
+    class FakeManager:
+        def resolve(self, tag):
+            return files if tag == "vision:q8" else None
+
+        def find_executable(self):
+            return Path("llama-server.exe")
+
+    monkeypatch.setattr(
+        "manga_localizer.api.manager_from_settings", lambda *args, **kwargs: FakeManager()
+    )
+
+
+def test_inference_check_reports_the_llama_vision_model_when_only_ocr_moved(
+    monkeypatch, tmp_path
+):
+    # The translator still answers through the daemon; only the page reader runs
+    # on llama.cpp, so the answer has to describe the vision side rather than
+    # fall through and report the daemon.
+    _vision_manager(monkeypatch, projector=True)
+    monkeypatch.setattr(
+        "manga_localizer.api.available_remote_models",
+        lambda backend, base_url, api_key: ["draft-model"],
+    )
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
+    response = client.post(
+        "/api/inference/check",
+        json={
+            "inference_backend": "ollama",
+            "ocr_backend": "llama",
+            "quality_profile": "quality",
+            "ollama_model": "draft-model",
+            "ollama_ocr_model": "vision:q8",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "backend": "ollama",
+        "message": "llama.cpp 视觉 OCR 就绪：llama-server.exe、vision:q8",
+        "models": ["vision:q8"],
+    }
+
+
+def test_inference_check_needs_the_vision_projector(monkeypatch, tmp_path):
+    _vision_manager(monkeypatch, projector=False)
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
+    response = client.post(
+        "/api/inference/check",
+        json={
+            "inference_backend": "ollama",
+            "ocr_backend": "llama",
+            "quality_profile": "quality",
+            "ollama_model": "draft-model",
+            "ollama_ocr_model": "vision:q8",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": False,
+        "backend": "ollama",
+        "message": "视觉 OCR 模型 vision:q8 缺少 mmproj 投影器",
+        "models": [],
+    }
+
+
 def test_preview_of_a_deleted_source_folder_is_a_404(tmp_path):
     client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
     source = tmp_path / "source"

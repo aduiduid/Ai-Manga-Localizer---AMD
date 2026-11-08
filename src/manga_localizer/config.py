@@ -50,6 +50,10 @@ def ollama_timeout(token_budget: int) -> int:
 # UI shows them and the user may have a browser bookmark to one.
 DEFAULT_LLAMA_MAIN_PORT = 8080
 DEFAULT_LLAMA_REVIEW_PORT = 8081
+# Vision OCR gets its own port because it runs before translation starts: the
+# page-read pass must not queue behind (or pre-empt) the 9B translation slot,
+# and a server serves one request at a time.
+DEFAULT_LLAMA_VISION_PORT = 8082
 
 # The tags below name Ollama manifests, not Ollama daemons: the manifest is the
 # only index that maps a readable name to the content-addressed GGUF blobs, and
@@ -162,6 +166,7 @@ class UserSettings:
     llama_context_tokens: int = LLAMA_CONTEXT_TOKENS
     llama_main_port: int = DEFAULT_LLAMA_MAIN_PORT
     llama_review_port: int = DEFAULT_LLAMA_REVIEW_PORT
+    llama_vision_port: int = DEFAULT_LLAMA_VISION_PORT
     # Empty means "look for the llama-server.exe that ships inside Ollama"; a
     # path lets a user point at a standalone llama.cpp build instead.
     llama_server_path: str = ""

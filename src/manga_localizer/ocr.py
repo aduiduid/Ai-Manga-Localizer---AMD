@@ -2056,6 +2056,15 @@ class OllamaVisionOCR:
         if not self.model:
             raise ValueError("An Ollama vision model is required for Ollama OCR")
 
+    def _image_bytes(self, image_path: Path) -> bytes:
+        """The page as the vision service wants it.
+
+        Kept as its own method because the transport decides the format: Ollama
+        accepts the WebP files this app stores, llama.cpp answers 400 for them,
+        so the llama.cpp subclass converts instead of re-encoding for both.
+        """
+        return image_path.read_bytes()
+
     def _chat(self, images: list[bytes], prompt: str, schema: dict) -> dict:
         payload_base = {
             "model": self.model,
@@ -2195,7 +2204,19 @@ class OllamaVisionOCR:
                                 "maxItems": 4,
                             },
                             "text": {"type": "string"},
-                            "score": {"type": "number"},
+                            # llama.cpp turns this schema into a constrained
+                            # decoding grammar, and an unbounded number let it
+                            # answer 0.0 for every box on a page it had read
+                            # perfectly.  That silently disabled the score gates
+                            # downstream (``prefer_semantic_ocr`` needs 0.72,
+                            # ``_local_crop_is_suspicious`` rejects <= 0.05), so
+                            # the range is stated here exactly as refine and
+                            # find_missing already state theirs.
+                            "score": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
                             "is_sfx": {"type": "boolean"},
                         },
                         "required": ["bbox", "text", "score", "is_sfx"],
@@ -2204,7 +2225,7 @@ class OllamaVisionOCR:
             },
             "required": ["regions"],
         }
-        regions = self._chat([image_path.read_bytes()], prompt, schema).get(
+        regions = self._chat([self._image_bytes(image_path)], prompt, schema).get(
             "regions", []
         )
         units: list[TextUnit] = []
@@ -2347,7 +2368,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
             "required": ["regions", "missing"],
         }
         payload = self._chat(
-            [image_path.read_bytes(), self._annotated_image(image, page)],
+            [self._image_bytes(image_path), self._annotated_image(image, page)],
             prompt,
             schema,
         )
@@ -2450,7 +2471,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
 逐处检查原图里所有没有被红框完整覆盖、或只被红框覆盖一部分的可见文字，特别注意白色填充黑色描边、斜排、竖排、拟声词和标点效果字。
 missing.text 必须逐字抄写完整{language_label_zh(self.source_language)}，不翻译；bbox 使用 0 到 1000 的整页归一化整数并包住完整文字。已经被红框完整覆盖的文字不要重复。没有遗漏才返回空数组。"""
         payload = self._chat(
-            [image_path.read_bytes(), self._annotated_image(image, page)],
+            [self._image_bytes(image_path), self._annotated_image(image, page)],
             prompt,
             schema,
         )
@@ -2904,8 +2925,56 @@ role 选择 dialogue（对白）、narration（旁白）、sfx（拟声/效果�
         return unresolved
 
 
+class LlamaVisionOCR(OllamaVisionOCR):
+    """The same vision OCR, answered by a ``llama-server`` we started ourselves.
+
+    Only the transport changes, so this subclasses the Ollama adapter and keeps
+    every prompt, schema, clamping rule and role filter exactly as it was -- that
+    is what makes an A/B comparison meaningful.  Two things do differ:
+
+    * The request is OpenAI-shaped (``/v1/chat/completions`` with image parts and
+      ``response_format.json_schema``), which lives in ``llama_client``.
+    * llama.cpp's image loader rejects WebP, so pages are converted to PNG first;
+      every page this app stores is WebP, so skipping that step fails on page 1.
+
+    ``think`` is accepted and ignored: the server is started with ``-rea off``,
+    which is the server-side twin of Ollama's ``think: false``.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        timeout: int = 300,
+        source_language: str = "auto",
+        context_tokens: int = OLLAMA_CONTEXT_TOKENS,
+        max_output_tokens: int = OLLAMA_MAX_OUTPUT_TOKENS,
+    ):
+        super().__init__(
+            base_url, model, timeout=timeout, source_language=source_language
+        )
+        # Imported here: ``llama_client`` imports ``translator``, which imports
+        # this module, so a module-level import would close the circle.
+        from .llama_client import LlamaChatClient
+
+        self.client = LlamaChatClient(
+            base_url,
+            self.model,
+            context_tokens=context_tokens,
+            max_output_tokens=max_output_tokens,
+        )
+
+    def _image_bytes(self, image_path: Path) -> bytes:
+        from .llama_client import png_bytes
+
+        return png_bytes(image_path)
+
+    def _chat(self, images: list[bytes], prompt: str, schema: dict) -> dict:
+        return self.client.chat_vision(images, prompt, schema, timeout=self.timeout)
+
+
 class HybridMangaOCR:
-    """Quality OCR: Paddle/MangaOCR geometry plus full-page Ollama semantics."""
+    """Quality OCR: Paddle/MangaOCR geometry plus full-page vision semantics."""
 
     def __init__(
         self,
@@ -2915,9 +2984,17 @@ class HybridMangaOCR:
         device: str = "auto",
         profile: str = "quality",
         source_language: str = "auto",
+        semantics: "OllamaVisionOCR | None" = None,
     ):
         self.geometry = PaddleMangaOCR(paths, device, profile, source_language)
-        self.semantics = OllamaVisionOCR(base_url, model, source_language=source_language)
+        # Injected so the exact same geometry/semantics split can run against
+        # either vision transport; the default keeps the Ollama path untouched.
+        if semantics is not None:
+            self.semantics = semantics
+        else:
+            self.semantics = OllamaVisionOCR(
+                base_url, model, source_language=source_language
+            )
         self.profile = profile
         self.source_language = source_language
         self.last_missing: list[dict] = []

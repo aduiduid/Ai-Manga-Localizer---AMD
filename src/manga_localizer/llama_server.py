@@ -36,6 +36,9 @@ from urllib.request import Request, urlopen
 # user expects; the documented ports are used instead because the UI shows them.
 DEFAULT_MAIN_PORT = 8080
 DEFAULT_REVIEW_PORT = 8081
+# Vision OCR needs its own port: the main slot is busy translating, and a page
+# read cannot share a slot that serves one request at a time (``-np 1``).
+DEFAULT_VISION_PORT = 8082
 
 # One slot per server, so this is the whole context one request may use.  64K
 # matches the Ollama ceiling this migration replaces, and the server advertises
@@ -469,6 +472,23 @@ class LlamaServerManager:
                 if isinstance(process, _StubProcess) or process.poll() is None
             ]
 
+    def slot_for_tag(self, tag: str) -> LlamaSlot | None:
+        """A live slot already serving ``tag``, whatever role started it.
+
+        Vision OCR usually needs the same multimodal model as translation, and a
+        7 GB duplicate on a second port would not fit next to the first one, so
+        the caller asks for the tag instead of blindly starting one more server.
+        """
+        alias = tag.replace(":", "-").replace("/", "-")
+        with self._lock:
+            # ``_slots`` is keyed by role, so the tuple has to be unpacked rather
+            # than taken from ``items()``.
+            for slot, process in self._slots.values():
+                live = isinstance(process, _StubProcess) or process.poll() is None
+                if live and slot.alias == alias:
+                    return slot
+        return None
+
     def port_notes(self) -> dict[str, str]:
         """Port moves recorded during the last start, one line per role.
 
@@ -676,16 +696,23 @@ def open_slots(manager: LlamaServerManager, settings, emit=None) -> dict[str, Ll
             "请先在模型页下载该模型，或把设置里的模型名改成已下载的模型。"
         )
     slots: dict[str, LlamaSlot] = {}
-    if emit:
-        emit(f"启动 llama.cpp 主模型 {editor_tag}")
-    slots["editor"] = manager.start(
-        "editor",
-        editor_files,
-        port=int(getattr(settings, "llama_main_port", DEFAULT_MAIN_PORT) or DEFAULT_MAIN_PORT),
-        context=int(
-            getattr(settings, "llama_context_tokens", 0) or DEFAULT_CONTEXT_TOKENS
-        ),
-    )
+    existing = manager.slot_for_tag(editor_tag)
+    if existing is not None:
+        # Vision OCR already loaded this very model for the OCR pass.  Starting
+        # a second copy would put two 7 GB weights on one GPU for no gain, so
+        # the running server is adopted instead.
+        slots["editor"] = existing
+    else:
+        if emit:
+            emit(f"启动 llama.cpp 主模型 {editor_tag}")
+        slots["editor"] = manager.start(
+            "editor",
+            editor_files,
+            port=int(getattr(settings, "llama_main_port", DEFAULT_MAIN_PORT) or DEFAULT_MAIN_PORT),
+            context=int(
+                getattr(settings, "llama_context_tokens", 0) or DEFAULT_CONTEXT_TOKENS
+            ),
+        )
     if getattr(settings, "quality_profile", "quality") == "quality":
         review_tag = (getattr(settings, "llama_review_model", "") or "").strip()
         if review_tag and review_tag != editor_tag:
@@ -715,9 +742,56 @@ def open_slots(manager: LlamaServerManager, settings, emit=None) -> dict[str, Ll
     return slots
 
 
+def open_vision_slot(manager: LlamaServerManager, settings, emit=None) -> LlamaSlot:
+    """The server that reads page images for OCR.
+
+    The model is the OCR tag from settings, which is the same multimodal 9B the
+    translator uses -- that is the whole point of routing OCR through llama.cpp
+    too, and it means the OCR pass and the translation pass can share one loaded
+    weight set.  The context is the main window for the same reason: whichever of
+    the two passes starts the process, the other adopts it by tag and must not
+    inherit a window that is too small for a book-sized prompt.
+    """
+    tag = (getattr(settings, "ollama_ocr_model", "") or "").strip()
+    if not tag:
+        tag = (getattr(settings, "llama_model", "") or "").strip()
+    if not tag:
+        raise LlamaServerError("llama.cpp 视觉 OCR 需要一个模型名，请先在设置里填写 OCR 模型")
+    files = manager.resolve(tag)
+    if files is None:
+        raise LlamaServerError(
+            f"找不到视觉 OCR 模型 {tag} 的 GGUF 文件："
+            f"{manager.ollama_root} 下没有同名 manifest。"
+            "请先在模型页下载该模型，或把设置里的 OCR 模型名改成已下载的模型。"
+        )
+    if files.projector is None:
+        raise LlamaServerError(
+            f"模型 {tag} 没有 mmproj 多模态投影器，无法用 llama.cpp 做视觉 OCR。"
+            "请换一个带视觉能力的模型，或把 OCR 后端改回 hybrid / builtin。"
+        )
+    existing = manager.slot_for_tag(tag)
+    if existing is not None:
+        # Already loaded for this very tag; a second copy of a 7 GB weight set
+        # would not fit beside the first one.
+        return existing
+    if emit:
+        emit(f"启动 llama.cpp 视觉 OCR 模型 {tag}")
+    return manager.start(
+        "vision",
+        files,
+        port=int(
+            getattr(settings, "llama_vision_port", 0) or DEFAULT_VISION_PORT
+        ),
+        context=int(
+            getattr(settings, "llama_context_tokens", 0) or DEFAULT_CONTEXT_TOKENS
+        ),
+    )
+
+
 __all__ = [
     "DEFAULT_MAIN_PORT",
     "DEFAULT_REVIEW_PORT",
+    "DEFAULT_VISION_PORT",
     "DEFAULT_CONTEXT_TOKENS",
     "LlamaServerError",
     "LlamaServerManager",
@@ -730,6 +804,7 @@ __all__ = [
     "manager_from_settings",
     "ollama_root_for",
     "open_slots",
+    "open_vision_slot",
     "probe",
     "release_llama_servers",
     "running_llama_slots",

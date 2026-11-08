@@ -17,6 +17,7 @@ import pytest
 from manga_localizer import llama_server
 from manga_localizer.config import AppPaths, UserSettings
 from manga_localizer.llama_server import (
+    DEFAULT_VISION_PORT,
     LlamaServerError,
     LlamaServerManager,
     LlamaSlot,
@@ -24,6 +25,7 @@ from manga_localizer.llama_server import (
     discover_ollama_models,
     hold_llama_servers,
     manager_for,
+    open_vision_slot,
     release_llama_servers,
     running_llama_slots,
 )
@@ -287,3 +289,107 @@ def test_a_finished_batch_reports_the_llama_slots_it_freed(tmp_path, monkeypatch
     released = release_runtime(settings)
     assert stopped == [True]
     assert released == ["DeepSeek-9B@8080"]
+
+
+def test_a_live_slot_is_found_by_tag_whatever_role_started_it(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    _fake_start(monkeypatch, manager)
+    editor = manager.start("editor", _files(tmp_path), port=8080, context=4096)
+    # The vision stage asks for the model, not for a role: the same 9B may
+    # already be loaded for translation and a second copy would not fit.
+    assert manager.slot_for_tag("DeepSeek-9B:latest") is editor
+    assert manager.slot_for_tag("other:latest") is None
+
+
+def _vision_files(tmp_path: Path, tag: str = "Vision-9B:latest") -> OllamaModelFiles:
+    weights = tmp_path / "vision.gguf"
+    weights.write_bytes(b"GGUF")
+    projector = tmp_path / "vision-mmproj.gguf"
+    projector.write_bytes(b"GGUF")
+    return OllamaModelFiles(tag=tag, weights=weights, projector=projector)
+
+
+def test_vision_ocr_shares_the_translation_slot_instead_of_a_second_copy(
+    tmp_path, monkeypatch
+):
+    manager = LlamaServerManager(tmp_path / "models")
+    created, _ = _fake_start(monkeypatch, manager)
+    files = _vision_files(tmp_path)
+    monkeypatch.setattr(manager, "resolve", lambda tag: files)
+    editor = manager.start("editor", files, port=8080, context=4096)
+
+    slot = open_vision_slot(manager, UserSettings(ollama_ocr_model=files.tag))
+
+    assert slot is editor
+    assert len(created) == 1
+
+
+def test_vision_ocr_starts_the_vision_port_for_a_fresh_model(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    created, notes = _fake_start(monkeypatch, manager)
+    files = _vision_files(tmp_path)
+    monkeypatch.setattr(manager, "resolve", lambda tag: files)
+    messages: list[str] = []
+
+    slot = open_vision_slot(
+        manager, UserSettings(ollama_ocr_model=files.tag), emit=messages.append
+    )
+
+    # Reading a page and translating a page cannot share one slot: the server
+    # holds one request at a time, and OCR runs before translation begins.
+    assert slot.port == DEFAULT_VISION_PORT
+    assert notes["last_port"] == str(DEFAULT_VISION_PORT)
+    assert messages == ["启动 llama.cpp 视觉 OCR 模型 Vision-9B:latest"]
+    assert len(created) == 1
+
+
+def test_vision_ocr_needs_the_mmproj_projector(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    _fake_start(monkeypatch, manager)
+    text_only = OllamaModelFiles(tag="hy-mt2-1.8b:q8", weights=_files(tmp_path).weights)
+    monkeypatch.setattr(manager, "resolve", lambda tag: text_only)
+
+    with pytest.raises(LlamaServerError) as excinfo:
+        open_vision_slot(manager, UserSettings(ollama_ocr_model=text_only.tag))
+    # Without a projector the server cannot open a page at all, so this fails
+    # up front instead of on the first request.
+    assert "mmproj" in str(excinfo.value)
+
+
+def test_vision_ocr_reports_a_model_that_is_not_downloaded(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    _fake_start(monkeypatch, manager)
+    monkeypatch.setattr(manager, "resolve", lambda tag: None)
+
+    with pytest.raises(LlamaServerError) as excinfo:
+        open_vision_slot(manager, UserSettings(ollama_ocr_model="nope:latest"))
+    assert "nope:latest" in str(excinfo.value)
+
+
+def test_ocr_on_llama_cpp_alone_still_frees_the_servers(tmp_path, monkeypatch):
+    from manga_localizer.batches import release_runtime
+
+    live = [
+        LlamaSlot(
+            "vision",
+            "DeepSeek-9B",
+            "http://127.0.0.1:8082",
+            8082,
+            65536,
+            Path("m.gguf"),
+        )
+    ]
+    monkeypatch.setattr("manga_localizer.batches.running_llama_slots", lambda: live)
+    stopped: list[bool] = []
+    monkeypatch.setattr(
+        "manga_localizer.batches.stop_llama_servers", lambda: stopped.append(True)
+    )
+    monkeypatch.setattr(
+        "manga_localizer.batches.release_ollama_model", lambda *args: False
+    )
+    # Translation stays on Ollama here; OCR was the stage that started the
+    # server, so the release cannot key off the inference backend alone.
+    settings = UserSettings(inference_backend="ollama", ocr_backend="llama")
+    released = release_runtime(settings)
+    assert stopped == [True]
+    assert released == ["DeepSeek-9B@8082"]

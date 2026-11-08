@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0 - 2026-11-08
+
+- Read pages through llama.cpp as well: `ocr_backend="llama"` runs the same `HybridMangaOCR` geometry-then-semantics split, with `LlamaVisionOCR` in place of the Ollama vision adapter. Because only the transport is swapped, a page's boxes and text are directly comparable between the two backends; an A/B on the sample book matched 4/4 boxes and 4/4 readings on both pages, with identical skip and role verdicts.
+- Convert pages to PNG for the vision request. The llama.cpp image loader rejects WebP, which is the only format this app stores, so every page would otherwise fail on the first image.
+- Start the vision model on its own port (8082) and reuse the translation slot when it already holds the same tag. The main model is the multimodal one, so batch translation would otherwise load a second copy of the same 7 GB weights; the vision slot still gets its own port because `-np 1` serves one request at a time and OCR cannot queue behind translation.
+- Bounds the confidence `score` inside the detection schema. llama.cpp compiles the JSON schema into a constrained decoding grammar, and an unbounded number let it answer `0.0` for every box on a page it had read perfectly -- which silently disabled the score gates downstream (`prefer_semantic_ocr` wants 0.72, `_local_crop_is_suspicious` rejects <= 0.05). The type is stated as `minimum: 0, maximum: 1`, exactly as `refine` and `find_missing` already stated theirs.
+- Release the servers when either stage started one: a finished batch now stops the vision server even when translation stayed on the Ollama daemon.
+- Add `llama` to both OCR pickers and the settings panel: a run whose OCR is on llama.cpp reuses the Ollama visual-model field for the vision tag, and the start button asks for it when either stage needs it.
+
 ## 0.9.0 - 2026-11-08
 
 - Run the translation and review models on llama.cpp instead of Ollama. The GGUF blobs Ollama already downloaded are reused in place through hard links, so nothing is copied or converted: the manifest holds a standard GGUF v3 and Ollama's own runner is llama.cpp. Two servers are started (8080 for the multimodal main model, 8081 for the review model) because the bundled build has no router mode.

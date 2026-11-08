@@ -14,6 +14,7 @@ from .config import (
     DEFAULT_LLAMA_MODEL,
     DEFAULT_LLAMA_REVIEW_MODEL,
     DEFAULT_LLAMA_REVIEW_PORT,
+    DEFAULT_LLAMA_VISION_PORT,
     LLAMA_CONTEXT_TOKENS,
     AppPaths,
     UserSettings,
@@ -25,6 +26,7 @@ from .ocr import (
     EXPLICIT_SKIP_REASONS,
     UNRESOLVED_SKIP_REASON,
     HybridMangaOCR,
+    LlamaVisionOCR,
     PageOCR,
     OllamaVisionOCR,
     PaddleMangaOCR,
@@ -34,7 +36,7 @@ from .ocr import (
     list_images,
     semantic_sfx_classification,
 )
-from .llama_server import manager_from_settings, open_slots
+from .llama_server import manager_from_settings, open_slots, open_vision_slot
 from .llama_translator import LlamaTranslator
 from .renderer import ArtworkPreservingRenderer
 from .model_manager import ModelManager
@@ -61,6 +63,11 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # cached page still carries the truncated "それなのにわざわざ私に" whose third
 # column stayed in Japanese under the Chinese text.
 OCR_CACHE_VERSION = 11
+
+# Backends whose result depends on a vision model, so a cached page is only
+# reusable when the model name matches.  ``llama`` belongs here for the same
+# reason as ``ollama``: a different 9B build reads the same page differently.
+VISION_OCR_BACKENDS = frozenset({"hybrid", "ollama", "llama"})
 
 
 def unsafe_semantic_missing(page: PageOCR, preserve_sfx: bool) -> list[dict]:
@@ -140,6 +147,7 @@ class PipelineRequest:
     llama_context_tokens: int = LLAMA_CONTEXT_TOKENS
     llama_main_port: int = DEFAULT_LLAMA_MAIN_PORT
     llama_review_port: int = DEFAULT_LLAMA_REVIEW_PORT
+    llama_vision_port: int = DEFAULT_LLAMA_VISION_PORT
     llama_server_path: str = ""
     llama_ollama_root: str = ""
 
@@ -206,7 +214,7 @@ class LocalizerPipeline:
             if metadata.get("source_language", "auto") != source_language:
                 return None
             if (
-                ocr_backend in {"hybrid", "ollama"}
+                ocr_backend in VISION_OCR_BACKENDS
                 and metadata.get("ocr_model") != ocr_model
             ):
                 return None
@@ -272,7 +280,7 @@ class LocalizerPipeline:
                     request.quality_profile,
                     (
                         request.ollama_ocr_model
-                        if request.ocr_backend in {"hybrid", "ollama"}
+                        if request.ocr_backend in VISION_OCR_BACKENDS
                         else ""
                     ),
                     request.source_language,
@@ -281,7 +289,7 @@ class LocalizerPipeline:
             ]
             title_refinements = [
                 bool(
-                    request.ocr_backend in {"builtin", "hybrid"}
+                    request.ocr_backend in {"builtin", "hybrid", "llama"}
                     and page is not None
                     and PaddleMangaOCR.is_cover_title_candidate(page)
                 )
@@ -308,6 +316,18 @@ class LocalizerPipeline:
                         request.device,
                         request.quality_profile,
                         request.source_language,
+                    )
+                elif request.ocr_backend == "llama":
+                    # Same geometry+semantics split as hybrid; only the vision
+                    # transport changes, so an A/B against hybrid differs in
+                    # exactly one variable.
+                    ocr = HybridMangaOCR(
+                        self.paths,
+                        "",
+                        source_language=request.source_language,
+                        device=request.device,
+                        profile=request.quality_profile,
+                        semantics=self._llama_vision(request, emit),
                     )
                 elif request.ocr_backend == "ollama":
                     ocr = OllamaVisionOCR(
@@ -355,7 +375,7 @@ class LocalizerPipeline:
                         "quality_profile": request.quality_profile,
                         "ocr_model": (
                             request.ollama_ocr_model
-                            if request.ocr_backend in {"hybrid", "ollama"}
+                            if request.ocr_backend in VISION_OCR_BACKENDS
                             else ""
                         ),
                         "source_size": source_stat.st_size,
@@ -592,6 +612,33 @@ class LocalizerPipeline:
         self._emit(emit, "translate", 0, total, "启用 9B 分阶段语义审校")
         return LocalQualityTranslator(editor, candidate)
 
+    def _llama_vision(
+        self,
+        request: PipelineRequest,
+        emit: ProgressCallback,
+    ) -> LlamaVisionOCR:
+        """The vision-OCR adapter backed by a local ``llama-server``.
+
+        Started lazily from the OCR stage because a book that reuses its whole
+        OCR cache never needs the server at all, and loading a 7 GB model for
+        nothing is the one cost a cached page must not pay.
+        """
+        manager = manager_from_settings(self.paths, request)
+        notes = getattr(manager, "port_notes", lambda: {})()
+        if notes:
+            self._emit(emit, "ocr", 0, 0, "；".join(notes.values()))
+        slot = open_vision_slot(
+            manager,
+            request,
+            emit=lambda message: self._emit(emit, "ocr", 0, 0, message),
+        )
+        return LlamaVisionOCR(
+            slot.base_url,
+            slot.alias,
+            source_language=request.source_language,
+            context_tokens=slot.context,
+        )
+
     @staticmethod
     def _validate_reviewed_pages(files: list[Path], pages: list[PageOCR]) -> None:
         if len(files) != len(pages):
@@ -650,6 +697,7 @@ def request_from_settings(
         llama_context_tokens=settings.llama_context_tokens,
         llama_main_port=settings.llama_main_port,
         llama_review_port=settings.llama_review_port,
+        llama_vision_port=settings.llama_vision_port,
         llama_server_path=settings.llama_server_path,
         llama_ollama_root=settings.llama_ollama_root,
     )

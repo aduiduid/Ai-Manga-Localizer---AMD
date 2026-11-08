@@ -22,6 +22,7 @@ from .config import (
     DEFAULT_LLAMA_MODEL,
     DEFAULT_LLAMA_REVIEW_MODEL,
     DEFAULT_LLAMA_REVIEW_PORT,
+    DEFAULT_LLAMA_VISION_PORT,
     LLAMA_CONTEXT_TOKENS,
     AppPaths,
     UserSettings,
@@ -68,7 +69,7 @@ class SettingsPayload(BaseModel):
     # Percent, so a hand-edited settings.json cannot ask for a gain the Web Audio
     # graph would clip.
     notify_volume: int = Field(70, ge=0, le=100)
-    ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
+    ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
     inference_backend: Literal["builtin", "ollama", "llama", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
@@ -80,6 +81,7 @@ class SettingsPayload(BaseModel):
     llama_context_tokens: int = Field(LLAMA_CONTEXT_TOKENS, ge=4_096, le=262_144)
     llama_main_port: int = Field(DEFAULT_LLAMA_MAIN_PORT, ge=1_024, le=65_535)
     llama_review_port: int = Field(DEFAULT_LLAMA_REVIEW_PORT, ge=1_024, le=65_535)
+    llama_vision_port: int = Field(DEFAULT_LLAMA_VISION_PORT, ge=1_024, le=65_535)
     llama_server_path: str = ""
     llama_ollama_root: str = ""
     online_base_url: str = "https://api.openai.com/v1"
@@ -106,7 +108,7 @@ class BootstrapPayload(BaseModel):
 
 class InferenceCheckPayload(BaseModel):
     inference_backend: Literal["builtin", "ollama", "llama", "online"]
-    ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
+    ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
     quality_profile: Literal["quality", "fast"] = "quality"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
@@ -116,6 +118,7 @@ class InferenceCheckPayload(BaseModel):
     llama_context_tokens: int = Field(LLAMA_CONTEXT_TOKENS, ge=4_096, le=262_144)
     llama_main_port: int = Field(DEFAULT_LLAMA_MAIN_PORT, ge=1_024, le=65_535)
     llama_review_port: int = Field(DEFAULT_LLAMA_REVIEW_PORT, ge=1_024, le=65_535)
+    llama_vision_port: int = Field(DEFAULT_LLAMA_VISION_PORT, ge=1_024, le=65_535)
     llama_server_path: str = ""
     llama_ollama_root: str = ""
     online_base_url: str = "https://api.openai.com/v1"
@@ -268,15 +271,22 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             if active.inference_backend == "ollama"
             else None,
         )
-        return {
-            "models": models.status(
-                active.inference_backend,
-                active.quality_profile,
-                active.ocr_backend,
-                runtime,
-            ),
-            "source_policy": "ModelScope first",
-        }
+        rows = models.status(
+            active.inference_backend,
+            active.quality_profile,
+            active.ocr_backend,
+            runtime,
+        )
+        if active.ocr_backend == "llama":
+            # OCR reads pages through llama.cpp while translation stays on the
+            # daemon, so the vision GGUF has to be listed next to the Ollama rows
+            # or the model page would claim a component is missing that is there.
+            try:
+                discovered = manager_from_settings(paths, active).models()
+            except LlamaServerError:
+                discovered = None
+            rows = rows + llama_specs(discovered, active)
+        return {"models": rows, "source_policy": "ModelScope first"}
 
     def bootstrap(task_id: str, model_ids: list[str]):
         try:
@@ -371,6 +381,17 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                 }
             ocr_note = ""
             ocr_ready = True
+            if payload.ocr_backend == "llama":
+                # Both stages run on llama.cpp: the OCR model is the vision one,
+                # and it needs the mmproj projector or ``--mmproj`` cannot open a
+                # page at all.
+                ocr_files = manager.resolve(payload.ollama_ocr_model)
+                if ocr_files is None:
+                    ocr_ready = False
+                    ocr_note = f"；视觉 OCR 模型 {payload.ollama_ocr_model} 未找到"
+                elif ocr_files.projector is None:
+                    ocr_ready = False
+                    ocr_note = f"；视觉 OCR 模型 {payload.ollama_ocr_model} 缺少 mmproj 投影器"
             if payload.ocr_backend in {"hybrid", "ollama"}:
                 try:
                     ollama_available = available_remote_models(
@@ -399,6 +420,62 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                 "backend": "builtin",
                 "message": "Hy-MT2 已就绪" if ready else "Hy-MT2 尚未下载",
                 "models": ["hy-mt2"] if ready else [],
+            }
+        if payload.ocr_backend == "llama" and payload.inference_backend != "llama":
+            # OCR on llama.cpp while the translation side stays where it was.
+            # The vision model must still resolve to a GGUF that carries an
+            # mmproj projector, which has nothing to do with the translator.
+            try:
+                vision = manager_from_settings(paths, payload)
+                vision_files = vision.resolve(payload.ollama_ocr_model)
+                vision_executable = vision.find_executable()
+            except LlamaServerError as exc:
+                return {
+                    "ok": False,
+                    "backend": payload.inference_backend,
+                    "message": str(exc),
+                    "models": [],
+                }
+            if vision_files is None:
+                return {
+                    "ok": False,
+                    "backend": payload.inference_backend,
+                    "message": f"未找到视觉 OCR 模型 {payload.ollama_ocr_model}",
+                    "models": [],
+                }
+            if vision_files.projector is None:
+                return {
+                    "ok": False,
+                    "backend": payload.inference_backend,
+                    "message": (
+                        f"视觉 OCR 模型 {payload.ollama_ocr_model} 缺少 mmproj 投影器"
+                    ),
+                    "models": [],
+                }
+            note = ""
+            if payload.inference_backend == "ollama":
+                # The translator still talks to the daemon, so a tag missing
+                # there would only surface once the first page was translated.
+                try:
+                    available = available_remote_models(
+                        "ollama", payload.ollama_base_url, ""
+                    )
+                except RuntimeError:
+                    note = "；翻译用的 Ollama 未连接"
+                else:
+                    if payload.ollama_model not in available:
+                        note = f"；翻译模型 {payload.ollama_model} 未找到"
+            # Returning here is what keeps this answer about the vision side:
+            # falling through would report the daemon and hide a llama.cpp
+            # problem that has nothing to do with it.
+            return {
+                "ok": not note,
+                "backend": payload.inference_backend,
+                "message": (
+                    f"llama.cpp 视觉 OCR 就绪：{vision_executable.name}、"
+                    f"{payload.ollama_ocr_model}" + note
+                ),
+                "models": [payload.ollama_ocr_model],
             }
         api_key = (
             payload.online_api_key.strip()
@@ -565,6 +642,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             "llama_context_tokens": active.llama_context_tokens,
             "llama_main_port": active.llama_main_port,
             "llama_review_port": active.llama_review_port,
+            "llama_vision_port": active.llama_vision_port,
             "llama_server_path": active.llama_server_path,
             "llama_ollama_root": active.llama_ollama_root,
             "online_base_url": active.online_base_url,

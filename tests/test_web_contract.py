@@ -478,7 +478,11 @@ def test_llama_backend_option_and_fields():
     # settings one only persists, so they carry separate translations.
     assert 'data-i18n="translation.inference.llama"' in html
     assert 'data-i18n="settings.inference.llama"' in html
-    assert html.count('<option value="llama"') == 2
+    # Two inference pickers plus the two OCR pickers: llama.cpp can drive either
+    # stage, and the OCR one is what keeps a hybrid run off the Ollama daemon.
+    assert html.count('<option value="llama"') == 4
+    assert 'data-i18n="translation.ocr.llama"' in html
+    assert 'data-i18n="settings.ocr.llama"' in html
     # The setup block mirrors the seven backend fields the API accepts.
     assert 'id="llamaFields" class="backend-fields" hidden' in html
     for field in (
@@ -492,9 +496,10 @@ def test_llama_backend_option_and_fields():
     ):
         assert f'id="{field}"' in html, field
     assert 'id="llamaContextTokens" type="number" min="4096" max="262144"' in html
-    # llama exposes its own block; Ollama's block still serves a hybrid OCR run.
-    assert '$("#llamaFields").hidden=backend!=="llama"' in javascript
-    assert "$(\"#ollamaFields\").hidden=backend!==\"ollama\"&&!['hybrid','ollama'].includes(ocr)" in javascript
+    # llama exposes its own block; Ollama's block still serves a hybrid OCR run,
+    # and a llama OCR run reuses the vision-model input of Ollama's block.
+    assert '$("#llamaFields").hidden=backend!=="llama"&&ocr!=="llama"' in javascript
+    assert "$(\"#ollamaFields\").hidden=backend!==\"ollama\"&&!['hybrid','ollama','llama'].includes(ocr)" in javascript
     # Loading, collecting and saving all seven values keeps the form honest.
     assert '$("#llamaModel").value=settings.llama_model||""' in javascript
     assert '$("#llamaContextTokens").value=String(settings.llama_context_tokens||65536)' in javascript
