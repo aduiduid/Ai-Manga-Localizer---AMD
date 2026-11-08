@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0 - 2026-11-08
+
+- Run the translation and review models on llama.cpp instead of Ollama. The GGUF blobs Ollama already downloaded are reused in place through hard links, so nothing is copied or converted: the manifest holds a standard GGUF v3 and Ollama's own runner is llama.cpp. Two servers are started (8080 for the multimodal main model, 8081 for the review model) because the bundled build has no router mode.
+- Start the servers from the staged runtime directory. `ggml-vulkan.dll` ships in a `vulkan/` subdirectory that only Ollama knows how to load, so a `llama-server.exe` launched directly finds no GPU and silently falls back to CPU: the vulkan backend and its dependencies are hard-linked next to the executable first.
+- Disable thinking for every request with `-rea off`. Qwen3.5 otherwise spends the whole budget on `reasoning_content`, returns an empty `content`, and looks like a truncation.
+- Convert images to PNG before sending them. llama-server answers `400 Failed to load image or audio file` for WebP, which is what the manga pages are.
+- Keep the model loaded for the whole batch and release it when the last holder exits. `hold_llama_servers()` wraps the batch consumer, `jobs._run` releases on every exit path, and `/api/shutdown` stops the servers because a detached child process outlives uvicorn and keeps the VRAM.
+- Move to the next free port when 8080 or 8081 is taken, and say so in the run log instead of failing silently; a fully busy range fails with the range in the message.
+- Add the `llama` inference backend end to end: settings, `/api/models` rows resolved from the Ollama manifests, `/api/inference/check` that validates the executable and both tags, and a setup panel with the model tags, context size, ports and the optional Ollama root.
+
 ## 0.8.0 - 2026-11-08
 
 - Decide which side of the background is text from the detector box alone. The erase region is padded well past the text so stray furigana is reachable, but counting that padding let panel art and highlights outvote six glyphs: a pink sign with black lettering was treated as light-on-dark, the mask selected empty pixels, and the original Spanish stayed under the translation. The padded region is still erased, it just no longer votes.

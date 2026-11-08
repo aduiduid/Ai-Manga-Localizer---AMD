@@ -162,10 +162,12 @@ def test_ui_polish_keeps_ollama_tags_and_paused_state_honest():
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
     css = (WEB / "app.css").read_text(encoding="utf-8")
     # Ollama tags are pulled by the job itself; a dead service must not gate 开始.
-    assert (
-        "state.models.some(model=>isLocalModel(model)&&model.required&&!model.ready)"
-        in javascript
-    )
+    # llama.cpp rows are a separate kind: they cannot be bootstrapped (the
+    # downloader only knows registry ids), so they get their own message.
+    assert "function missingLocalModels(){return state.models.some(model=>isBootstrapModel(model)&&model.required&&!model.ready)}" in javascript
+    assert 'function missingLlamaModels(){return state.models.some(model=>model.kind==="llama"&&model.required&&!model.ready)}' in javascript
+    assert "const missingLocal=!reviewed&&missingLocalModels();const missingLlama=!reviewed&&missingLlamaModels();const missing=missingLocal||missingLlama;" in javascript
+    assert 't("translation.start.missingLlamaModels")' in javascript
     # A failed job still needs the history list refreshed, and it now also
     # announces itself with the error sound before that refresh.
     assert 'else if(job.status==="failed"){announceJobEnd("failure");await refreshJobs()}' in javascript
@@ -466,6 +468,70 @@ def test_batch_queue_styles_reuse_the_design_variables():
     assert ".batch-task.selected{" in css
     assert ".batch-task-error{" in css
     assert ".child-option.disabled{" in css
+
+
+def test_llama_backend_option_and_fields():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    # Both backend pickers name llama.cpp; the workspace one runs jobs and the
+    # settings one only persists, so they carry separate translations.
+    assert 'data-i18n="translation.inference.llama"' in html
+    assert 'data-i18n="settings.inference.llama"' in html
+    assert html.count('<option value="llama"') == 2
+    # The setup block mirrors the seven backend fields the API accepts.
+    assert 'id="llamaFields" class="backend-fields" hidden' in html
+    for field in (
+        "llamaModel",
+        "llamaReviewModel",
+        "llamaContextTokens",
+        "llamaMainPort",
+        "llamaReviewPort",
+        "llamaServerPath",
+        "llamaOllamaRoot",
+    ):
+        assert f'id="{field}"' in html, field
+    assert 'id="llamaContextTokens" type="number" min="4096" max="262144"' in html
+    # llama exposes its own block; Ollama's block still serves a hybrid OCR run.
+    assert '$("#llamaFields").hidden=backend!=="llama"' in javascript
+    assert "$(\"#ollamaFields\").hidden=backend!==\"ollama\"&&!['hybrid','ollama'].includes(ocr)" in javascript
+    # Loading, collecting and saving all seven values keeps the form honest.
+    assert '$("#llamaModel").value=settings.llama_model||""' in javascript
+    assert '$("#llamaContextTokens").value=String(settings.llama_context_tokens||65536)' in javascript
+    assert 'llama_context_tokens:Number($("#llamaContextTokens").value||65536)' in javascript
+    assert 'llama_main_port:Number($("#llamaMainPort").value||8080)' in javascript
+    assert 'llama_review_port:Number($("#llamaReviewPort").value||8081)' in javascript
+    assert 'llama_server_path:$("#llamaServerPath").value.trim()' in javascript
+    assert 'llama_ollama_root:$("#llamaOllamaRoot").value.trim()' in javascript
+    assert '"#llamaModel","#llamaReviewModel","#llamaContextTokens","#llamaMainPort","#llamaReviewPort","#llamaServerPath","#llamaOllamaRoot"' in javascript
+    # llama needs its own translation model name instead of the Ollama tag.
+    assert '(backend==="llama"&&!$("#llamaModel")?.value.trim())' in javascript
+    # Model rows of kind "llama" are GGUF files already on disk.
+    assert 'id.startsWith("llama:")?"LC"' in javascript
+    assert 'model.kind==="ollama"||model.kind==="llama"?t("models.license.upstream")' in javascript
+    assert 'if(model.kind==="llama")return t(model.status_code==="offline"' in javascript
+    # ...so they never join the downloader, which only knows registry ids.
+    assert 'function isBootstrapModel(model){return isLocalModel(model)&&model.kind!=="llama"}' in javascript
+    assert "async function bootstrapModels(){const missing=state.models.filter(model=>isBootstrapModel(model)&&model.required&&!model.ready)" in javascript
+    assert "const missing=state.models.filter(model=>isBootstrapModel(model)&&model.required&&!model.ready);$(\"#bootstrapModels\").hidden" in javascript
+    keys = [
+        "translation.inference.llama",
+        "settings.inference.llama",
+        "settings.llama.title",
+        "settings.llama.detail",
+        "settings.llama.model",
+        "settings.llama.reviewModel",
+        "settings.llama.context",
+        "settings.llama.mainPort",
+        "settings.llama.reviewPort",
+        "settings.llama.serverPath",
+        "settings.llama.serverPath.placeholder",
+        "settings.llama.ollamaRoot",
+        "settings.llama.ollamaRoot.placeholder",
+        "translation.start.missingLlamaModels",
+    ]
+    for key in keys:
+        assert i18n.count(f'"{key}":') == 3, key
 
 
 def test_cpu_thread_picker_is_built_from_the_detected_cpu():

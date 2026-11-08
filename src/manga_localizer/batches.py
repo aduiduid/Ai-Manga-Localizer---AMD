@@ -26,6 +26,11 @@ from pathlib import Path
 
 from .config import AppPaths, UserSettings
 from .jobs import LIVE_STATUSES, TERMINAL_STATUSES, JobService, utc_now
+from .llama_server import (
+    hold_llama_servers,
+    running_llama_slots,
+    stop_llama_servers,
+)
 from .pipeline import PipelineRequest
 from .translator import release_ollama_model
 
@@ -136,11 +141,22 @@ def release_runtime(settings: UserSettings | None) -> list[str]:
     keep gigabytes allocated until the app is closed.  Best effort throughout:
     releasing for a status line must never fail the batch.
 
+    llama.cpp is the opposite problem: it holds the VRAM as long as its process
+    lives, so a batch that just finished would pin the whole GPU until the app
+    is closed.  Stopping the servers here is what hands the VRAM back, and it
+    runs for the cancelled case too, because that is exactly when the user is
+    looking at the GPU and found it still busy.
+
     ``torch`` is only touched when it is already imported, because importing it
     here could land before Paddle and break the DLL load order elsewhere.
     """
     released: list[str] = []
     if settings is not None:
+        if settings.inference_backend == "llama":
+            live = running_llama_slots()
+            for slot in live:
+                released.append(f"{slot.alias}@{slot.port}")
+            stop_llama_servers()
         models: list[str] = []
         if settings.inference_backend == "ollama":
             models.append(settings.ollama_model)
@@ -459,6 +475,13 @@ class BatchService:
                 self._queue.task_done()
 
     def _run_batch(self, batch_id: str) -> None:
+        # Holding the servers for the whole queue keeps the 7 GB model loaded
+        # between folders; the per-job release then becomes a no-op instead of
+        # stopping and restarting the server for every single folder.
+        with hold_llama_servers():
+            self._run_batch_locked(batch_id)
+
+    def _run_batch_locked(self, batch_id: str) -> None:
         batch = self.store.get(batch_id)
         if batch is None or batch.get("status") in BATCH_TERMINAL_STATUSES:
             return

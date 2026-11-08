@@ -17,10 +17,24 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .batches import BatchService, make_task
-from .config import AppPaths, UserSettings
+from .config import (
+    DEFAULT_LLAMA_MAIN_PORT,
+    DEFAULT_LLAMA_MODEL,
+    DEFAULT_LLAMA_REVIEW_MODEL,
+    DEFAULT_LLAMA_REVIEW_PORT,
+    LLAMA_CONTEXT_TOKENS,
+    AppPaths,
+    UserSettings,
+)
 from .hardware import detect_cpu, normalize_cpu_threads
 from .jobs import JobService
-from .model_manager import ModelManager, OllamaRuntime, ollama_tags
+from .llama_server import (
+    LlamaServerError,
+    manager_from_settings,
+    running_llama_slots,
+    stop_llama_servers,
+)
+from .model_manager import ModelManager, OllamaRuntime, llama_specs, ollama_tags
 from .ocr import DEFAULT_OLLAMA_VISION_MODEL, list_images
 from .pipeline import PipelineRequest
 from .translator import (
@@ -55,10 +69,19 @@ class SettingsPayload(BaseModel):
     # graph would clip.
     notify_volume: int = Field(70, ge=0, le=100)
     ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
-    inference_backend: Literal["builtin", "ollama", "online"] = "ollama"
+    inference_backend: Literal["builtin", "ollama", "llama", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
     ollama_ocr_model: str = DEFAULT_OLLAMA_VISION_MODEL
+    # llama.cpp points at the same GGUF files Ollama downloaded: the tag names an
+    # Ollama manifest, and the manifest is what maps it to a blob path.
+    llama_model: str = DEFAULT_LLAMA_MODEL
+    llama_review_model: str = DEFAULT_LLAMA_REVIEW_MODEL
+    llama_context_tokens: int = Field(LLAMA_CONTEXT_TOKENS, ge=4_096, le=262_144)
+    llama_main_port: int = Field(DEFAULT_LLAMA_MAIN_PORT, ge=1_024, le=65_535)
+    llama_review_port: int = Field(DEFAULT_LLAMA_REVIEW_PORT, ge=1_024, le=65_535)
+    llama_server_path: str = ""
+    llama_ollama_root: str = ""
     online_base_url: str = "https://api.openai.com/v1"
     online_model: str = ""
     online_api_key: str | None = Field(default=None, max_length=2048)
@@ -82,12 +105,19 @@ class BootstrapPayload(BaseModel):
 
 
 class InferenceCheckPayload(BaseModel):
-    inference_backend: Literal["builtin", "ollama", "online"]
+    inference_backend: Literal["builtin", "ollama", "llama", "online"]
     ocr_backend: Literal["builtin", "hybrid", "ollama"] = "hybrid"
     quality_profile: Literal["quality", "fast"] = "quality"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
     ollama_ocr_model: str = DEFAULT_OLLAMA_VISION_MODEL
+    llama_model: str = DEFAULT_LLAMA_MODEL
+    llama_review_model: str = DEFAULT_LLAMA_REVIEW_MODEL
+    llama_context_tokens: int = Field(LLAMA_CONTEXT_TOKENS, ge=4_096, le=262_144)
+    llama_main_port: int = Field(DEFAULT_LLAMA_MAIN_PORT, ge=1_024, le=65_535)
+    llama_review_port: int = Field(DEFAULT_LLAMA_REVIEW_PORT, ge=1_024, le=65_535)
+    llama_server_path: str = ""
+    llama_ollama_root: str = ""
     online_base_url: str = "https://api.openai.com/v1"
     online_model: str = ""
     online_api_key: str | None = Field(default=None, max_length=2048)
@@ -216,6 +246,20 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     def model_status(refresh: bool = Query(False)):
         del refresh
         active = UserSettings.load(paths.settings)
+        if active.inference_backend == "llama":
+            # llama.cpp loads the Ollama blobs directly, so the model page lists
+            # the manifests that resolve instead of asking a daemon.
+            try:
+                discovered = manager_from_settings(paths, active).models()
+            except LlamaServerError:
+                discovered = None
+            rows = models.status(
+                active.inference_backend,
+                active.quality_profile,
+                active.ocr_backend,
+                None,
+            ) + llama_specs(discovered, active)
+            return {"models": rows, "source_policy": "Reuse Ollama GGUF blobs"}
         runtime = OllamaRuntime.from_settings(
             active,
             # Only probe the service when it is actually the inference backend;
@@ -289,6 +333,65 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
 
     @app.post("/api/inference/check")
     def check_inference(payload: InferenceCheckPayload):
+        if payload.inference_backend == "llama":
+            # The llama.cpp path loads the very GGUFs Ollama downloaded, so the
+            # check is "can we find the blob and the executable", not "is the
+            # daemon answering".  The OCR side may still be on Ollama, which is
+            # why the hybrid/ollama branch below is not skipped outright.
+            settings = UserSettings.load(paths.settings)
+            for key, value in payload.model_dump(exclude={"online_api_key"}).items():
+                if hasattr(settings, key):
+                    setattr(settings, key, value)
+            try:
+                manager = manager_from_settings(paths, settings)
+                missing = [
+                    tag
+                    for tag in (
+                        payload.llama_model,
+                        payload.llama_review_model
+                        if payload.quality_profile == "quality"
+                        else "",
+                    )
+                    if tag and manager.resolve(tag) is None
+                ]
+                executable = manager.find_executable()
+            except LlamaServerError as exc:
+                return {
+                    "ok": False,
+                    "backend": "llama",
+                    "message": str(exc),
+                    "models": [],
+                }
+            if missing:
+                return {
+                    "ok": False,
+                    "backend": "llama",
+                    "message": f"未找到 GGUF 模型 {', '.join(missing)}",
+                    "models": [],
+                }
+            ocr_note = ""
+            ocr_ready = True
+            if payload.ocr_backend in {"hybrid", "ollama"}:
+                try:
+                    ollama_available = available_remote_models(
+                        "ollama", payload.ollama_base_url, ""
+                    )
+                except RuntimeError:
+                    ocr_ready = False
+                    ocr_note = "；OCR 仍走 Ollama，但连接失败"
+                else:
+                    ocr_ready = payload.ollama_ocr_model in ollama_available
+                    if not ocr_ready:
+                        ocr_note = f"；OCR 模型 {payload.ollama_ocr_model} 未找到"
+            return {
+                "ok": ocr_ready,
+                "backend": "llama",
+                "message": (
+                    f"llama.cpp 就绪：{executable.name}、{payload.llama_model}"
+                    + ocr_note
+                ),
+                "models": [payload.llama_model, payload.llama_review_model],
+            }
         if payload.inference_backend == "builtin" and payload.ocr_backend == "builtin":
             ready = models.is_ready("hy-mt2")
             return {
@@ -457,6 +560,13 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             "ollama_base_url": active.ollama_base_url,
             "ollama_model": active.ollama_model,
             "ollama_ocr_model": active.ollama_ocr_model,
+            "llama_model": active.llama_model,
+            "llama_review_model": active.llama_review_model,
+            "llama_context_tokens": active.llama_context_tokens,
+            "llama_main_port": active.llama_main_port,
+            "llama_review_port": active.llama_review_port,
+            "llama_server_path": active.llama_server_path,
+            "llama_ollama_root": active.llama_ollama_root,
             "online_base_url": active.online_base_url,
             "online_model": active.online_model,
             "online_api_key": api_key,
@@ -635,6 +745,9 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         for job in jobs.store.list():
             if job["status"] in {"queued", "running", "paused"}:
                 jobs.cancel(job["id"])
+        # llama-server processes are separate children: uvicorn exiting would
+        # otherwise leave them holding the whole GPU with no window to close.
+        stop_llama_servers()
         server = getattr(app.state, "server", None)
         if server is None:
             raise HTTPException(409, "Server handle unavailable")

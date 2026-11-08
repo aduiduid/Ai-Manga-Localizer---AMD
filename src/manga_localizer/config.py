@@ -44,6 +44,25 @@ def ollama_timeout(token_budget: int) -> int:
     return max(180, int(scaled))
 
 
+# llama.cpp serves one model per process, so the app runs two: the 9B editor on
+# the first port and the 1.8B review candidate on the second.  Both are the
+# documented ports rather than llama-server's own default of 9931, because the
+# UI shows them and the user may have a browser bookmark to one.
+DEFAULT_LLAMA_MAIN_PORT = 8080
+DEFAULT_LLAMA_REVIEW_PORT = 8081
+
+# The tags below name Ollama manifests, not Ollama daemons: the manifest is the
+# only index that maps a readable name to the content-addressed GGUF blobs, and
+# llama-server loads those blobs directly.  Migrating therefore needs no copy
+# and no conversion, and switching back to Ollama keeps working.
+DEFAULT_LLAMA_MODEL = DEFAULT_OLLAMA_MODEL
+DEFAULT_LLAMA_REVIEW_MODEL = "hy-mt2-1.8b:q8"
+
+# llama-server's ``-c`` is per slot; one slot per server keeps the whole budget
+# for the single request a translation pass makes at a time.
+LLAMA_CONTEXT_TOKENS = 65_536
+
+
 @dataclass(frozen=True)
 class AppPaths:
     root: Path
@@ -77,8 +96,26 @@ class AppPaths:
         """
         return self.root / "batches"
 
+    @property
+    def llama_models(self) -> Path:
+        """Where llama.cpp model files and its runtime directory are staged.
+
+        Property for the same reason as ``batches``: positional construction.
+        The directory holds hard links into the Ollama blob store plus a private
+        copy of ``llama-server.exe`` and the GPU backend it needs, so the app
+        never has to modify the Ollama installation it borrows from.
+        """
+        return self.root / "llama-models"
+
     def ensure(self) -> "AppPaths":
-        for path in (self.root, self.models, self.cache, self.jobs, self.batches):
+        for path in (
+            self.root,
+            self.models,
+            self.cache,
+            self.jobs,
+            self.batches,
+            self.llama_models,
+        ):
             path.mkdir(parents=True, exist_ok=True)
         return self
 
@@ -116,6 +153,21 @@ class UserSettings:
     ollama_ocr_model: str = DEFAULT_OLLAMA_MODEL
     online_base_url: str = "https://api.openai.com/v1"
     online_model: str = ""
+    # llama.cpp runs the same GGUF blobs Ollama already downloaded, so these are
+    # Ollama *manifest tags* used only to locate the files; nothing talks to the
+    # Ollama daemon on this path.  The ports are per server because the bundled
+    # build has no router mode.
+    llama_model: str = DEFAULT_LLAMA_MODEL
+    llama_review_model: str = DEFAULT_LLAMA_REVIEW_MODEL
+    llama_context_tokens: int = LLAMA_CONTEXT_TOKENS
+    llama_main_port: int = DEFAULT_LLAMA_MAIN_PORT
+    llama_review_port: int = DEFAULT_LLAMA_REVIEW_PORT
+    # Empty means "look for the llama-server.exe that ships inside Ollama"; a
+    # path lets a user point at a standalone llama.cpp build instead.
+    llama_server_path: str = ""
+    # Where the Ollama blobs live.  Empty means "<data root>/../ollama-models",
+    # which is where start.bat puts them.
+    llama_ollama_root: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "UserSettings":

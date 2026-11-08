@@ -122,6 +122,59 @@ def ollama_specs(runtime: OllamaRuntime, ocr_backend: str, quality_profile: str)
     return rows
 
 
+def llama_specs(
+    available: dict[str, "OllamaModelFiles"] | None,
+    settings: "UserSettings",
+) -> list[dict]:
+    """One row per GGUF llama-server loads, mirrored from the Ollama manifests.
+
+    The blob is the same file Ollama downloaded, so "ready" means the manifest
+    resolved to a blob on disk -- there is no separate download step and no
+    daemon to ask.  ``available`` is ``None`` when the manifest folder itself
+    could not be read, which is reported as offline rather than missing.
+    """
+    wanted: list[tuple[str, str]] = [((settings.llama_model or "").strip(), "translation")]
+    review = (settings.llama_review_model or "").strip()
+    if settings.quality_profile == "quality" and review and review != wanted[0][0]:
+        wanted.append((review, "review"))
+    if settings.ocr_backend in {"hybrid", "ollama"}:
+        ocr = (settings.ollama_ocr_model or "").strip()
+        if ocr and all(ocr != tag for tag, _ in wanted):
+            wanted.append((ocr, "ocr"))
+    rows = []
+    for tag, role in wanted:
+        if not tag:
+            continue
+        files = (available or {}).get(tag)
+        size = files.weights.stat().st_size if files else 0
+        rows.append(
+            {
+                "id": f"llama:{tag}",
+                "name": tag,
+                "kind": "llama",
+                "role": {
+                    "translation": "llama.cpp 主翻译模型",
+                    "review": "独立候选译文（质量模式第二遍）",
+                    "ocr": "视觉 OCR（仍由 Ollama 提供）",
+                }[role],
+                "role_key": f"models.role.{role}",
+                "provider": "llama.cpp",
+                "repository": tag,
+                "size": _human_size(size),
+                "license": "Upstream",
+                "required": True,
+                "ready": files is not None,
+                "path": str(files.weights) if files else "",
+                "status_code": (
+                    "offline"
+                    if available is None
+                    else ("pulled" if files is not None else "missing")
+                ),
+            }
+        )
+    return rows
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     id: str

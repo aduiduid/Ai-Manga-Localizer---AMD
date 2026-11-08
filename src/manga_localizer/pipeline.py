@@ -9,7 +9,15 @@ from typing import Callable
 
 from PIL import Image
 
-from .config import AppPaths, UserSettings
+from .config import (
+    DEFAULT_LLAMA_MAIN_PORT,
+    DEFAULT_LLAMA_MODEL,
+    DEFAULT_LLAMA_REVIEW_MODEL,
+    DEFAULT_LLAMA_REVIEW_PORT,
+    LLAMA_CONTEXT_TOKENS,
+    AppPaths,
+    UserSettings,
+)
 from .hardware import apply_cpu_threads
 from .name_dictionary import JapaneseNameDictionary
 from .ocr import (
@@ -26,6 +34,8 @@ from .ocr import (
     list_images,
     semantic_sfx_classification,
 )
+from .llama_server import manager_from_settings, open_slots
+from .llama_translator import LlamaTranslator
 from .renderer import ArtworkPreservingRenderer
 from .model_manager import ModelManager
 from .translator import (
@@ -122,6 +132,16 @@ class PipelineRequest:
     online_model: str = ""
     online_api_key: str = ""
     reviewed_transcript: Path | None = None
+    # llama.cpp settings.  The model names are Ollama manifest tags, because the
+    # manifest is what maps a readable name to the content-addressed GGUF blob
+    # that llama-server loads; nothing here talks to the Ollama daemon.
+    llama_model: str = DEFAULT_LLAMA_MODEL
+    llama_review_model: str = DEFAULT_LLAMA_REVIEW_MODEL
+    llama_context_tokens: int = LLAMA_CONTEXT_TOKENS
+    llama_main_port: int = DEFAULT_LLAMA_MAIN_PORT
+    llama_review_port: int = DEFAULT_LLAMA_REVIEW_PORT
+    llama_server_path: str = ""
+    llama_ollama_root: str = ""
 
 
 class LocalizerPipeline:
@@ -423,6 +443,8 @@ class LocalizerPipeline:
                 request.target_language,
                 JapaneseNameDictionary(self.paths.cache),
             )
+        elif request.inference_backend == "llama":
+            translator = self._llama_translator(request, emit, total)
         else:
             raise ValueError(f"Unknown inference backend: {request.inference_backend}")
         if translator is not None:
@@ -520,6 +542,56 @@ class LocalizerPipeline:
         self._emit(emit, "complete", total, total, "本地化完成")
         return result
 
+    def _llama_translator(
+        self,
+        request: PipelineRequest,
+        emit: ProgressCallback,
+        total: int,
+    ) -> PromptTranslator:
+        """Build the translator backed by local ``llama-server`` processes.
+
+        The servers are started here rather than by the caller because the
+        pipeline is the only place that knows whether the translation stage is
+        needed at all: a folder whose transcript is already reviewed must not
+        pay for a 7 GB model load.
+        """
+        manager = manager_from_settings(self.paths, request)
+        notes = getattr(manager, "port_notes", lambda: {})()
+        if notes:
+            self._emit(
+                emit, "translate", 0, total, "；".join(notes.values())
+            )
+        self._emit(emit, "translate", 0, total, "启动 llama.cpp 推理服务")
+        slots = open_slots(
+            manager,
+            request,
+            emit=lambda message: self._emit(emit, "translate", 0, total, message),
+        )
+        editor = LlamaTranslator(
+            slots["editor"],
+            request.target_language,
+            JapaneseNameDictionary(self.paths.cache),
+        )
+        if request.quality_profile != "quality":
+            return editor
+        review_slot = slots.get("review")
+        if review_slot is None or review_slot is slots["editor"]:
+            # Without a separate 1.8B instance the quality passes would all run
+            # on the 9B, which is exactly what the Ollama path avoided; the
+            # candidate is optional so a missing review model degrades to a
+            # single-editor run instead of failing the book.
+            self._emit(
+                emit, "translate", 0, total, "未配置审校模型，仅使用主模型翻译"
+            )
+            return editor
+        candidate = LlamaTranslator(
+            review_slot,
+            request.target_language,
+            JapaneseNameDictionary(self.paths.cache),
+        )
+        self._emit(emit, "translate", 0, total, "启用 9B 分阶段语义审校")
+        return LocalQualityTranslator(editor, candidate)
+
     @staticmethod
     def _validate_reviewed_pages(files: list[Path], pages: list[PageOCR]) -> None:
         if len(files) != len(pages):
@@ -573,6 +645,13 @@ def request_from_settings(
         ollama_ocr_model=settings.ollama_ocr_model,
         online_base_url=settings.online_base_url,
         online_model=settings.online_model,
+        llama_model=settings.llama_model,
+        llama_review_model=settings.llama_review_model,
+        llama_context_tokens=settings.llama_context_tokens,
+        llama_main_port=settings.llama_main_port,
+        llama_review_port=settings.llama_review_port,
+        llama_server_path=settings.llama_server_path,
+        llama_ollama_root=settings.llama_ollama_root,
     )
 
 

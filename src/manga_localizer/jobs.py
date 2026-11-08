@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import AppPaths
+from .llama_server import release_llama_servers
 from .pipeline import LocalizerPipeline, PipelineRequest
 
 
@@ -370,4 +371,9 @@ class JobService:
         finally:
             with self._gate_lock:
                 self._gates.pop(job_id, None)
+            # llama-server holds its VRAM as long as the process lives, and the
+            # worker has no other exit path -- success, failure and cancellation
+            # all leave through here.  Inside a batch this is a no-op because
+            # the batch holds the servers for its whole queue.
+            release_llama_servers()
         self.store.save(job)
