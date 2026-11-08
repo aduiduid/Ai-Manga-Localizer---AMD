@@ -276,6 +276,52 @@ def test_a_finished_batch_releases_the_ollama_models(tmp_path, monkeypatch):
     assert batch["released"] == ["model-a", "model-b"]
 
 
+def test_a_running_batch_exposes_the_current_folder_phase(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=SlowPipeline))
+    first = make_folder(tmp_path, "chapter-01", pages=6)
+    second = make_folder(tmp_path, "chapter-02", pages=6)
+
+    batch = start_batch(client, [first, second], tmp_path / "out").json()
+    assert batch["total_batch_size"] == 2
+
+    running = wait_for_running_task(client, batch["id"])
+    current = running["current_task"]
+    # The card needs the folder itself plus its live phase and page counter,
+    # which the batch got from the running job record.
+    assert running["current_batch_index"] == 0
+    assert current["name"] == "chapter-01"
+    assert current["status"] == "running"
+    for field in ("phase", "progress", "current", "total"):
+        assert field in current
+    assert current["total"] == 6
+
+    finished = wait_for_batch(client, batch["id"])
+    assert finished["status"] == "completed"
+    # Nothing is being processed and nothing failed, so there is no subject.
+    assert finished["current_task"] is None
+    assert finished["current_batch_index"] is None
+    assert finished["total_batch_size"] == 2
+
+
+def test_a_failed_folder_surfaces_its_error_as_current_task(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FlakyPipeline))
+    folders = [
+        make_folder(tmp_path, name)
+        for name in ("chapter-01", "chapter-02", "chapter-03")
+    ]
+
+    batch = start_batch(client, folders, tmp_path / "out").json()
+    finished = wait_for_batch(client, batch["id"])
+
+    assert finished["status"] == "completed"
+    # A finished batch keeps its failure as the subject so the error stays
+    # readable after the queue drains.
+    current = finished["current_task"]
+    assert current["name"] == "chapter-02"
+    assert "OCR exploded" in current["error"]
+    assert finished["current_batch_index"] == 1
+
+
 def test_a_single_string_source_still_creates_one_job(tmp_path):
     client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FakePipeline))
     folder = make_folder(tmp_path, "chapter-01")

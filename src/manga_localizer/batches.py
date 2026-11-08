@@ -77,6 +77,25 @@ def batch_progress(tasks: list[dict], total: int) -> int:
     return round(done / total * 100)
 
 
+def batch_current_task(batch: dict, tasks: list[dict]) -> dict | None:
+    """The folder the batch card should speak about right now.
+
+    While a batch runs that is the folder being processed, so the UI can show
+    its phase and page count instead of only the queue position.  Once the
+    batch is over, a failed folder is kept as the subject so its error stays
+    visible after the run; a fully successful batch has nobody to talk about.
+    """
+    status = batch.get("status")
+    index = batch.get("current_index")
+    if status == "running" and isinstance(index, int) and 0 <= index < len(tasks):
+        return tasks[index]
+    if status in BATCH_TERMINAL_STATUSES:
+        for task in reversed(tasks):
+            if task.get("status") == "failed":
+                return task
+    return None
+
+
 def release_runtime(settings: UserSettings | None) -> list[str]:
     """Give back what a finished batch was holding, and report what was freed.
 
@@ -279,6 +298,10 @@ class BatchService:
                     task[field] = job[field]
         summarize(merged)
         merged["progress"] = batch_progress(tasks, merged.get("total") or len(tasks))
+        current = batch_current_task(merged, tasks)
+        merged["current_task"] = deepcopy(current) if current is not None else None
+        merged["current_batch_index"] = current.get("index") if current else None
+        merged["total_batch_size"] = len(tasks)
         return merged
 
     def get(self, batch_id: str) -> dict | None:

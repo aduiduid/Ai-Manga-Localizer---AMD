@@ -61,3 +61,4 @@
 .child-option.disabled{opacity:.5;cursor:not-allowed}
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 @media(max-width:900px){.batch-task{grid-template-columns:18px minmax(0,1fr)}.batch-task-progress{grid-column:2}.batch-task-remove{grid-column:2;justify-self:end}}
+.execution-copy small.error{color:var(--danger)}

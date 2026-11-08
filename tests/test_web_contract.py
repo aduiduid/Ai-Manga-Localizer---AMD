@@ -331,6 +331,49 @@ def test_batch_terminal_state_rings_the_chime_once():
     assert "else state.pollTimer=setTimeout(pollJob,1000);return}" in batch_branch
 
 
+def test_batch_card_shows_the_running_folder_phase():
+    # The batch card used to say only "processing 1/3", which never told the user how far the
+    # current book had got. It now mirrors the single-job card: folder headline plus the
+    # running child's own phase and page counters.
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    assert "function batchDetailText(batch)" in javascript
+    assert "function batchTaskHeadline(batch)" in javascript
+    assert "function currentBatchTask(batch)" in javascript
+    assert "batch.current_task" in javascript
+    assert "batch.total_batch_size" in javascript
+    # The subtitle maps the live child's phase onto page counters.
+    detail = javascript[javascript.index("function batchDetailText(batch)"):]
+    detail = detail[: detail.index("function setJobDetail(")]
+    for phase in ("ocr", "translate", "render"):
+        assert f't("batch.task.{phase}"' in detail, phase
+        assert f'task.phase==="{phase}"' in detail, phase
+    assert 't("batch.task.failure",{message:' in detail
+    assert 't("job.preparing")' in detail
+    assert 't("job.queued")' in detail
+    # Between two folders the backend still points at the finished one; that must not read as
+    # "batch complete" nor as a completed subtitle.
+    assert 'return task.status==="running"||task.status==="paused"||task.status==="failed"?task:null' in javascript
+    assert 'const task=currentBatchTask(batch)' in detail
+    assert '"complete")return t("job.complete")' in detail
+    # The headline names the folder being processed.
+    headline = javascript[javascript.index("function batchTaskHeadline(batch)"):]
+    headline = headline[: headline.index("function batchDetailIsError(")]
+    assert 't("batch.task.headline",{index:' in headline
+    assert "return batchDisplayMessage(batch)" in headline
+    # The failure line is red and the class cannot leak back to a single-job card.
+    assert 't("batch.task.failure"' in javascript
+    assert "function batchDetailIsError(batch)" in javascript
+    assert 'detail.classList.toggle("error",!!error)' in javascript
+    assert "setJobDetail(batchDetailText(batch),{error:batchDetailIsError(batch)})" in javascript
+    assert "setJobDetail(job.error||" in javascript
+    assert 'setJobDetail(t("job.selectFolders"))' in javascript
+    assert ".execution-copy small.error{color:var(--danger)}" in css
+    for key in ("batch.task.headline", "batch.task.ocr", "batch.task.translate", "batch.task.render", "batch.task.failure"):
+        assert i18n.count(f'"{key}":') == 3, key
+
+
 def test_batch_translations_cover_every_locale():
     i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
     keys = [
@@ -359,6 +402,11 @@ def test_batch_translations_cover_every_locale():
         "batch.pickChildren.none",
         "batch.pickChildren.confirm",
         "batch.pickChildren.cancel",
+        "batch.task.headline",
+        "batch.task.ocr",
+        "batch.task.translate",
+        "batch.task.render",
+        "batch.task.failure",
     ]
     keys += [f"batch.status.{status}" for status in ("queued", "running", "completed", "failed", "cancelled")]
     keys += [f"batch.task.{status}" for status in ("queued", "running", "paused", "complete", "failed", "cancelled")]

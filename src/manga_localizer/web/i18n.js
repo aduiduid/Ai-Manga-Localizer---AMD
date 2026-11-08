@@ -243,7 +243,12 @@
       "batch.pickChildren.images": "{count} 张",
       "batch.pickChildren.none": "没有支持的图片",
       "batch.pickChildren.confirm": "加入队列",
-      "batch.pickChildren.cancel": "取消"
+      "batch.pickChildren.cancel": "取消",
+      "batch.task.headline": "正在处理 {index}/{total}：{name}",
+      "batch.task.ocr": "正在识别第 {current}/{total} 页（OCR）",
+      "batch.task.translate": "正在翻译第 {current}/{total} 页",
+      "batch.task.render": "正在渲染第 {current}/{total} 页",
+      "batch.task.failure": "处理失败：{message}"
     },
     "ja-JP": {
       "app.title": "マンガローカライズ作業台", "app.subtitle": "画像を読み込み、文字を認識して一貫したローカライズ版を生成します", "app.github": "GitHub を開く", "language.label": "表示言語",
@@ -263,7 +268,8 @@
       "batch.running": "{completed}/{total} 件を処理中", "batch.detail": "全 {total} 件：成功 {completed} 件／失敗 {failed} 件", "batch.sidebarDetail": "完了 {completed}/{total}、失敗 {failed}", "batch.summary.count": "全 {count} 件のフォルダー", "batch.summary.running": "{completed}/{total} 件を処理中", "batch.summary.result": "成功 {completed} 件／失敗 {failed} 件", "batch.summary.cancelled": "中止 {count} 件",
       "batch.status.queued": "開始待ち", "batch.status.running": "処理中", "batch.status.completed": "完了", "batch.status.failed": "失敗", "batch.status.cancelled": "中止",
       "batch.task.queued": "開始待ち", "batch.task.running": "処理中", "batch.task.paused": "一時停止中", "batch.task.complete": "完了", "batch.task.failed": "失敗", "batch.task.cancelled": "中止",
-      "batch.pickChildren.title": "子フォルダーを選択", "batch.pickChildren.detail": "キューに追加する子フォルダーにチェックを入れてください。画像のないフォルダーは選べません。", "batch.pickChildren.empty": "このフォルダーには子フォルダーがありません", "batch.pickChildren.images": "{count} 枚", "batch.pickChildren.none": "対応画像なし", "batch.pickChildren.confirm": "キューに追加", "batch.pickChildren.cancel": "キャンセル"
+      "batch.pickChildren.title": "子フォルダーを選択", "batch.pickChildren.detail": "キューに追加する子フォルダーにチェックを入れてください。画像のないフォルダーは選べません。", "batch.pickChildren.empty": "このフォルダーには子フォルダーがありません", "batch.pickChildren.images": "{count} 枚", "batch.pickChildren.none": "対応画像なし", "batch.pickChildren.confirm": "キューに追加", "batch.pickChildren.cancel": "キャンセル",
+      "batch.task.headline": "{index}/{total} 件目を処理中：{name}", "batch.task.ocr": "{current}/{total} ページを OCR で認識中", "batch.task.translate": "{current}/{total} ページを翻訳中", "batch.task.render": "{current}/{total} ページを描画中", "batch.task.failure": "処理に失敗しました：{message}"
     },
     "en-US": {
       "app.title": "Manga Localization Workspace", "app.subtitle": "Import images, recognize text, and produce a coherent localized edition", "app.github": "Open GitHub", "language.label": "Interface language",
@@ -283,7 +289,8 @@
       "batch.running": "Processing {completed}/{total}", "batch.detail": "{total} folder(s): {completed} succeeded / {failed} failed", "batch.sidebarDetail": "{completed}/{total} done, {failed} failed", "batch.summary.count": "{count} folder(s)", "batch.summary.running": "Processing {completed}/{total}", "batch.summary.result": "{completed} succeeded / {failed} failed", "batch.summary.cancelled": "{count} cancelled",
       "batch.status.queued": "Queued", "batch.status.running": "Running", "batch.status.completed": "Completed", "batch.status.failed": "Failed", "batch.status.cancelled": "Cancelled",
       "batch.task.queued": "Queued", "batch.task.running": "Running", "batch.task.paused": "Paused", "batch.task.complete": "Complete", "batch.task.failed": "Failed", "batch.task.cancelled": "Cancelled",
-      "batch.pickChildren.title": "Choose subfolders", "batch.pickChildren.detail": "Tick the subfolders to enqueue; folders without images cannot be selected.", "batch.pickChildren.empty": "No subfolders in this folder", "batch.pickChildren.images": "{count} image(s)", "batch.pickChildren.none": "No supported images", "batch.pickChildren.confirm": "Add to queue", "batch.pickChildren.cancel": "Cancel"
+      "batch.pickChildren.title": "Choose subfolders", "batch.pickChildren.detail": "Tick the subfolders to enqueue; folders without images cannot be selected.", "batch.pickChildren.empty": "No subfolders in this folder", "batch.pickChildren.images": "{count} image(s)", "batch.pickChildren.none": "No supported images", "batch.pickChildren.confirm": "Add to queue", "batch.pickChildren.cancel": "Cancel",
+      "batch.task.headline": "Processing {index}/{total}: {name}", "batch.task.ocr": "Recognising page {current}/{total} (OCR)", "batch.task.translate": "Translating page {current}/{total}", "batch.task.render": "Rendering page {current}/{total}", "batch.task.failure": "Processing failed: {message}"
     }
   };
 
