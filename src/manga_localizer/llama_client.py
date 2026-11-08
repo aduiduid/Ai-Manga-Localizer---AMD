@@ -171,7 +171,7 @@ class LlamaChatClient:
         while budgets[-1] < self.max_output_tokens:
             budgets.append(min(self.max_output_tokens, budgets[-1] * 2))
         last = ""
-        for budget in budgets:
+        for index, budget in enumerate(budgets):
             payload = {
                 "model": self.model or "default",
                 "messages": [{"role": "user", "content": parts}],
@@ -183,7 +183,17 @@ class LlamaChatClient:
                     "json_schema": {"name": "reply", "schema": schema},
                 },
             }
-            reply = self._post(payload, timeout or llama_timeout(budget))
+            if index:
+                # A dense page can make the model emit the same glyph with
+                # ever-growing coordinates until the budget runs out, so a bigger
+                # budget alone never recovers.  Ollama's OCR adapter learned the
+                # same lesson; the first attempt keeps the upstream sampling.
+                payload["repeat_penalty"] = 1.3
+                payload["repeat_last_n"] = 256
+            # The wait escalates with the budget: llama.cpp's vision calls run
+            # longer than the daemon's on the same page, and a flat timeout
+            # aborts exactly the generation that needed the bigger budget.
+            reply = self._post(payload, max(timeout or 0, llama_timeout(budget)))
             text, reason = self._content(reply)
             last = text
             if reason == "length":

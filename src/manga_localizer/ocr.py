@@ -2184,9 +2184,15 @@ class OllamaVisionOCR:
             "text region in this manga page, including dialogue, "
             "narration and sound effects. Furigana annotating kanji is reading evidence, "
             "not a second copy of the text: return the main kanji expression once. "
+            # Not 0.0: llama.cpp compiles the schema below into a decoding grammar
+            # and copies a boundary value out of the example verbatim, so every box
+            # came back at 0.0 and the score gates downstream silently closed
+            # (``prefer_semantic_ocr`` needs 0.72, a hybrid page then loses whole
+            # speech bubbles).  The daemon ignores the example, so this keeps both
+            # transports comparable instead of flattering one of them.
             "Return JSON only as "
             '{"regions":[{"bbox":[x0,y0,x1,y1],"text":"...",'
-            '"score":0.0,"is_sfx":false}]}. Coordinates must be integer source-image '
+            '"score":0.9,"is_sfx":false}]}. Coordinates must be integer source-image '
             f"pixels within width={width}, height={height}. Do not translate or omit text."
         )
         schema = {
@@ -2939,13 +2945,18 @@ class LlamaVisionOCR(OllamaVisionOCR):
 
     ``think`` is accepted and ignored: the server is started with ``-rea off``,
     which is the server-side twin of Ollama's ``think: false``.
+
+    The default wait is longer than the daemon adapter's 300 s because the same
+    refine call on the densest page finished inside 300 s there and ran past it
+    here, and the transport is the only thing that changed; the client scales the
+    wait further with each escalated budget.
     """
 
     def __init__(
         self,
         base_url: str,
         model: str,
-        timeout: int = 300,
+        timeout: int = 600,
         source_language: str = "auto",
         context_tokens: int = OLLAMA_CONTEXT_TOKENS,
         max_output_tokens: int = OLLAMA_MAX_OUTPUT_TOKENS,

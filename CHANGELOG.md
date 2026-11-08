@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.1 - 2026-11-09
+
+- The llama.cpp vision adapter now escalates its wait with the output budget and penalises repeats on the retry, exactly as the Ollama adapter does. A flat 300 s timeout aborted the densest page of the A/B book mid-generation, so the retry that recovers a degenerate page never ran.
+- The detection prompt no longer shows `"score":0.0` in its JSON example: llama.cpp decodes against the schema as a grammar and copies a boundary value out of the example verbatim, which zeroed every box's confidence and closed the score gates downstream (`prefer_semantic_ocr` needs 0.72).
+- llama.cpp vision calls wait 600 s by default, because the same refine call that finished inside the daemon's 300 s ran past it on the same page.
+
 ## 0.10.0 - 2026-11-08
 
 - Read pages through llama.cpp as well: `ocr_backend="llama"` runs the same `HybridMangaOCR` geometry-then-semantics split, with `LlamaVisionOCR` in place of the Ollama vision adapter. Because only the transport is swapped, a page's boxes and text are directly comparable between the two backends; an A/B on the sample book matched 4/4 boxes and 4/4 readings on both pages, with identical skip and role verdicts.

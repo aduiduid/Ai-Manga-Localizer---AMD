@@ -141,3 +141,44 @@ def test_png_bytes_passes_png_through(tmp_path):
     path = tmp_path / "page.png"
     Image.new("RGB", (8, 8), "white").save(path, format="PNG")
     assert png_bytes(path) == path.read_bytes()
+
+
+def test_a_vision_retry_penalises_repeats_like_the_ollama_adapter(monkeypatch):
+    # A dense page makes the model emit the same glyph with ever-growing
+    # coordinates until the budget runs out, so the bigger budget alone never
+    # recovers; the daemon adapter learned this and the llama.cpp one must match
+    # it or the densest page fails on the migrated path only.
+    schema = {"type": "object"}
+    recorder = _Recorder(
+        [
+            _reply('{"boxes": ', finish_reason="length"),
+            _reply(json.dumps({"boxes": []})),
+        ]
+    )
+    client = _client(monkeypatch, recorder)
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 24
+    assert client.chat_vision([png], "读气泡", schema, max_tokens=100) == {"boxes": []}
+    first, second = (sent["payload"] for sent in recorder.payloads)
+    assert "repeat_penalty" not in first
+    assert second["repeat_penalty"] == 1.3
+    assert second["repeat_last_n"] == 256
+
+
+def test_a_vision_timeout_grows_with_the_escalated_budget(monkeypatch):
+    # The wait has to outlive the budget it is waiting for, otherwise the socket
+    # dies exactly when a slow generation reaches its ceiling and the escalation
+    # never happens.  The caller's floor still wins for the first attempt.
+    schema = {"type": "object"}
+    recorder = _Recorder(
+        [
+            _reply('{"boxes": ', finish_reason="length"),
+            _reply(json.dumps({"boxes": []})),
+        ]
+    )
+    client = _client(monkeypatch, recorder)
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 24
+    client.chat_vision([png], "读气泡", schema, max_tokens=32_768, timeout=600)
+    first, second = (sent["timeout"] for sent in recorder.payloads)
+    assert first == 600
+    assert second == 1_200
+
