@@ -37,7 +37,7 @@
 - **质量 OCR**：Paddle 精确框 + Manga OCR 识别 + 9B 漏字／语义审计；视觉模型报告的漏字必须经过已有框覆盖判断、局部放大 Paddle 重检和 Manga OCR 独立确认，粗 VLM 框永远不直接擦图。
 - **原字样式匹配**：不依赖多模态 LLM，直接分析横竖排、字号、字重、前景色、描边色／宽度、字距和展示文字占比；自动使用常规或粗体中文字体重排。
 - **保护画面**：保持原始像素尺寸，不覆盖源图；LaMa 推理后强制逐像素恢复掩膜外区域，回归测试验证有界编辑契约。
-- **本地后端可组合**：翻译可选内置 Hy-MT2、本机 Ollama 或显式在线兼容 API；OCR 可选内置专用方案或 Ollama 视觉模型。
+- **本地后端可组合**：翻译与 OCR 都可选 **内置**、**本机 Ollama**、**本机 llama.cpp**（0.10.0 起，直接读 Ollama 已下载的 GGUF）或显式在线兼容 API；Ollama 路径完整保留，随时可作 fallback 切回。
 - **隐私边界清晰**：本地模式不外传数据；在线模式只发送 OCR 文本和上下文，不上传图片。
 
 ## 环境要求
@@ -46,10 +46,10 @@
 | --- | --- |
 | 系统 | Windows 10/11（Linux 亦可，脚本在 `scripts/`） |
 | CPU | AMD Ryzen 5 5600G（6 核 12 线程，OCR 纯 CPU 跑 5–6 核） |
-| 显卡 | AMD Radeon RX 9070 XT —— 只给 Ollama 用 Vulkan，Paddle 没有 ROCm/DirectML 后端 |
-| 磁盘 | 完整本地质量模式约 15 GB（含 DeepSeek-V4-Pro-Qwen3.5-9B i1-Q6_K 8.3 GB + Hy-MT2 1.9 GB 两份 Ollama 权重） |
+| 显卡 | AMD Radeon RX 9070 XT —— 只给 Ollama / llama.cpp 用 Vulkan，Paddle 没有 ROCm/DirectML 后端 |
+| 磁盘 | 完整本地质量模式约 15 GB（含 DeepSeek-V4-Pro-Qwen3.5-9B i1-Q6_K 8.3 GB + Hy-MT2 1.9 GB 两份权重；llama.cpp 用硬链接复用同一批 GGUF，不额外占盘） |
 | Python | 3.12.15（uv 托管），torch 2.8.0+cpu / paddlepaddle 3.3.1 / paddleocr 3.7.0 / paddlex 3.7.2 |
-| 推理服务 | Ollama 0.40.14（免安装版放在 `_dl\ollama\`，只保留 vulkan 后端） |
+| 推理服务 | Ollama 0.40.14（免安装版放在 `_dl\ollama\`，只保留 vulkan 后端）；llama.cpp 后端直接复用其中自带的 `llama-server.exe`（`0.8.0-dev`，commit `39febd2ad`） |
 
 **安装路径必须是纯 ASCII。** Paddle 的 C++ 推理和 `torch.jit.load` 都打不开含中文的路径，会报 `json.exception.parse_error.101` / `open file failed because of errno 2`。目录名请保持 `Manga Localizer----Ben-Ding-Fan-Yi` 这类纯 ASCII 形式，**不要再改成中文名**；如果搬动目录，还要同步改 `.venv\pyvenv.cfg` 的 `home` 和 `site-packages\_editable_impl_manga_localizer_studio.pth`。
 
@@ -98,6 +98,38 @@ manga-localizer doctor
 ```
 
 在线兼容 API 使用 `--backend online --online-url ... --online-model ...`，密钥通过 `MLS_ONLINE_API_KEY` 环境变量提供；UI 中输入的密钥只保留在当前服务进程内，不写入磁盘。
+
+## 推理后端：Ollama 与 llama.cpp（0.10.0 起）
+
+**两条全本地推理路径并存，Ollama 路径完整保留**，随时可以切回去：
+
+| | Ollama | llama.cpp |
+| --- | --- | --- |
+| 服务 | 常驻守护进程（127.0.0.1:11434） | 按需起 `llama-server.exe`，任务/批次结束即 kill 并交还显存 |
+| 权重 | `ollama-models\blobs\` 里的 GGUF | 硬链接复用**同一批 blob**，不复制、不转换 |
+| 翻译 | `inference_backend=ollama` | `inference_backend=llama` |
+| OCR | `ocr_backend=ollama`／`hybrid` | `ocr_backend=llama`（与 hybrid 同一套「几何＋语义」流程，只换视觉传输） |
+
+**怎么配**：在项目面板或设置页把「推理后端」选成 `llama.cpp 本地推理`，「OCR 后端」选 `llama.cpp 视觉 OCR`，模型名沿用 Ollama 里那两个 tag（默认已填好）。
+
+| 设置 | 默认值 | 说明 |
+| --- | --- | --- |
+| 主模型 | `DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest` | 同一份多模态 9B 供翻译与视觉 OCR 共用 |
+| 审校模型 | `hy-mt2-1.8b:q8` | 质量模式的独立候选译文 |
+| 上下文 | `65536` | 需要时可在 4096–262144 之间调 |
+| 端口 | 主 `8080` / 审校 `8081` / 视觉 OCR `8082` | 被占用时自动顺延并在任务日志里说明；整段被占则明确报错 |
+| llama-server 路径、Ollama 模型目录 | 留空 | 留空时自动在 `_dl\ollama\lib\ollama\` 与 `ollama-models\` 下查找 |
+
+启动参数由程序拼装（`-ngl 99 -fa on -rea off -np 1 -ctk q8_0 -ctv q8_0 --no-webui`），并先在 `data\llama-models\runtime\` 里备好一份私有运行时：`llama-server.exe` 与 `ggml-vulkan.dll` 必须同目录，否则 llama.cpp 找不到 GPU 会静默回落到 CPU。视觉 OCR 要求模型带 mmproj 投影器（缺失时启动前就报错）；同 tag 的模型会被复用，不会为 OCR 再加载一份 7 GB 权重。页面在送进视觉模型前会转成 PNG（llama.cpp 拒收 WebP）。
+
+CLI 与 UI 走同一条流水线，`--backend llama`／`--ocr-backend llama` 会沿用你保存的设置，单个 `--llama-*` 参数可覆盖本次运行：
+
+```bash
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01--已汉化" --backend llama --ocr-backend llama
+manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01-llama8083" --backend llama --llama-main-port 8083
+```
+
+本机实测（同一页、质量模式）：llama.cpp 每页 43–45 s 且稳定，Ollama 同页会偶发跑到 333 s；启动 6.55 s，34/34 层全部 offload，KV 用 q8_0。llama.cpp 视觉 OCR 与 Ollama 的整页结果在 hybrid 流程下 **坐标 4/4、文本 4/4 完全一致**。完整对比见 [`CHANGELOG.md`](CHANGELOG.md) 的 0.10.0 一节。
 
 ## 工作原理
 

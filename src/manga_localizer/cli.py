@@ -37,6 +37,33 @@ def configure_dependency_logging() -> None:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
+def _llama_options(settings: UserSettings, **overrides: object) -> dict:
+    """llama.cpp fields for a CLI run, based on the saved settings.
+
+    The flags are there to override a single run; anything left at its sentinel
+    (an empty string or 0) has to come back from the settings, or the CLI would
+    quietly run on model tags and ports the user never chose -- the UI and the
+    CLI are documented as driving the same pipeline.
+
+    Ports are validated as 1024..65535 and the context as >= 4096, so 0 is a
+    safe "not given" marker for every numeric field.
+    """
+    values: dict = {
+        "llama_model": settings.llama_model,
+        "llama_review_model": settings.llama_review_model,
+        "llama_context_tokens": settings.llama_context_tokens,
+        "llama_main_port": settings.llama_main_port,
+        "llama_review_port": settings.llama_review_port,
+        "llama_vision_port": settings.llama_vision_port,
+        "llama_server_path": settings.llama_server_path,
+        "llama_ollama_root": settings.llama_ollama_root,
+    }
+    for key, value in overrides.items():
+        if value:
+            values[key] = value
+    return values
+
+
 configure_cli_encoding()
 configure_dependency_logging()
 
@@ -115,9 +142,18 @@ def run_pipeline(
     ),
     online_base_url: str = typer.Option("https://api.openai.com/v1", "--online-url"),
     online_model: str = typer.Option("", "--online-model"),
+    llama_model: str = typer.Option("", "--llama-model"),
+    llama_review_model: str = typer.Option("", "--llama-review-model"),
+    llama_context_tokens: int = typer.Option(0, "--llama-context-tokens"),
+    llama_main_port: int = typer.Option(0, "--llama-main-port"),
+    llama_review_port: int = typer.Option(0, "--llama-review-port"),
+    llama_vision_port: int = typer.Option(0, "--llama-vision-port"),
+    llama_server_path: str = typer.Option("", "--llama-server-path"),
+    llama_ollama_root: str = typer.Option("", "--llama-ollama-root"),
 ):
     """Run the same localization pipeline used by the UI."""
     paths = AppPaths.from_env().ensure()
+    settings = UserSettings.load(paths.settings)
     request = PipelineRequest(
         source=source,
         output=output,
@@ -137,6 +173,17 @@ def run_pipeline(
         online_model=online_model,
         online_api_key=os.environ.get("MLS_ONLINE_API_KEY", ""),
         reviewed_transcript=reviewed_transcript,
+        **_llama_options(
+            settings,
+            llama_model=llama_model,
+            llama_review_model=llama_review_model,
+            llama_context_tokens=llama_context_tokens,
+            llama_main_port=llama_main_port,
+            llama_review_port=llama_review_port,
+            llama_vision_port=llama_vision_port,
+            llama_server_path=llama_server_path,
+            llama_ollama_root=llama_ollama_root,
+        ),
     )
 
     def progress(phase: str, current: int, total: int, message: str):

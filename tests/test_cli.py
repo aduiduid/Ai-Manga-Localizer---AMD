@@ -4,11 +4,13 @@ import json
 
 from manga_localizer.cli import (
     _font_status,
+    _llama_options,
     configure_cli_encoding,
     configure_dependency_logging,
     existing_ui_url,
     torch_pair_compatible,
 )
+from manga_localizer.config import UserSettings
 
 
 def test_existing_local_workspace_is_reused(monkeypatch):
@@ -61,3 +63,35 @@ def test_doctor_requires_the_pinned_torch_runtime_pair():
     assert torch_pair_compatible("2.8.0+cpu", "0.23.0+cpu")
     assert not torch_pair_compatible("2.9.0+cu129", "0.23.0+cu129")
     assert not torch_pair_compatible("2.8.0+cu129", "0.1.6")
+
+
+def test_cli_llama_flags_fall_back_to_the_saved_settings():
+    # A flag overrides one run; everything else has to match what the UI saved,
+    # or `--backend llama` would quietly use the default ports and model tags.
+    settings = UserSettings(
+        llama_model="saved:q6",
+        llama_main_port=9100,
+        llama_vision_port=9001,
+    )
+    values = _llama_options(
+        settings,
+        llama_model="flag:q8",
+        llama_vision_port=0,
+        llama_context_tokens=0,
+        llama_ollama_root="",
+    )
+    assert values["llama_model"] == "flag:q8"
+    assert values["llama_vision_port"] == 9001
+    assert values["llama_main_port"] == 9100
+    assert values["llama_context_tokens"] == settings.llama_context_tokens
+    assert values["llama_ollama_root"] == settings.llama_ollama_root
+
+
+def test_cli_llama_options_cover_every_pipeline_field():
+    from manga_localizer.pipeline import PipelineRequest
+
+    values = _llama_options(UserSettings())
+    fields = {
+        name for name in PipelineRequest.__dataclass_fields__ if name.startswith("llama_")
+    }
+    assert set(values) == fields

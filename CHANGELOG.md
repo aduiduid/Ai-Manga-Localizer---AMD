@@ -8,6 +8,8 @@
 - Bounds the confidence `score` inside the detection schema. llama.cpp compiles the JSON schema into a constrained decoding grammar, and an unbounded number let it answer `0.0` for every box on a page it had read perfectly -- which silently disabled the score gates downstream (`prefer_semantic_ocr` wants 0.72, `_local_crop_is_suspicious` rejects <= 0.05). The type is stated as `minimum: 0, maximum: 1`, exactly as `refine` and `find_missing` already stated theirs.
 - Release the servers when either stage started one: a finished batch now stops the vision server even when translation stayed on the Ollama daemon.
 - Add `llama` to both OCR pickers and the settings panel: a run whose OCR is on llama.cpp reuses the Ollama visual-model field for the vision tag, and the start button asks for it when either stage needs it.
+- The whole pipeline now runs on llama.cpp with no Ollama daemon involved: pick `llama` for both the inference and the OCR backend and translation, review and page reading all go through `llama-server.exe`. The Ollama path is untouched and stays available as the fallback -- switching either picker back is enough. Setup is described in `README.md` under "推理后端：Ollama 与 llama.cpp": the model tags reuse the Ollama names, the context defaults to 65536, and the ports default to 8080/8081/8082.
+- Give the CLI the same llama.cpp settings as the UI, and add `--llama-*` flags for one-off overrides. `--backend llama` used to ignore the saved settings and silently run on the default tags and ports; the flags now fall back to what the settings page saved, so both entry points drive the same configuration.
 
 ## 0.9.0 - 2026-11-08
 
