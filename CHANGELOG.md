@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0 - 2026-11-08
+
+- Queue several source folders as one serial batch: each folder runs the full pipeline in the order it was added, one at a time because Ollama and VRAM are exclusive, and a failing folder no longer aborts the rest of the batch. The batch reports "N succeeded / M failed" when it ends.
+- Validate every queued folder before anything starts: missing paths and folders without supported images are reported together instead of surfacing mid-run, and duplicate paths (including case and trailing-separator variants) are collapsed.
+- Cancel a batch as a whole: the folder in flight stops at its next progress checkpoint and queued folders never create a job at all, so no GPU work starts after the cancel.
+- Release the Ollama models a finished batch was holding by evicting them with `keep_alive: 0` (what `ollama stop` does), so a completed batch does not keep VRAM resident for five minutes.
+- Remember the batch's output root on the server, so reloading the page during a run restores the source list and output folder instead of silently falling back to writing beside each source.
+- Show the running folder's phase on the batch card: the headline names the folder being processed and the subtitle mirrors the single-job card with "recognising page X/Y (OCR)", "translating page X/Y", or "rendering page X/Y". A failed folder keeps its error in red after the batch ends.
+- Add an input language setting (auto, English, Japanese) so the OCR can be told which script to expect; declaring English skips the Japanese recogniser entirely and stops it from inventing Japanese readings for Latin artwork.
+- Let the user cap the CPU thread budget, with the detected CPU model and every thread count from the logical core count down to one offered as a choice.
+- Raise the Ollama context and output ceilings to 64K and scale the request timeout with the output budget, fixing the truncation at 2048 tokens that aborted structured translation and the hard 180 s timeout that killed long pages.
+- Announce finished and failed jobs with two distinct chimes, with an opt-out per outcome and an adjustable volume.
+- Preserve page-spanning display artwork on covers and inner titles instead of erasing it and stamping a hallucinated date on top.
+- Reject text-less OCR boxes whose reading is not reproducible across crops, removing hallucinated vertical text from pages that have none.
+- Recover the outer column of multi-column vertical bubbles that the detector misses, together with the rest of the group.
+- Fix fast-mode rendering, inner-title artwork handling, and the erase fill colour that left white patches on tinted paper.
+
 ## 0.5.2 - 2026-07-20
 
 - Keep full-page 9B vision results audit-only unless their text agrees with the detector-owned region, preventing neighbouring numbered boxes from swapping dialogue.
