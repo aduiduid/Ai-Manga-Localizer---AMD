@@ -7,7 +7,42 @@ from PIL import Image, ImageDraw
 
 from manga_localizer.config import AppPaths
 from manga_localizer.ocr import PageOCR, TextUnit
-from manga_localizer.renderer import ArtworkPreservingRenderer, TextStyle, ensure_font
+from manga_localizer.renderer import (
+    CLOSING_PUNCTUATION,
+    MIN_READABLE_FONT,
+    ArtworkPreservingRenderer,
+    TextStyle,
+    _fit_readable,
+    _font,
+    _lines_fit,
+    _text_padding,
+    _tokens,
+    _wrap,
+    ensure_font,
+    find_bold_font,
+)
+
+
+def _measured_font():
+    """A real CJK font, or a skip: the wrapping tests measure glyph widths."""
+    try:
+        return find_bold_font()
+    except FileNotFoundError:
+        pytest.skip("no CJK font installed to measure glyph widths with")
+
+
+def _measuring_renderer(tmp_path):
+    font = _measured_font()
+    root = tmp_path / "home"
+    paths = AppPaths(
+        root, root / "models", root / "cache", root / "jobs", root / "settings.json"
+    )
+    return ArtworkPreservingRenderer(
+        paths=paths,
+        font_path=font,
+        bold_font_path=font,
+        cleanup_profile="quality",
+    )
 
 
 class BoundedTestRenderer(ArtworkPreservingRenderer):
@@ -512,3 +547,131 @@ def test_cleanup_still_uses_white_when_the_page_is_white():
     image[25:35, 20:40] = 0
     cleaned, _, _ = ArtworkPreservingRenderer._erase(image.copy(), [10, 15, 50, 45])
     assert np.all(cleaned[27:33, 23:37] >= 250)
+
+
+def _polarity_fixture():
+    """Dark lettering on a pink sign, with bright artwork beside it.
+
+    Only the sign is mid-tone, so polling the padded erase region let the white
+    panel on the right outvote six glyphs and the mask picked the empty side.
+    """
+    image = np.full((120, 160, 3), 45, dtype=np.uint8)
+    image[:, 120:] = 255
+    image[40:80, 40:120] = (200, 150, 180)
+    for x in range(48, 112, 16):
+        cv2.rectangle(image, (x, 52), (x + 8, 68), (15, 15, 15), -1)
+    return image
+
+
+def _dark_pixels(image, box=(48, 52, 112, 69)):
+    x0, y0, x1, y1 = box
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    return int((gray[y0:y1, x0:x1] < 120).sum())
+
+
+def test_glyph_polarity_votes_only_inside_the_detector_box():
+    image = _polarity_fixture()
+    level, glyphs_are_dark = ArtworkPreservingRenderer._glyph_polarity(
+        image, [40, 40, 120, 80]
+    )
+    assert glyphs_are_dark is True
+    assert level == pytest.approx(168.0)
+    assert _dark_pixels(image) == 612
+
+
+def test_erase_uses_the_focus_box_to_pick_which_side_is_text():
+    image = _polarity_fixture()
+    # Without the focus the padded region votes and the glyphs survive: this is
+    # the reported "the original text is still under the translation" bug.
+    stale, _, _ = ArtworkPreservingRenderer._erase(image.copy(), [0, 0, 160, 120])
+    assert _dark_pixels(stale) == 612
+    cleaned, _, _ = ArtworkPreservingRenderer._erase(
+        image.copy(), [0, 0, 160, 120], focus=[40, 40, 120, 80]
+    )
+    assert _dark_pixels(cleaned) == 0
+
+
+def _plaque_page():
+    """A 159x82 white plaque on a pink page with a 79x21 band of lettering."""
+    image = np.full((400, 400, 3), (232, 130, 180), dtype=np.uint8)
+    cv2.rectangle(image, (150, 180), (309, 262), (255, 255, 255), -1)
+    cv2.rectangle(image, (150, 180), (309, 262), (60, 40, 50), 2)
+    for x in range(160, 300, 18):
+        cv2.rectangle(image, (x, 218), (x + 12, 232), (10, 10, 10), -1)
+    return image
+
+
+def _typeset(rgb, renderer, bbox, text):
+    unit = TextUnit(
+        "p001u01", bbox, [bbox[0] - 10, bbox[1] - 8, bbox[2] + 10, bbox[3] + 8],
+        "ＳＵＰＯＮＧＯ", 1.0, True, text,
+    )
+    style = renderer._analyze_style(rgb, unit)
+    box = renderer._typeset_box(rgb, unit, style)
+    pad_x, pad_y = _text_padding(box)
+    width = max(12, (box[2] - box[0]) - 2 * pad_x)
+    height = max(12, (box[3] - box[1]) - 2 * pad_y)
+    font_path = renderer.bold_font_path if style.bold else renderer.font_path
+    draw = ImageDraw.Draw(Image.new("L", (8, 8)))
+    fitting = _fit_readable(font_path, draw, text, width, height, style.font_size)
+    return box, fitting
+
+
+def test_typesetting_keeps_a_roomy_balloon_at_its_declared_box(tmp_path):
+    renderer = _measuring_renderer(tmp_path)
+    rgb = np.full((400, 400, 3), 230, dtype=np.uint8)
+    cv2.rectangle(rgb, (60, 60), (340, 340), (255, 255, 255), -1)
+    box, fitting = _typeset(rgb, renderer, [80, 120, 320, 220], "这是一段比较长的对白文字")
+    assert box == [80, 120, 320, 220]
+    assert fitting is not None
+
+
+def test_typesetting_grows_a_short_strip_into_its_plaque(tmp_path):
+    renderer = _measuring_renderer(tmp_path)
+    rgb = _plaque_page()
+    # The detector box is one 21px tall line inside an 82px tall plaque: at the
+    # declared height even 8px CJK does not fit, so the box has to grow.
+    box, fitting = _typeset(rgb, renderer, [160, 211, 239, 232], "我想。这件事你得自己决定")
+    assert box != [160, 211, 239, 232]
+    assert box[1] < 211 and box[3] == 232
+    assert fitting is not None
+    assert fitting[1] >= MIN_READABLE_FONT
+
+
+def test_typesetting_overflows_a_bubble_too_small_for_readable_cjk(tmp_path):
+    renderer = _measuring_renderer(tmp_path)
+    rgb = np.full((240, 240, 3), (30, 90, 120), dtype=np.uint8)
+    cv2.rectangle(rgb, (90, 100), (114, 114), (255, 255, 255), -1)
+    box, fitting = _typeset(rgb, renderer, [90, 100, 114, 114], "我想……")
+    # A 24x14 bubble cannot hold 12px CJK.  Spilling past the border is the
+    # chosen trade: an overlapping glyph is legible, an eight-pixel one is not.
+    assert box[0] < 90 and box[1] < 100 and box[2] > 114 and box[3] > 114
+    assert fitting is not None
+    assert MIN_READABLE_FONT <= fitting[1] <= 14
+
+
+def test_trailing_punctuation_hangs_instead_of_starting_a_line():
+    font = _font(_measured_font(), 12)
+    draw = ImageDraw.Draw(Image.new("L", (8, 8)))
+    assert draw.textbbox((0, 0), "我们，", font=font)[2] == 36
+    assert draw.textbbox((0, 0), "我们", font=font)[2] == 24
+    # The marks may hang past the inner width, so two glyphs plus a comma fit a
+    # 24px balloon instead of the comma dropping to a line of its own.
+    assert _lines_fit(draw, ["我们，"], font, 24) is True
+    # A one-glyph line has no body to hang from: "不！！" at 39px is 46px wide
+    # and one size smaller always fits, so it must not be accepted here.
+    assert _lines_fit(draw, ["不！！"], font, 12) is False
+
+
+def test_wrapping_keeps_latin_words_and_their_punctuation_together():
+    font = _font(_measured_font(), 12)
+    draw = ImageDraw.Draw(Image.new("L", (8, 8)))
+    assert _tokens("来吧，Twilight，") == ["来", "吧，", "Twilight，"]
+    assert _tokens("SUPONGO...") == ["SUPONGO..."]
+    # Only closing marks glue onto the unit before them; an opening bracket must
+    # keep starting its own unit or "「那句话」" would wrap around it.
+    assert "」" in CLOSING_PUNCTUATION
+    assert "「" not in CLOSING_PUNCTUATION
+    # 51px inner width: "Twilight，" is 63px, which used to be shredded into
+    # "Twiligh" + "t" and push a lone comma onto a third line.
+    assert _wrap(draw, "来吧，Twilight，", font, 51) == ["来吧，", "Twilight，"]

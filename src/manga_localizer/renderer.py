@@ -169,18 +169,145 @@ def _fit_vertical(
     return _font(font_path, size), size, capacity
 
 
+def _tokens(text: str) -> list[str]:
+    """Split into wrap units: CJK glyphs alone, Latin words kept whole.
+
+    Wrapping character by character is right for Chinese but mangles the Latin
+    names a translation keeps ("Twilight" became "T" + "wilight" across two
+    lines in a small balloon).  A run of ASCII letters, digits and the
+    punctuation that belongs inside a word stays one unit, so the only break
+    points offered are the ones a reader expects.
+
+    Closing punctuation is glued onto the unit before it rather than left as a
+    unit of its own: a comma or a "……" that can start a line always ends up as a
+    stray mark on a line of its own in a narrow balloon.
+    """
+    tokens: list[str] = []
+    word = ""
+    for char in text:
+        if char.isascii() and (char.isalnum() or char in "'’-&./+"):
+            word += char
+            continue
+        if word:
+            tokens.append(word)
+            word = ""
+        if char in CLOSING_PUNCTUATION and tokens:
+            tokens[-1] += char
+            continue
+        tokens.append(char)
+    if word:
+        tokens.append(word)
+    return tokens
+
+
+# Punctuation that may never open a line.  A comma or full stop that wraps onto
+# its own line reads as a stray mark ("来吧，/Twilight/，" in a 46x33 bubble), so
+# these are appended to the line before them even when that costs a pixel of
+# width.
+CLOSING_PUNCTUATION = "，。、；：？！）」』】》,.;:?!)]}…—～~"
+
+# How far a single word may hang past the inner width before it is broken up.
+# The inner width already excludes the box inset, so a word a couple of pixels
+# wider still fits inside the balloon; breaking it there traded a legible line
+# for a shredded one ("Twilight" became "Twiligh" + "t，" and pushed a lone
+# comma onto a third line).  Centering splits the overhang over both sides.
+WORD_OVERFLOW_SLACK = 8
+
+
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> list[str]:
     lines, current = [], ""
-    for char in text:
-        candidate = current + char
-        if current and draw.textbbox((0, 0), candidate, font=font)[2] > width:
+
+    def measure(candidate: str) -> int:
+        return draw.textbbox((0, 0), candidate, font=font)[2]
+
+    for token in _tokens(text):
+        if current and measure(current + token) > width:
             lines.append(current)
-            current = char
-        else:
-            current = candidate
+            current = ""
+        if measure(token) <= width or not current:
+            current += token
+            continue
+        # A word that misses the inner width by less than the box's own inset is
+        # kept whole: the inset is unused space, and splitting "Twilight" into
+        # "Twiligh" + "t，" cost a whole extra line in a 46x33 bubble.  Only a
+        # word genuinely wider than the balloon falls back to per-glyph breaks.
+        if measure(token) <= width + WORD_OVERFLOW_SLACK:
+            current += token
+            continue
+        # A single word wider than the balloon: breaking inside it is the only
+        # way to keep it on the page, so fall back to one glyph at a time.
+        for char in token:
+            if current and measure(current + char) > width:
+                lines.append(current)
+                current = ""
+            current += char
     if current:
         lines.append(current)
-    return lines
+    return _attach_orphan_punctuation(lines)
+
+
+def _attach_orphan_punctuation(lines: list[str]) -> list[str]:
+    """Fold a line that is nothing but closing punctuation into the line above.
+
+    The per-token rule above keeps punctuation with the glyph in front of it,
+    but a run of two marks ("！！", "……") can still land alone when the line
+    before it is a single glyph wide.  A bare "！！" on its own line reads as a
+    smudge, so it goes back onto the line above and the fit check decides
+    whether the size still works.
+    """
+    merged: list[str] = []
+    for line in lines:
+        if merged and not line.strip(CLOSING_PUNCTUATION):
+            merged[-1] += line
+        else:
+            merged.append(line)
+    return merged
+
+
+def _lines_fit(draw: ImageDraw.ImageDraw, lines: list[str], font, width: int) -> bool:
+    """Whether every wrapped line stays inside ``width``.
+
+    Trailing punctuation is allowed to hang into the margin, which is the
+    typographic rule that keeps "，"/"！" attached to the word before it instead
+    of starting a line of its own.  A line whose only glyph is the one the
+    punctuation hangs off is exempt from that allowance: there one size smaller
+    always fits, and letting "不！！" hang 22px past a 39px balloon looked far
+    worse than printing it a size down.
+    """
+    for line in lines:
+        if draw.textbbox((0, 0), line, font=font)[2] <= width + WORD_OVERFLOW_SLACK:
+            continue
+        body = line.rstrip(CLOSING_PUNCTUATION)
+        if len(body) > 1 and draw.textbbox((0, 0), body, font=font)[2] <= width:
+            continue
+        return False
+    return True
+
+
+# Line pitch as a multiple of the font size.  CJK glyphs already carry their
+# own breathing room inside the em box, so 1.24 wasted a line of height that a
+# short balloon did not have and pushed the type a size or two down.  Measured
+# across the sample, 1.14 keeps the lines clearly apart while losing one fewer
+# size than 1.18 on the tightest bubbles.
+LINE_HEIGHT_RATIO = 1.14
+
+# Inset used by both ``_typeset_box`` and ``_draw``: it must be the same number
+# in both places or the box is judged against room the drawing never uses.  A
+# 4px floor stole a quarter of the height from the 15px strips that need the
+# room most, and a 3px floor still cost three of the 71 dialogue units a size.
+# 2px measured best across the sample (6 units under 12px, mean 15.7px) while
+# still keeping the stroke off the balloon border.
+TEXT_PADDING_RATIO_X = 0.06
+TEXT_PADDING_RATIO_Y = 0.04
+TEXT_PADDING_MIN = 2
+
+
+def _text_padding(box: list[int]) -> tuple[int, int]:
+    x0, y0, x1, y1 = box
+    return (
+        max(TEXT_PADDING_MIN, round((x1 - x0) * TEXT_PADDING_RATIO_X)),
+        max(TEXT_PADDING_MIN, round((y1 - y0) * TEXT_PADDING_RATIO_Y)),
+    )
 
 
 def _fit_horizontal(
@@ -195,14 +322,41 @@ def _fit_horizontal(
     for size in range(start, 7, -2):
         font = _font(font_path, size)
         lines = _wrap(draw, text, font, width)
-        line_height = round(size * 1.24)
-        if len(lines) * line_height <= height:
+        line_height = round(size * LINE_HEIGHT_RATIO)
+        if len(lines) * line_height <= height and _lines_fit(draw, lines, font, width):
             return font, size, lines, line_height
     # A long English line translated into Chinese needs far more glyphs than
     # the source occupied, so stopping at 20px spilled the text out of the
     # balloon.  Keep shrinking instead of overflowing the region.
     font = _font(font_path, 8)
-    return font, 8, _wrap(draw, text, font, width), 10
+    return font, 8, _wrap(draw, text, font, width), round(8 * LINE_HEIGHT_RATIO)
+
+
+# Below this size a CJK glyph is a grey smear at manga page resolution: the
+# strokes of 想 and 集 merge into one blob.  Shrinking further is worse than
+# growing the typesetting region, so ``_typeset_box`` widens the box first and
+# only falls back to the 8px overflow guard when even that is impossible.
+MIN_READABLE_FONT = 12
+
+
+def _fit_readable(
+    font_path: Path,
+    draw,
+    text: str,
+    width: int,
+    height: int,
+    preferred_size: int | None = None,
+    floor: int = MIN_READABLE_FONT,
+):
+    """Largest font size that fits, or ``None`` when even ``floor`` does not."""
+    start = min(height, max(20, preferred_size or min(160, height)))
+    for size in range(start, floor - 1, -1):
+        font = _font(font_path, size)
+        lines = _wrap(draw, text, font, width)
+        line_height = round(size * LINE_HEIGHT_RATIO)
+        if len(lines) * line_height <= height and _lines_fit(draw, lines, font, width):
+            return font, size, lines, line_height
+    return None
 
 
 # ``quality_profile`` ("quality"/"fast") is the user-facing setting; the
@@ -544,7 +698,41 @@ class ArtworkPreservingRenderer:
         return np.clip(median, 0, 255).astype(np.uint8)
 
     @staticmethod
-    def _erase(rgb: np.ndarray, box: list[int]) -> tuple[np.ndarray, float, float]:
+    def _glyph_polarity(
+        rgb: np.ndarray, focus: list[int]
+    ) -> tuple[float, bool]:
+        """Decide which side of the local median the source glyphs are on.
+
+        ``focus`` is the detector box, and only it may vote on polarity.  The
+        erase region is deliberately padded well beyond the text so stray
+        furigana and balloon borders are reachable, but that padding also
+        contains panel art, mint backgrounds and highlights.  Counting the
+        padded area let the artwork outvote six glyphs: a pink sign with black
+        Spanish lettering was classified as white-on-dark, the mask selected
+        empty pixels, and the original text survived under the translation
+        (the reported "text is not erased" bug).
+
+        Returns ``(level, glyphs_are_dark)`` where ``level`` is the median
+        luminance the two sides are measured against.
+        """
+        fx0, fy0, fx1, fy1 = focus
+        crop = rgb[fy0:fy1, fx0:fx1]
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        if not gray.size:
+            return 255.0, True
+        level = float(np.median(gray))
+        darker = float((gray < level - 45).mean())
+        brighter = float((gray > level + 45).mean())
+        if brighter > darker:
+            return level, False
+        return level, True
+
+    @staticmethod
+    def _erase(
+        rgb: np.ndarray,
+        box: list[int],
+        focus: list[int] | None = None,
+    ) -> tuple[np.ndarray, float, float]:
         x0, y0, x1, y1 = box
         crop = rgb[y0:y1, x0:x1].copy()
         gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
@@ -560,18 +748,19 @@ class ArtworkPreservingRenderer:
                 )
         else:
             # Mid-tone grounds (cyan signboards, colour panels) carry dark
-            # lettering, so "mean < 145" must not imply light glyphs.  Compare
-            # the text-like components on each side of the local median rather
-            # than raw pixel counts: a bright balloon border outnumbers the
-            # glyphs even when the glyphs are the dark side.
-            level = float(np.median(gray))
-            darker = ArtworkPreservingRenderer._interior_component_mask(
-                (gray < level - 45).astype(np.uint8), 7
+            # lettering, so "mean < 145" must not imply light glyphs.  The
+            # padding is reachable by the mask but must never vote on polarity:
+            # the local median is measured on the detector box only, so the
+            # surrounding artwork cannot flip which side is text.
+            focus = focus or box
+            level, glyphs_are_dark = ArtworkPreservingRenderer._glyph_polarity(
+                rgb, focus
             )
-            brighter = ArtworkPreservingRenderer._interior_component_mask(
-                (gray > level + 45).astype(np.uint8), 7
-            )
-            mask = darker if darker.sum() >= brighter.sum() else brighter
+            if glyphs_are_dark:
+                seeds = (gray < level - 45).astype(np.uint8)
+            else:
+                seeds = (gray > level + 45).astype(np.uint8)
+            mask = ArtworkPreservingRenderer._interior_component_mask(seeds, 7)
             if mask.any():
                 crop = cv2.inpaint(crop, mask, 6, cv2.INPAINT_TELEA)
         rgb[y0:y1, x0:x1] = crop
@@ -616,11 +805,180 @@ class ArtworkPreservingRenderer:
         rgb[y0:y1, x0:x1] = crop
         return rgb, mean, white_ratio
 
+    @staticmethod
+    def _looks_like_background(
+        pixels: np.ndarray, background: np.ndarray, tolerance: float
+    ) -> bool:
+        if not pixels.size:
+            return False
+        distance = np.abs(pixels.astype(np.int16) - background).max(axis=1)
+        # A whole edge is never unanimously flat when the lettering runs edge to
+        # edge across the short side of its box ("SUPONGO..." filled all 79
+        # columns of a 21px tall strip), so a strict "every pixel matches" test
+        # can never grow that box.  Nine tenths still rejects the balloon border
+        # and the artwork behind it, which are a different colour across the
+        # entire edge rather than in scattered columns.
+        return bool((distance <= tolerance).mean() >= 0.9)
+
+    @staticmethod
+    def _uniform_balloon_box(
+        rgb: np.ndarray,
+        box: list[int],
+        tolerance: float = 22.0,
+        width_limit: float = 1.7,
+        height_limit: float = 2.4,
+        step_limit: int = 200,
+    ) -> list[int]:
+        """Grow ``box`` to the flat balloon or sign it sits on.
+
+        A detector box around short lettering can be much shorter than the
+        balloon it belongs to ("SUPONGO..." occupied 79x21 inside a 79x42
+        plaque).  Typesetting inside the detector box alone forces the font
+        down to 9px, where CJK strokes merge into a smear.  Growing into the
+        surrounding pixels that still match the local background colour gives
+        the translation room to stay readable, and stops at the balloon border
+        because those pixels are no longer background-coloured.
+        """
+        page_height, page_width = rgb.shape[:2]
+        x0, y0, x1, y1 = box
+        sample = rgb[y0:y1, x0:x1].reshape(-1, 3)
+        if not sample.size:
+            return list(box)
+        background = np.median(sample, axis=0)
+        left, top, right, bottom = x0, y0, x1, y1
+        # A proportional limit alone is useless on very short strips: 2.4x of a
+        # 15px box is still 36px, which no 12px CJK line fits into.  The flat
+        # allowance keeps those boxes growing until the balloon border blocks
+        # them, which is the only stop that actually matters.
+        max_width = max((x1 - x0) * width_limit, (x1 - x0) + 64)
+        max_height = max((y1 - y0) * height_limit, (y1 - y0) + 48)
+        for _ in range(step_limit):
+            changed = False
+            if bottom - top < max_height:
+                if top > 0 and ArtworkPreservingRenderer._looks_like_background(
+                    rgb[top - 1, left:right], background, tolerance
+                ):
+                    top -= 1
+                    changed = True
+                if bottom < page_height and (
+                    ArtworkPreservingRenderer._looks_like_background(
+                        rgb[bottom, left:right], background, tolerance
+                    )
+                ):
+                    bottom += 1
+                    changed = True
+            if right - left < max_width:
+                if left > 0 and ArtworkPreservingRenderer._looks_like_background(
+                    rgb[top:bottom, left - 1], background, tolerance
+                ):
+                    left -= 1
+                    changed = True
+                if right < page_width and (
+                    ArtworkPreservingRenderer._looks_like_background(
+                        rgb[top:bottom, right], background, tolerance
+                    )
+                ):
+                    right += 1
+                    changed = True
+            if not changed:
+                break
+        return [left, top, right, bottom]
+
+    def _typeset_box(
+        self, rgb: np.ndarray, unit: TextUnit, style: TextStyle
+    ) -> list[int]:
+        """The rectangle the translation is typeset into.
+
+        Normally the detector box.  A box too short to hold readable CJK grows
+        into the balloon it belongs to, because a 9px smear is unreadable while
+        slightly larger type inside the same balloon is not.  When even the
+        grown box cannot reach ``MIN_READABLE_FONT`` (a genuinely tiny bubble)
+        the box that renders the largest type wins, so the text at least stops
+        getting smaller than it has to.
+        """
+        x0, y0, x1, y1 = unit.bbox
+        text = _clean(unit.zh)
+        declared = [x0, y0, x1, y1]
+        if not text or style.vertical:
+            return declared
+        font_path = getattr(
+            self, "bold_font_path" if style.bold else "font_path", None
+        ) or getattr(self, "font_path", None)
+        if font_path is None:
+            # Without a font there is nothing to measure with, so the detector
+            # box is the only honest answer (tests override ``_draw`` and leave
+            # the font paths unset).
+            return declared
+        scratch = ImageDraw.Draw(Image.new("L", (8, 8)))
+
+        def largest(box: list[int]) -> int:
+            """Largest font size that fits ``box``, 0 when nothing fits."""
+            bx0, by0, bx1, by1 = box
+            pad_x, pad_y = _text_padding(box)
+            width = max(12, (bx1 - bx0) - 2 * pad_x)
+            height = max(12, (by1 - by0) - 2 * pad_y)
+            fitting = _fit_readable(
+                font_path, scratch, text, width, height, style.font_size, floor=8
+            )
+            return fitting[1] if fitting else 0
+
+        declared_size = largest(declared)
+        if declared_size >= MIN_READABLE_FONT:
+            return declared
+        grown = self._uniform_balloon_box(rgb, declared)
+        best = grown if largest(grown) > declared_size else declared
+        if largest(best) >= MIN_READABLE_FONT:
+            return best
+        # The balloon itself is too small for readable CJK (a 46x33 bubble
+        # holding "来吧，Twilight，").  Shrinking to 8px is what produced the
+        # unreadable smear this fixes, so the last resort is to let the type
+        # overflow the balloon: grow symmetrically around it, staying on the
+        # page, until the floor fits.  Overlapping artwork is a far smaller
+        # defect than text nobody can read.
+        return self._overflow_box(rgb, best, largest)
+
+    def _overflow_box(
+        self, rgb: np.ndarray, box: list[int], largest, limit: float = 2.2
+    ) -> list[int]:
+        """Widen ``box`` symmetrically until readable CJK fits.
+
+        The last resort for a balloon too small to hold ``MIN_READABLE_FONT``.
+        The type is then allowed to spill past the balloon, because an
+        overlapping glyph is legible while an eight-pixel one is not.  Growth is
+        bounded by the page and by ``limit`` times the original size, and the
+        box that yields the largest type wins, so this never returns something
+        smaller than the balloon-only attempt.
+        """
+        page_height, page_width = rgb.shape[:2]
+        x0, y0, x1, y1 = box
+        best = list(box)
+        ceiling = largest(best)
+        grow = 2
+        while ceiling < MIN_READABLE_FONT:
+            if (x1 - x0) + 2 * grow > (x1 - x0) * limit and (y1 - y0) + 2 * grow > (
+                y1 - y0
+            ) * limit:
+                break
+            candidate = [
+                max(0, x0 - grow),
+                max(0, y0 - grow),
+                min(page_width, x1 + grow),
+                min(page_height, y1 + grow),
+            ]
+            if candidate == best:
+                # Pinned against the page edge on every side: no more room.
+                break
+            size = largest(candidate)
+            if size > ceiling:
+                ceiling = size
+                best = candidate
+            grow += 2
+        return best
+
     def _draw(self, image: Image.Image, text: str, box: list[int], style: TextStyle):
         draw = ImageDraw.Draw(image)
         x0, y0, x1, y1 = box
-        pad_x = max(4, round((x1 - x0) * 0.06))
-        pad_y = max(4, round((y1 - y0) * 0.04))
+        pad_x, pad_y = _text_padding(box)
         left, top, right, bottom = x0 + pad_x, y0 + pad_y, x1 - pad_x, y1 - pad_y
         width, height = max(12, right - left), max(12, bottom - top)
         text = _clean(text)
@@ -756,7 +1114,7 @@ class ArtworkPreservingRenderer:
                     min(page.width, cx1 + margin),
                     min(page.height, cy1 + margin),
                 ]
-                rgb, _, _ = self._erase(rgb, bounded)
+                rgb, _, _ = self._erase(rgb, bounded, focus=unit.bbox)
                 continue
             # Grouping several OCR lines is useful for coherent recognition and
             # typesetting, but erasing their union also destroys every drawing
@@ -780,9 +1138,15 @@ class ArtworkPreservingRenderer:
                     rgb, _, _ = erase(rgb, bounded)
         rendered = Image.fromarray(rgb)
         for unit in active:
-            x0, y0, x1, y1 = unit.bbox
-            # Draw into a bounded crop so font antialiasing and stroke pixels
-            # cannot spill one pixel beyond the declared typesetting region.
+            # The detector box is the default typesetting region; a box too
+            # short for readable CJK grows into its balloon instead of dropping
+            # to an unreadable size.  Rendering still happens inside a bounded
+            # crop, so antialiasing and stroke pixels cannot spill past it.
+            # Sample the balloon colour from the untouched page, not from the
+            # already-erased buffer: inpainted pixels no longer describe the
+            # original background and would let the growth run past the border.
+            box = self._typeset_box(original, unit, styles[unit.id])
+            x0, y0, x1, y1 = box
             region = rendered.crop((x0, y0, x1, y1))
             self._draw(region, unit.zh, [0, 0, x1 - x0, y1 - y0], styles[unit.id])
             rendered.paste(region, (x0, y0))

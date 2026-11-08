@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 - 2026-11-08
+
+- Decide which side of the background is text from the detector box alone. The erase region is padded well past the text so stray furigana is reachable, but counting that padding let panel art and highlights outvote six glyphs: a pink sign with black lettering was treated as light-on-dark, the mask selected empty pixels, and the original Spanish stayed under the translation. The padded region is still erased, it just no longer votes.
+- Stop shrinking translations below 12px. A Chinese glyph at 8px is a grey smear at manga resolution, so the typesetting region now grows first: into the balloon it sits on, and past the balloon when the bubble is genuinely too small. Overlapping a little artwork is a far smaller defect than text nobody can read. Across the four sample folders the smallest size went from 8px to 12px and the mean from 14.1px to 15.9px.
+- Wrap Latin words whole and never start a line with closing punctuation. "来得，/Twilight/，" used to break inside "Twilight" and push a lone comma onto a third line; "Twilight，" now stays one unit, trailing marks hang into the margin, and a one-glyph line gives up a size instead of hanging.
+- Tighten line pitch and the box inset so short balloons keep their type: 1.24 to 1.14 of the size, and a 2px inset floor shared by the measuring and drawing code.
+
 ## 0.7.0 - 2026-11-08
 
 - Drop one queued folder from a running batch without cancelling the whole batch: rows that have not started yet carry a dismiss button, confirm before they are removed, and the consumer skips them so the folders after them still run. The counter and the progress bar follow the folders that are still in the queue, so a batch with one folder dropped shows 3 instead of 4.
