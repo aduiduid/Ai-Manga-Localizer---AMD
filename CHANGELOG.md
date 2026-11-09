@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.5 - 2026-11-09
+
+- Do not pay for recall proposals a Latin book can never use.  A declared
+  English source has no recovery path: PaddleMangaOCR.recover_missing
+  returns the page untouched for it, because the reading that confirms a
+  proposal is Japanese-only.  The hybrid pass still asked the vision model
+  for those proposals and built the ink tiles anyway, which cost 13-21% of
+  each page for geometry that could never be written back.  Both are now
+  skipped when the source language is declared en; uto keeps them.
+  Measured on the five-page English reference set: OCR 1314.1 s -> 1027.6 s
+  (-21.8%), whole run 1707.1 s -> 1430.3 s (-16.2%), with all 129 units and
+  every per-unit verdict byte-identical.
+- Batched crop audits were tried and rejected.  Sending four tight crops in
+  one request cut that stage from 328 s to 84 s, but the model changed its
+  own verdict on the same crop: RISE and PUMP came back rtwork one at
+  a time and sfx in a batch of four, so two pages lost their lettering to
+  an erase-and-replace.  No threshold can recover a verdict the model no
+  longer gives, so the audit keeps one crop per request.
+
 ## 0.10.4 - 2026-11-09
 
 - A Latin aside is no longer erased from the translation: the full-page pass

@@ -853,6 +853,70 @@ def test_hybrid_ocr_marks_unconfirmed_claims_instead_of_failing_the_book(tmp_pat
     assert unsafe_semantic_missing(result, True) == []
 
 
+def test_a_declared_latin_source_skips_recall_that_can_never_be_used(tmp_path):
+    """English books have no recovery path, so asking for proposals is waste.
+
+    ``PaddleMangaOCR.recover_missing`` returns the page untouched for a declared
+    ``en`` source because the write-back reading that confirms a proposal is
+    Japanese-only.  A recall proposal still costs 13-21% of the page, so the
+    hybrid pass must not request one.  ``auto`` keeps it: a Latin page under
+    ``auto`` still routes through recovery.
+    """
+    source = tmp_path / "page.png"
+    Image.new("RGB", (1000, 2000), "white").save(source)
+    page = PageOCR(
+        3,
+        source.name,
+        1000,
+        2000,
+        [TextUnit("p003u01", [50, 50, 200, 300], [40, 40, 210, 310], "HELLO", 0.9)],
+    )
+
+    class Geometry:
+        def analyze(self, _path, _page_number):
+            return page
+
+        def recover_missing(self, _path, current, _missing):
+            return current
+
+    class Semantics:
+        def __init__(self):
+            self.find_missing_calls = 0
+
+        def refine(self, _path, current):
+            return current, []
+
+        def find_missing(self, _path, _current):
+            self.find_missing_calls += 1
+            return []
+
+        def filter_covered_missing(self, current, unresolved):
+            return OllamaVisionOCR.filter_covered_missing(current, unresolved)
+
+        def refine_local_crops(self, _path, current):
+            return current
+
+    english = Semantics()
+    service = HybridMangaOCR.__new__(HybridMangaOCR)
+    service.geometry = Geometry()
+    service.semantics = english
+    service.profile = "quality"
+    service.source_language = "en"
+    service.last_missing = []
+    service.analyze(source, 3)
+    assert english.find_missing_calls == 0
+
+    undeclared = Semantics()
+    auto = HybridMangaOCR.__new__(HybridMangaOCR)
+    auto.geometry = Geometry()
+    auto.semantics = undeclared
+    auto.profile = "quality"
+    auto.source_language = "auto"
+    auto.last_missing = []
+    auto.analyze(source, 3)
+    assert undeclared.find_missing_calls == 1
+
+
 def test_manga_ocr_gpu_choice_is_independent_from_paddle():
     assert manga_force_cpu("auto", cuda_available=True) is False
     assert manga_force_cpu("gpu:0", cuda_available=True) is False

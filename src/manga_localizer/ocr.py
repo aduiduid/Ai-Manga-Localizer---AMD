@@ -3169,16 +3169,21 @@ class HybridMangaOCR:
 
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
         page = self.geometry.analyze(image_path, page_number)
+        # A declared Latin source has no recovery path: ``recover_missing``
+        # returns the page untouched for it, because the write-back reading that
+        # confirms a proposal is Japanese-only.  Recall proposals therefore cost
+        # 13-21% of the page and can never become geometry, so do not ask for
+        # them.  ``auto`` keeps them: a Latin page under ``auto`` still routes
+        # through recovery.
+        recalls_region = getattr(self, "source_language", "auto") != "en"
         if page.units:
             page, first_missing = self.semantics.refine(image_path, page)
-            if getattr(self, "profile", "quality") == "quality" and hasattr(
-                self.semantics, "find_missing"
-            ):
-                second_missing = self.semantics.find_missing(image_path, page)
-            elif getattr(self, "profile", "quality") == "quality":
-                page, second_missing = self.semantics.refine(image_path, page)
-            else:
-                second_missing = []
+            second_missing: list[dict] = []
+            if getattr(self, "profile", "quality") == "quality" and recalls_region:
+                if hasattr(self.semantics, "find_missing"):
+                    second_missing = self.semantics.find_missing(image_path, page)
+                else:
+                    page, second_missing = self.semantics.refine(image_path, page)
             self.last_missing = merge_semantic_missing(first_missing, second_missing)
         else:
             # An empty exact-detector result is not evidence that a page has no
@@ -3189,7 +3194,11 @@ class HybridMangaOCR:
         pending_missing = self.semantics.filter_covered_missing(
             page, list(self.last_missing)
         )
-        if page.units and getattr(self, "profile", "quality") == "quality":
+        if (
+            page.units
+            and getattr(self, "profile", "quality") == "quality"
+            and recalls_region
+        ):
             # Proposals and confidence are not the same thing.  llama.cpp
             # proposed two regions on a dense page whose three real sound
             # effects it never mentioned, and a decoder that proposes nothing
