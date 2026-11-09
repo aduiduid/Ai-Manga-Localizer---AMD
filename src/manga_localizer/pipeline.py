@@ -62,7 +62,10 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 11: a vertical bubble is re-read together with an uncovered outer column, so a
 # cached page still carries the truncated "それなのにわざわざ私に" whose third
 # column stayed in Japanese under the Chinese text.
-OCR_CACHE_VERSION = 11
+# 12: the tight-crop audit may no longer demote a unit the full page read as
+# dialogue, so a cached page still holds the Latin aside ("SUPONGO...") that the
+# crop pass labelled artwork_text and left untranslated.
+OCR_CACHE_VERSION = 12
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same

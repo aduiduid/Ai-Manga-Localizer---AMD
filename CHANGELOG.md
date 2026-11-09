@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.4 - 2026-11-09
+
+- A Latin aside is no longer erased from the translation: the full-page pass
+  reads `SUPONGO...` as dialogue, but the tight-crop audit looked at the same
+  words alone, called them artwork lettering and set `skip` -- so the bubble
+  kept its Spanish while the caption beside it was translated.  The page-level
+  verdict is now recorded as `page_dialogue` and the crop audit may not
+  demote it.  `likely_dialogue_text` still only recognises Japanese, so the
+  guard depends on the text agreeing, not on the script.
+- The English regression set keeps its 129 units with no unit lost or added;
+  two artwork skips become real translations (`HOW DO ILOOK?` and `MHM.`),
+  which is the same bug on English pages, not new false positives.
+- `OCR_CACHE_VERSION` goes to 12: pages cached by 0.10.3 still hold the
+  `artwork_text` verdict and would not be re-read otherwise.
+
+
 ## 0.10.3 - 2026-11-09
 
 - Dense Japanese pages keep the small handwritten sound effects that

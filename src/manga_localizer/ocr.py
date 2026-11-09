@@ -2508,6 +2508,20 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
                 source_looks_like_sfx = unit.is_sfx or likely_sfx_text(unit.ja)
                 source_looks_like_dialogue = likely_dialogue_text(unit.ja)
                 if (
+                    unit.special != "cover_title"
+                    and role in {"dialogue", "narration"}
+                    and (agrees or semantic_text_agreement(unit.ja, candidate))
+                ):
+                    # Read the page, not the crop.  ``agrees`` demands Japanese,
+                    # so a Latin aside never satisfies it here; the text match is
+                    # what confirms the page-level pass actually found words and
+                    # not texture.  Either way the page-level dialogue verdict is
+                    # recorded so the tight-crop audit cannot demote the unit to
+                    # ``artwork_text`` later -- that demotion is how a two-word
+                    # Spanish aside ("SUPONGO...") stayed untranslated while the
+                    # caption beside it was translated off the same page.
+                    unit.special = "page_dialogue"
+                if (
                     role in {"artwork", "noise"}
                     and score >= 0.92
                     and role_agrees
@@ -2813,11 +2827,15 @@ role 选择 dialogue（对白）、narration（旁白）、sfx（拟声/效果�
                         unit.skip = False
                         unit.skip_reason = ""
                         unit.special = ""
+                    # ``page_dialogue`` means the full-page pass read words here
+                    # and found them readable; stylised lettering seen alone in a
+                    # tight crop is not evidence strong enough to overrule that.
                     if (
                         confidence >= 0.9
                         and artwork_agrees
                         and not source_looks_like_sfx
                         and (not source_looks_like_dialogue or latin_logo)
+                        and unit.special != "page_dialogue"
                     ):
                         unit.zh = ""
                         unit.skip = True
@@ -2946,6 +2964,11 @@ role 选择 dialogue（对白）、narration（旁白）、sfx（拟声/效果�
                     if not cover_title:
                         unit.special = "semantic_dialogue"
         for unit in page.units:
+            if unit.special == "page_dialogue":
+                # Served its purpose in the crop audit above; the stored page
+                # keeps the same special values it always had.  Cleared before
+                # the branches below so an early ``continue`` cannot leak it.
+                unit.special = ""
             if unit.special == "cover_title":
                 unit.is_sfx = False
                 unit.skip = False
@@ -3212,5 +3235,10 @@ class HybridMangaOCR:
     def refine_cover_title(self, image_path: Path, page: PageOCR) -> PageOCR:
         page = self.geometry.refine_cover_title(image_path, page)
         page, self.last_missing = self.semantics.refine(image_path, page)
+        for unit in page.units:
+            if unit.special == "page_dialogue":
+                # No crop audit follows this path, so the marker has nothing to
+                # guard here; dropping it keeps it out of the stored transcript.
+                unit.special = ""
         page.semantic_missing = list(self.last_missing)
         return page

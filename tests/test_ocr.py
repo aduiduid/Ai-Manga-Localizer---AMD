@@ -1763,6 +1763,106 @@ def test_tight_crop_audit_preserves_artwork_text(monkeypatch, tmp_path):
     assert result.units[0].zh == ""
 
 
+def test_a_page_level_dialogue_verdict_survives_the_tight_crop_audit(
+    monkeypatch, tmp_path
+):
+    """A stylised Latin aside is dialogue on the page, artwork in a crop."""
+
+    source = tmp_path / "spanish-aside.png"
+    Image.new("RGB", (600, 800), "white").save(source)
+    unit = TextUnit(
+        "p001u04",
+        [240, 511, 319, 532],
+        [236, 507, 323, 536],
+        "SUPONGO...",
+        0.93,
+        False,
+        "",
+    )
+    page = PageOCR(1, source.name, 600, 800, [unit])
+    service = OllamaVisionOCR("http://127.0.0.1:11434", "vision")
+    monkeypatch.setattr(
+        service,
+        "_chat",
+        lambda images, prompt, schema: {
+            "regions": [
+                {
+                    "id": unit.id,
+                    "text": "SUPONGO...",
+                    "score": 0.93,
+                    "role": "dialogue",
+                }
+            ],
+            "missing": [],
+        },
+    )
+
+    refined, _missing = service.refine(source, page)
+    assert refined.units[0].special == "page_dialogue"
+    assert refined.units[0].skip is False
+
+    monkeypatch.setattr(
+        service,
+        "_chat",
+        lambda images, prompt, schema: {
+            "items": [
+                {
+                    "id": unit.id,
+                    "text": "SUPONGO...",
+                    "role": "artwork",
+                    "effect_kind": "none",
+                    "confidence": 0.95,
+                }
+            ]
+        },
+    )
+
+    result = service.refine_local_crops(source, refined)
+
+    assert result.units[0].skip is False, "the crop must not protect the aside"
+    assert result.units[0].special == "", "the marker is not stored"
+
+
+def test_the_page_dialogue_marker_never_overwrites_a_cover_title(
+    monkeypatch, tmp_path
+):
+    """The marker is a guard for the crop audit, not a replacement label."""
+
+    source = tmp_path / "cover-page.png"
+    Image.new("RGB", (1200, 2000), "white").save(source)
+    unit = TextUnit(
+        "p001u01",
+        [360, 280, 820, 1760],
+        [340, 260, 840, 1780],
+        "\u50d5\u306b\\n\u52c7\u6c17\u304c\u3042\u3063\u305f\u306a\u3089",
+        0.96,
+        False,
+        "",
+        special="cover_title",
+    )
+    page = PageOCR(1, source.name, 1200, 2000, [unit])
+    service = OllamaVisionOCR("http://127.0.0.1:11434", "vision")
+    monkeypatch.setattr(
+        service,
+        "_chat",
+        lambda images, prompt, schema: {
+            "regions": [
+                {
+                    "id": unit.id,
+                    "text": "\u50d5\u306b\u52c7\u6c17\u304c\u3042\u3063\u305f\u306a\u3089",
+                    "score": 0.96,
+                    "role": "narration",
+                }
+            ],
+            "missing": [],
+        },
+    )
+
+    refined, _missing = service.refine(source, page)
+
+    assert refined.units[0].special == "cover_title"
+
+
 def test_tight_crop_audit_accepts_latin_logo_over_suspicious_japanese_ocr(
     monkeypatch, tmp_path
 ):
