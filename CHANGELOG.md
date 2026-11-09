@@ -3,18 +3,29 @@
 ## 0.10.3 - 2026-11-09
 
 - Dense Japanese pages keep the small handwritten sound effects that
-  llama.cpp never proposes: ink-only tiles are fed to the existing
-  `recover_missing` path, whose Paddle re-detection and MangaOCR read decide
-  what actually becomes a unit.  Three runs on the vertical-text page returned
-  12 units each (Ollama's count) with no lost unit.
+  llama.cpp never proposes: `ink_tile_hints()` scans fixed 3x4 ink tiles and
+  feeds them to the existing `recover_missing` path, whose Paddle
+  re-detection and independent MangaOCR read decide what actually becomes a
+  unit.  Three consecutive runs on the vertical-text page returned 12 units
+  each (Ollama's count) with no lost unit.
 - A decoder whose confidences do not separate text from noise no longer
-  silently vetoes its own proposals: when every score is identical, saturated
-  or negative, the `0.72`/`0.75` gates are skipped and the proposals go to the
-  geometry check instead.
+  silently vetoes its own proposals: `scores_are_informative()` detects
+  all-negative, saturated or flat score sets (llama.cpp answers a constant
+  -0.0127 for every proposal, twice in a row) and skips the `0.72`/`0.75`
+  recall gates, sending the proposals to the geometry check instead.  Ollama's
+  healthy 0.71-1.00 spread keeps its gates.
 - A nested effect is only dropped as a duplicate when the larger unit already
   carries the same text, so `びっ` inside `バアン` survives.
 - The English regression set is unchanged: the same 129 units and 10 artwork
   skips on all five pages.
+- Recommended split stays: English/Western books on llama.cpp (1 GB less VRAM,
+  no resident daemon, 7% faster on the densest page), Japanese vertical text
+  on Ollama (2.9x faster per page).  The recall fix brings llama.cpp to 12/12
+  units on the Japanese page but two of those positions read back as `ハア`
+  and `な`, and a 27x26 px mark stays undetected, so Ollama still wins on
+  accuracy for that script.  Both gaps are recorded as TODO in the README
+  rather than patched by lowering thresholds.
+
 
 ## 0.10.2 - 2026-11-09
 

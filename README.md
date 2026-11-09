@@ -115,7 +115,7 @@ manga-localizer doctor
 | 素材 | 推荐 | 实测依据（同机冷启动、同一流水线、唯一变量是后端） |
 | --- | --- | --- |
 | 英文／西文书 | **llama.cpp** | 端到端 1873.0 s vs 1896.2 s（打平，最密 36 单元页反而快 7%），OCR 显存峰值省 1.0 GB（8133 MB vs 9167 MB），且不留常驻进程 |
-| 日文竖排书 | **Ollama** | 单页 107.8 s vs 313.7 s（快 2.9×），且 llama.cpp 会少认 3/12 个手写拟声单元，score 全部饱和成 1.0 |
+| 日文竖排书 | **Ollama**（0.10.3 之后 llama.cpp 已能追平单元数，但读数与超小字仍差一截） | 单页 107.8 s vs 313.7 s（快 2.9×）。llama.cpp 在 0.10.3 前少认 3/12 个手写拟声单元；补齐后单元数 **12/12 稳定**，但其中两个位置的读数被 Paddle 读成 `ハア`／`な`，且 27×26 px 的那个仍然检不出 |
 
 两条路的几何层完全相同 —— hybrid 流程下逐单元 bbox **IoU 全 1.0、坐标零漂移**，差异只在 VLM 的 `artwork_text`／`sfx` 判定上。**不建议卸载 Ollama**：模型 blob 是两条路共享的硬链接，删掉程序本体只能腾出 41 MB（报告第六节）。
 
@@ -138,9 +138,19 @@ manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01--已汉化" --
 manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01-llama8083" --backend llama --llama-main-port 8083
 ```
 
-本机实测（2026-11-09，英文 5 页 + 日文竖排 1 页，两边都是冷启动）：**英文密集页两条路几乎打平** —— 端到端 1873.0 s vs 1896.2 s，最密的 36 单元页 623.8 s vs 580.1 s；单页耗时由单元数主导（0 单元 ≈ 20 s、36 单元 ≈ 600 s），两组都会出现长尾。llama.cpp 的收益是**显存峰值少 1.0 GB** 且跑完不留进程。**日文竖排页 Ollama 明显更好**（107.8 s vs 313.7 s，多认 3 个单元）。llama.cpp 启动 6.55 s、34/34 层全部 offload、KV 用 q8_0。
+本机实测（2026-11-09，英文 5 页 + 日文竖排 1 页，两边都是冷启动）：**英文密集页两条路几乎打平** —— 端到端 1873.0 s vs 1896.2 s，最密的 36 单元页 623.8 s vs 580.1 s；单页耗时由单元数主导（0 单元 ≈ 20 s、36 单元 ≈ 600 s），两组都会出现长尾。llama.cpp 的收益是**显存峰值少 1.0 GB** 且跑完不留进程。**日文竖排页 Ollama 更好**（107.8 s vs 313.7 s；0.10.3 之前还多认 3 个单元，详见下面那节）。llama.cpp 启动 6.55 s、34/34 层全部 offload、KV 用 q8_0。
 
 > 此前"llama.cpp 每页 43–45 s vs Ollama 偶发 333 s"只在 **4 个单元的小页**上成立，**不可外推到密集页**；以 [`docs/ollama-vs-llamacpp-ab.md`](docs/ollama-vs-llamacpp-ab.md) 的逐页表为准。
+
+### 日文竖排的召回修复（0.10.3）
+
+llama.cpp 在密集竖排页上会把三处手写小字整段漏掉。逐阶段实测后确认差距发生在**提案**阶段，不是去重也不是阈值，为此加了两条互补的机制：
+
+- **`scores_are_informative()`** —— 视觉模型给出的 `score` 有时不带信息量：llama.cpp 对每一处提案都答同一个 `-0.0126953125`（两次运行逐字节相同），而旧的 `0.72`／`0.75` 门限会把这些提案**全部否决**。该函数在「全部 ≤0、饱和（≥0.99 过半）、或极差 <0.05」时判定分数无意义，此时跳过门限、让提案进入几何复核；Ollama 那种 0.71–1.00 的正常分布不受影响。
+- **`ink_tile_hints()`** —— 一个什么都不提的模型会让召回无从下手，所以按固定的 3×4 网格扫描页面，跳过无墨块（`(region<140).mean() < 0.02`）与 detector 已覆盖 ≥55% 的块，把剩下的交给既有的 `recover_missing`。**tile 只是提案**：每一块仍要过 Paddle 重检测和一次独立的 MangaOCR 日文读取才能成为单元，这也正是英文 5 页 129 单元、10 个 artwork 跳过**逐单元零变化**的原因。
+- 另配套修了嵌套去重：小音效只有在大框**已经包含同样文字**时才算重复（`びっ` 落在 `バアン` 里不再被无脑丢掉）。
+
+同一页连跑三次均为 12 单元（Ollama 的数量）、无丢失；代价是那两个位置的读数偏差与那个 27 px 小字，见 TODO。
 
 ## 工作原理
 
@@ -180,6 +190,14 @@ flowchart LR
 - 白描边小字擦除后可能留淡残影，改用 `quality_profile=fast` 或手动框可以规避。
 - `preserve_sfx=True` 时英文音效按原样保留（`Grrrrr`、`poof` 等），不会译成中文拟声词。
 
+## TODO / 后续优化方向（只记录，未实现）
+
+日文竖排页目前单元数已追平 Ollama（12/12），剩下的是**读数精度**与一个**绝对盲区**。这两件事都不是调阈值能解决的，属于另一个量级的改动：
+
+- **27×26 px 的超小字**：`びっ` 这类反应记号在 2× 放大后仍低于检测器的有效尺度 —— 实测所有 padding（0.15／0.5／1.5）与放大倍率（1×／2×／4×）组合都返回 0 个 region。候选方向：给面积低于某阈值的 hint 单独开一条高倍率（4×）路径，并配合按块自适应而不是整页统一放大。
+- **`recover_missing` 的读数偏差**：`バアン` 位置找回来了但被 Paddle 读成 `ハア`，`びっ` 读成 `な`。这是 2× 放大下 Paddle det + MangaOCR 的组合结果，换网格或换几何都改不了。候选方向：让多读一致性投票（`rescue_reading_is_stable` 那套）也覆盖这条路径，或用 VLM 的读数与 MangaOCR 的读数做二次仲裁。
+- **mmproj 的输入分辨率**：尚未验证是否有可调空间，若能提高视觉编码器的有效分辨率，可能同时改善上面两条。需要先在 llama.cpp 侧确认 `--mmproj` 有没有对应参数。
+
 ## 设计与工程约束
 
 - 检测、补画和排字规则只使用图像／文字单元特征，不包含作品标题、对白、页号、文件名或固定坐标。
@@ -198,7 +216,7 @@ uv run --frozen --no-sync manga-localizer ui --no-open
 uv run python scripts/verify_output.py SOURCE OUTPUT OUTPUT/.manga-localizer-work/transcript.json
 ```
 
-本机实测 **217 个测试收集、216 个通过**。唯一未通过的是 `tests/test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel`：`torch.jit.save` 打不开本机中文临时目录（pytest 的 `tmp_path` 落在中文路径下），属环境限制而非代码问题：
+本机实测（0.10.3）**342 个测试收集、除下述 1 个外全部通过**。唯一未通过的是 `tests/test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel`：`torch.jit.save` 打不开本机中文临时目录（pytest 的 `tmp_path` 落在中文路径下），属环境限制而非代码问题：
 
 ```powershell
 python -m pytest tests --deselect tests/test_inpainting.py::test_lama_wrapper_preserves_every_unmasked_pixel
