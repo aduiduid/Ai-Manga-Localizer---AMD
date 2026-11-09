@@ -16,7 +16,7 @@ import pytest
 from PIL import Image
 
 from manga_localizer.llama_client import LlamaChatClient
-from manga_localizer.ocr import LlamaVisionOCR, OllamaVisionOCR
+from manga_localizer.ocr import LlamaVisionOCR, OllamaVisionOCR, PageOCR, TextUnit
 
 
 def _reply(content, finish_reason="stop"):
@@ -161,7 +161,10 @@ def test_the_detection_schema_bounds_the_confidence_score(tmp_path, monkeypatch)
     Every box on a page it had read perfectly came back as ``score: 0.0``,
     which silently turned off the score gates downstream (``prefer_semantic_ocr``
     needs 0.72 and ``_local_crop_is_suspicious`` rejects <= 0.05).  The range has
-    to be stated in the schema for the constrained decoder to honour it.
+    to be stated in the schema for the constrained decoder to honour it.  The bound
+    stays inclusive because that is the form llama.cpp actually enforces:
+    `exclusiveMaximum` is dropped by its schema-to-grammar conversion, which let
+    a decoder answer 354.5 for a confidence.
     """
     source = tmp_path / "page.webp"
     Image.new("RGB", (400, 600), "white").save(source, format="WEBP")
@@ -175,3 +178,43 @@ def test_the_detection_schema_bounds_the_confidence_score(tmp_path, monkeypatch)
     assert score["type"] == "number"
     assert score["minimum"] == 0
     assert score["maximum"] == 1
+
+
+def test_every_vision_schema_shares_one_confidence_range(tmp_path, monkeypatch):
+    """The three passes are separate calls, and a drift between them is silent.
+
+    ``analyze`` fills the detector regions, ``refine`` corrects them and
+    ``find_missing`` proposes new ones; each sends its own schema, so all three
+    read the shared constant rather than restating the range.
+    """
+    source = tmp_path / "page.webp"
+    Image.new("RGB", (600, 800), "white").save(source, format="WEBP")
+    page = PageOCR(
+        1,
+        source.name,
+        600,
+        800,
+        [TextUnit("p001u01", [40, 40, 300, 160], [30, 30, 310, 170], "テスト", 0.9)],
+    )
+    recorder = _Recorder(
+        [
+            _reply(json.dumps({"regions": []})),
+            _reply(json.dumps({"regions": [], "missing": []})),
+            _reply(json.dumps({"missing": []})),
+        ]
+    )
+    service = LlamaVisionOCR("http://127.0.0.1:8082", "DeepSeek-9B")
+    service.client = _client(monkeypatch, recorder)
+    service.analyze(source, 1)
+    service.refine(source, page)
+    service.find_missing(source, page)
+
+    seen = []
+    for entry in recorder.payloads:
+        schema = entry["payload"]["response_format"]["json_schema"]["schema"]
+        for key in ("regions", "missing"):
+            item = schema["properties"].get(key)
+            if item is not None:
+                seen.append(item["items"]["properties"]["score"])
+    assert len(seen) == 4, seen
+    assert all(entry["maximum"] == 1 for entry in seen)

@@ -51,6 +51,37 @@ URL_RE = re.compile(
 )
 UNRESOLVED_SKIP_REASON = "unresolved"
 DEFAULT_OLLAMA_VISION_MODEL = DEFAULT_OLLAMA_MODEL
+# Every vision schema states the same confidence range.  A plain maximum is what
+# llama.cpp's schema-to-grammar conversion actually enforces: ``exclusiveMaximum``
+# is dropped there, which let a decoder answer 354.5 for a confidence once.  So
+# the bound stays inclusive here and the adapters decide separately whether the
+# number means anything (see ``scores_are_informative``).
+SCORE_SCHEMA = {
+    "type": "number",
+    "minimum": 0,
+    "maximum": 1,
+}
+
+
+def scores_are_informative(scores: list[float]) -> bool:
+    """Whether a vision model's confidence numbers separate text from noise.
+
+    llama.cpp's schema-to-grammar decoder answers a flat -0.0127 for every
+    region it proposes -- real dialogue and screentone alike, twice in a row --
+    so a 0.72 threshold there rejects exactly the omissions the recall pass
+    exists to find.  The daemon's 0.71-1.00 spread still carries meaning.  When
+    the numbers carry none, the reading itself has to be the filter.
+    """
+    if not scores:
+        return False
+    if all(score <= 0.0 for score in scores):
+        return False
+    saturated = sum(1 for score in scores if score >= 0.99)
+    if saturated * 2 > len(scores):
+        return False
+    return max(scores) - min(scores) >= 0.05
+
+
 SFX_KINDS = (
     "heartbeat",
     "impact",
@@ -811,6 +842,24 @@ def deduplicate_nested_region_groups(
     return accepted
 
 
+def _effect_text_repeats(child: str, parent: str) -> bool:
+    """Is the smaller effect just a re-read of the larger one?
+
+    Geometry alone is not evidence of duplication.  A reaction mark such as
+    ``びっ`` sits inside the same patch of screentone as a neighbouring
+    ``バアン`` while being a different sound, and dropping it loses a
+    translation the reader expects.  Only text that the larger unit already
+    carries may be discarded.
+    """
+    child_clean = re.sub(r"[\W_]+", "", child)
+    parent_clean = re.sub(r"[\W_]+", "", parent)
+    if not child_clean or not parent_clean:
+        return False
+    if child_clean in parent_clean:
+        return True
+    return difflib.SequenceMatcher(None, child_clean, parent_clean).ratio() >= 0.8
+
+
 def prune_nested_duplicate_units(page: PageOCR) -> PageOCR:
     """Drop smaller effect units recovered inside an existing broad effect."""
     kept: list[TextUnit] = []
@@ -825,6 +874,7 @@ def prune_nested_duplicate_units(page: PageOCR) -> PageOCR:
             )
             * _axis_overlap(unit.bbox[1], unit.bbox[3], parent.bbox[1], parent.bbox[3])
             >= area * 0.85
+            and _effect_text_repeats(unit.ja, parent.ja)
             for parent in kept
         )
         if not nested_effect:
@@ -833,6 +883,70 @@ def prune_nested_duplicate_units(page: PageOCR) -> PageOCR:
     for index, unit in enumerate(page.units, start=1):
         unit.id = f"p{page.page:03d}u{index:02d}"
     return page
+
+
+def ink_tile_hints(
+    page: PageOCR,
+    gray: np.ndarray,
+    *,
+    columns: int = 3,
+    rows: int = 4,
+) -> list[dict]:
+    """Deterministic recall pass over page areas the detector never covered.
+
+    A vision model that proposes nothing leaves ``recover_missing`` with
+    nothing to verify, so small sound effects stay lost however good the
+    recovery is.  llama.cpp does exactly that on a dense vertical page: two
+    runs in a row answered with the same two invented boxes, scores included.
+    Scanning fixed ink-bearing tiles does not guess -- every tile still has to
+    survive Paddle's detector and an independent MangaOCR read before it can
+    become a unit -- and it does not depend on a confidence number the decoder
+    never actually varied.
+    """
+    height, width = gray.shape[:2]
+    if width <= 0 or height <= 0 or not page.units:
+        return []
+    known = [
+        erase_box for unit in page.units for erase_box in (unit.erase_boxes or [unit.bbox])
+    ]
+    tile_w, tile_h = width / columns, height / rows
+    hints: list[dict] = []
+    for row in range(rows):
+        for column in range(columns):
+            box = [
+                round(column * tile_w),
+                round(row * tile_h),
+                round((column + 1) * tile_w),
+                round((row + 1) * tile_h),
+            ]
+            region = gray[box[1] : box[3], box[0] : box[2]]
+            if region.size == 0 or float((region < 140).mean()) < 0.02:
+                continue
+            covered = max(
+                (
+                    _axis_overlap(box[0], box[2], other[0], other[2])
+                    * _axis_overlap(box[1], box[3], other[1], other[3])
+                    / max(1, _area(box))
+                    for other in known
+                ),
+                default=0.0,
+            )
+            if covered >= 0.55:
+                continue
+            hints.append(
+                {
+                    "text": "",
+                    "bbox": [
+                        round(box[0] * 1000 / width),
+                        round(box[1] * 1000 / height),
+                        round(box[2] * 1000 / width),
+                        round(box[3] * 1000 / height),
+                    ],
+                    "score": 0.8,
+                    "is_sfx": True,
+                }
+            )
+    return hints
 
 
 def list_images(folder: Path) -> list[Path]:
@@ -2210,19 +2324,7 @@ class OllamaVisionOCR:
                                 "maxItems": 4,
                             },
                             "text": {"type": "string"},
-                            # llama.cpp turns this schema into a constrained
-                            # decoding grammar, and an unbounded number let it
-                            # answer 0.0 for every box on a page it had read
-                            # perfectly.  That silently disabled the score gates
-                            # downstream (``prefer_semantic_ocr`` needs 0.72,
-                            # ``_local_crop_is_suspicious`` rejects <= 0.05), so
-                            # the range is stated here exactly as refine and
-                            # find_missing already state theirs.
-                            "score": {
-                                "type": "number",
-                                "minimum": 0,
-                                "maximum": 1,
-                            },
+                            "score": SCORE_SCHEMA,
                             "is_sfx": {"type": "boolean"},
                         },
                         "required": ["bbox", "text", "score", "is_sfx"],
@@ -2341,7 +2443,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
             "properties": {
                 "id": {"type": "string", "enum": ids},
                 "text": {"type": "string"},
-                "score": {"type": "number", "minimum": 0, "maximum": 1},
+                "score": SCORE_SCHEMA,
                 "role": {
                     "type": "string",
                     "enum": ["dialogue", "narration", "sfx", "artwork", "noise"],
@@ -2360,7 +2462,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
                     "minItems": 4,
                     "maxItems": 4,
                 },
-                "score": {"type": "number", "minimum": 0, "maximum": 1},
+                "score": SCORE_SCHEMA,
                 "is_sfx": {"type": "boolean"},
             },
             "required": ["text", "bbox", "score", "is_sfx"],
@@ -2436,13 +2538,22 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
                 unit.score,
                 vision_is_sfx,
             )
-        missing = [
+        candidates = [
             item
             for item in payload.get("missing", [])
             if isinstance(item, dict)
             and is_source_text(str(item.get("text", "")), self.source_language)
-            and float(item.get("score", 0.0)) >= 0.75
         ]
+        # Same reason as ``find_missing``: an inarticulate decoder must not be
+        # able to veto the recall pass with a number it never varied.
+        if scores_are_informative(
+            [float(item.get("score", 0.0)) for item in candidates]
+        ):
+            missing = [
+                item for item in candidates if float(item.get("score", 0.0)) >= 0.75
+            ]
+        else:
+            missing = candidates
         return page, missing
 
     def find_missing(self, image_path: Path, page: PageOCR) -> list[dict]:
@@ -2461,7 +2572,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
                     "minItems": 4,
                     "maxItems": 4,
                 },
-                "score": {"type": "number", "minimum": 0, "maximum": 1},
+                "score": SCORE_SCHEMA,
                 "is_sfx": {"type": "boolean"},
             },
             "required": ["text", "bbox", "score", "is_sfx"],
@@ -2481,13 +2592,19 @@ missing.text 必须逐字抄写完整{language_label_zh(self.source_language)}�
             prompt,
             schema,
         )
-        return [
+        candidates = [
             item
             for item in payload.get("missing", [])
             if isinstance(item, dict)
             and is_source_text(str(item.get("text", "")), self.source_language)
-            and float(item.get("score", 0.0)) >= 0.72
         ]
+        # The confidence gate only means something when the decoder's numbers
+        # actually vary (see ``scores_are_informative``).  llama.cpp answered a
+        # flat -0.0127 for both of its proposals here, so keeping the gate would
+        # discard the whole recall pass on that transport.
+        if scores_are_informative([float(item.get("score", 0.0)) for item in candidates]):
+            return [item for item in candidates if float(item.get("score", 0.0)) >= 0.72]
+        return candidates
 
     @staticmethod
     def _local_crop_is_suspicious(unit: TextUnit) -> bool:
@@ -3046,13 +3163,23 @@ class HybridMangaOCR:
             # coordinates still never become erase geometry.
             coarse = self.semantics.analyze(image_path, page_number)
             self.last_missing = self._coarse_page_as_missing(coarse)
-        if self.last_missing:
+        pending_missing = self.semantics.filter_covered_missing(
+            page, list(self.last_missing)
+        )
+        if page.units and getattr(self, "profile", "quality") == "quality":
+            # Proposals and confidence are not the same thing.  llama.cpp
+            # proposed two regions on a dense page whose three real sound
+            # effects it never mentioned, and a decoder that proposes nothing
+            # leaves recovery with nothing to verify.  Scan the uncovered ink
+            # tiles as well: recovery still demands detector geometry plus an
+            # independent MangaOCR read, so a tile is a proposal, never a unit.
+            pending_missing = pending_missing + ink_tile_hints(
+                page, np.asarray(Image.open(image_path).convert("L"))
+            )
+        if pending_missing:
             # Remove exact textual/geometry coverage before invoking expensive
             # regional recovery. Full-page VLMs often repeat one long vertical
             # line as several shorter "missing" fragments.
-            pending_missing = self.semantics.filter_covered_missing(
-                page, list(self.last_missing)
-            )
             page = self.geometry.recover_missing(image_path, page, pending_missing)
             if page.units:
                 # Recovery already requires detector-owned geometry plus an

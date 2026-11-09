@@ -7,6 +7,8 @@ from urllib.error import HTTPError
 import pytest
 from PIL import Image, ImageDraw
 
+import numpy as np
+
 from manga_localizer.ocr import (
     HybridMangaOCR,
     JP_RE,
@@ -26,6 +28,7 @@ from manga_localizer.ocr import (
     deduplicate_nested_region_groups,
     is_latin_page,
     is_source_text,
+    ink_tile_hints,
     language_label,
     language_label_zh,
     likely_sfx_text,
@@ -43,6 +46,7 @@ from manga_localizer.ocr import (
     prune_detached_orthogonal_outliers,
     rescue_reading_is_stable,
     semantic_sfx_classification,
+    scores_are_informative,
     tiny_low_confidence_nontext,
 )
 from manga_localizer.pipeline import unsafe_semantic_missing
@@ -1369,7 +1373,7 @@ def test_recovered_effect_units_drop_nested_duplicate_fragments():
         "p014u02",
         [450, 575, 845, 725],
         [450, 575, 845, 725],
-        "バババ",
+        "バクンッ",
         0.9,
         is_sfx=True,
     )
@@ -1379,6 +1383,36 @@ def test_recovered_effect_units_drop_nested_duplicate_fragments():
 
     assert result.units == [broad]
     assert broad.id == "p014u01"
+
+
+def test_a_different_sound_inside_a_larger_effect_is_not_a_duplicate():
+    """Geometry alone must not delete a translation.
+
+    ``びっ`` sits inside the same patch of screentone as ``バアン`` on the
+    Japanese test page; dropping it as a nested duplicate lost a sound the
+    reader expects for no reason other than overlap.
+    """
+    broad = TextUnit(
+        "p001u01",
+        [228, 616, 268, 689],
+        [228, 616, 268, 689],
+        "バアン",
+        0.9,
+        is_sfx=True,
+    )
+    nested = TextUnit(
+        "p001u02",
+        [231, 660, 268, 689],
+        [231, 660, 268, 689],
+        "びっ",
+        0.9,
+        is_sfx=True,
+    )
+    page = PageOCR(1, "001.png", 1000, 1200, [nested, broad])
+
+    result = prune_nested_duplicate_units(page)
+
+    assert [unit.id for unit in result.units] == ["p001u01", "p001u02"]
 
 
 def test_semantic_sfx_classification_preserves_uncertain_fragments():
@@ -1927,3 +1961,52 @@ def test_exact_crop_recovers_missed_sfx_from_auto_duplicate_skip(monkeypatch, tm
     assert result.units[0].skip is False
     assert result.units[0].skip_reason == ""
     assert result.units[0].special == "sfx:impact"
+
+
+def test_a_decoder_that_never_varies_its_scores_keeps_its_proposals():
+    """llama.cpp answered the same -0.0127 for every region, twice in a row.
+
+    The recall gate exists to throw away low-confidence inventions, but on that
+    transport it threw away the entire pass -- including the two real lines the
+    decoder had just proposed.  A flat or saturated number carries no signal, so
+    the reading itself has to be the filter.
+    """
+    assert scores_are_informative([0.9933, 0.709, 0.95, 0.7722]) is True
+    assert scores_are_informative([-0.0126953125, -0.0126953125]) is False
+    assert scores_are_informative([1.0, 1.0, 1.0, 1.0]) is False
+    assert scores_are_informative([]) is False
+    assert scores_are_informative([0.9, 0.9, 0.9]) is False
+
+
+def test_ink_tiles_propose_only_uncovered_areas_with_ink():
+    """A deterministic pass has to skip the boxes the detector already owns."""
+    covered = TextUnit(
+        "p001u01",
+        [0, 0, 333, 285],
+        [0, 0, 333, 285],
+        "あ",
+        0.9,
+    )
+    page = PageOCR(1, "001.png", 999, 1140, [covered])
+    gray = np.full((1140, 999), 255, dtype=np.uint8)
+    gray[300:560, 350:660] = 30  # ink inside the second tile
+    gray[0:280, 0:330] = 30  # ink the detector already covers
+
+    hints = ink_tile_hints(page, gray, columns=3, rows=4)
+
+    assert len(hints) == 1
+    assert hints[0]["is_sfx"] is True
+    assert hints[0]["bbox"] == [333, 250, 667, 500]
+
+
+def test_ink_tiles_stay_quiet_on_an_empty_page():
+    page = PageOCR(
+        1,
+        "001.png",
+        999,
+        1140,
+        [TextUnit("p001u01", [0, 0, 100, 100], [0, 0, 100, 100], "あ", 0.9)],
+    )
+    gray = np.full((1140, 999), 255, dtype=np.uint8)
+
+    assert ink_tile_hints(page, gray) == []

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.10.3 - 2026-11-09
+
+- Dense Japanese pages keep the small handwritten sound effects that
+  llama.cpp never proposes: ink-only tiles are fed to the existing
+  `recover_missing` path, whose Paddle re-detection and MangaOCR read decide
+  what actually becomes a unit.  Three runs on the vertical-text page returned
+  12 units each (Ollama's count) with no lost unit.
+- A decoder whose confidences do not separate text from noise no longer
+  silently vetoes its own proposals: when every score is identical, saturated
+  or negative, the `0.72`/`0.75` gates are skipped and the proposals go to the
+  geometry check instead.
+- A nested effect is only dropped as a duplicate when the larger unit already
+  carries the same text, so `びっ` inside `バアン` survives.
+- The English regression set is unchanged: the same 129 units and 10 artwork
+  skips on all five pages.
+
 ## 0.10.2 - 2026-11-09
 
 - Recommend one backend per text direction, in the README and on the settings page: English/Western books on llama.cpp (1 GB less VRAM, no resident daemon, 7% faster on the densest page), Japanese vertical text on Ollama (2.9x faster per page, and 3 more units found). The two share the same geometry layer, so switching costs nothing.
