@@ -110,6 +110,15 @@ manga-localizer doctor
 | 翻译 | `inference_backend=ollama` | `inference_backend=llama` |
 | OCR | `ocr_backend=ollama`／`hybrid` | `ocr_backend=llama`（与 hybrid 同一套「几何＋语义」流程，只换视觉传输） |
 
+### 推荐使用策略（2026-11-09 A/B 实测，完整报告见 [`docs/ollama-vs-llamacpp-ab.md`](docs/ollama-vs-llamacpp-ab.md)）
+
+| 素材 | 推荐 | 实测依据（同机冷启动、同一流水线、唯一变量是后端） |
+| --- | --- | --- |
+| 英文／西文书 | **llama.cpp** | 端到端 1873.0 s vs 1896.2 s（打平，最密 36 单元页反而快 7%），OCR 显存峰值省 1.0 GB（8133 MB vs 9167 MB），且不留常驻进程 |
+| 日文竖排书 | **Ollama** | 单页 107.8 s vs 313.7 s（快 2.9×），且 llama.cpp 会少认 3/12 个手写拟声单元，score 全部饱和成 1.0 |
+
+两条路的几何层完全相同 —— hybrid 流程下逐单元 bbox **IoU 全 1.0、坐标零漂移**，差异只在 VLM 的 `artwork_text`／`sfx` 判定上。**不建议卸载 Ollama**：模型 blob 是两条路共享的硬链接，删掉程序本体只能腾出 41 MB（报告第六节）。
+
 **怎么配**：在项目面板或设置页把「推理后端」选成 `llama.cpp 本地推理`，「OCR 后端」选 `llama.cpp 视觉 OCR`，模型名沿用 Ollama 里那两个 tag（默认已填好）。
 
 | 设置 | 默认值 | 说明 |
@@ -129,7 +138,9 @@ manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01--已汉化" --
 manga-localizer run "D:/manga/chapter-01" -o "D:/manga/chapter-01-llama8083" --backend llama --llama-main-port 8083
 ```
 
-本机实测（同一页、质量模式）：llama.cpp 每页 43–45 s 且稳定，Ollama 同页会偶发跑到 333 s；启动 6.55 s，34/34 层全部 offload，KV 用 q8_0。llama.cpp 视觉 OCR 与 Ollama 的整页结果在 hybrid 流程下 **坐标 4/4、文本 4/4 完全一致**。完整对比见 [`CHANGELOG.md`](CHANGELOG.md) 的 0.10.0 一节。
+本机实测（2026-11-09，英文 5 页 + 日文竖排 1 页，两边都是冷启动）：**英文密集页两条路几乎打平** —— 端到端 1873.0 s vs 1896.2 s，最密的 36 单元页 623.8 s vs 580.1 s；单页耗时由单元数主导（0 单元 ≈ 20 s、36 单元 ≈ 600 s），两组都会出现长尾。llama.cpp 的收益是**显存峰值少 1.0 GB** 且跑完不留进程。**日文竖排页 Ollama 明显更好**（107.8 s vs 313.7 s，多认 3 个单元）。llama.cpp 启动 6.55 s、34/34 层全部 offload、KV 用 q8_0。
+
+> 此前"llama.cpp 每页 43–45 s vs Ollama 偶发 333 s"只在 **4 个单元的小页**上成立，**不可外推到密集页**；以 [`docs/ollama-vs-llamacpp-ab.md`](docs/ollama-vs-llamacpp-ab.md) 的逐页表为准。
 
 ## 工作原理
 

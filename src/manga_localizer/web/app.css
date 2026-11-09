@@ -66,3 +66,5 @@
 .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 @media(max-width:900px){.batch-task{grid-template-columns:18px minmax(0,1fr)}.batch-task-progress{grid-column:2}.batch-task-remove{grid-column:2;justify-self:end}}
 .execution-copy small.error{color:var(--danger)}
+.backend-hint{background:#f3efe7;border-style:dashed}
+.backend-hint>p{font-size:11px;line-height:1.7;color:var(--muted)}

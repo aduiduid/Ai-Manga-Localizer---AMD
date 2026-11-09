@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2 - 2026-11-09
+
+- Recommend one backend per text direction, in the README and on the settings page: English/Western books on llama.cpp (1 GB less VRAM, no resident daemon, 7% faster on the densest page), Japanese vertical text on Ollama (2.9x faster per page, and 3 more units found). The two share the same geometry layer, so switching costs nothing.
+- Add the full Ollama vs llama.cpp comparison to `docs/ollama-vs-llamacpp-ab.md`.
+- Correct the README's earlier "43-45 s per page against 333 s": that was measured on a 4-unit page and does not generalise to dense pages, where both backends land in the same 250-620 s band.
+
 ## 0.10.1 - 2026-11-09
 
 - The llama.cpp vision adapter now escalates its wait with the output budget and penalises repeats on the retry, exactly as the Ollama adapter does. A flat 300 s timeout aborted the densest page of the A/B book mid-generation, so the retry that recovers a degenerate page never ran.
