@@ -1638,3 +1638,130 @@ def test_latin_sources_are_not_measured_with_japanese_prose_gates():
     japanese = unit("あ" * 200)
     assert PromptTranslator._valid_translation(japanese, "好" * 140) is False
     assert PromptTranslator._valid_translation(japanese, "好" * 40) is True
+
+
+def test_a_dense_batch_is_split_so_the_answer_cannot_be_cut_off():
+    prompts = []
+
+    class RecordingTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            prompts.append(prompt)
+            ids = translator.re.findall(r"\[(p\d+u\d+)\]", prompt)
+            return "\n".join(f"[{unit_id}] 译文" for unit_id in ids)
+
+    pages = [
+        PageOCR(
+            page,
+            f"{page}.png",
+            100,
+            100,
+            [
+                TextUnit(
+                    f"p{page:03d}u{unit:02d}",
+                    [0, 0, 20, 20],
+                    [0, 0, 20, 20],
+                    "日本",
+                    1.0,
+                )
+                for unit in range(1, 31)
+            ],
+        )
+        for page in range(1, 5)
+    ]
+    RecordingTranslator().translate_pages(pages, chunk_pages=4)
+    # Four pages of thirty units used to travel as one 93-unit request.
+    assert len(prompts) >= 3
+    for prompt in prompts:
+        asked = translator.re.findall(r"\[(p\d+u\d+)\]", prompt)
+        assert len(asked) <= translator.MAX_CHUNK_UNITS
+
+
+def test_a_full_batch_is_allowed_more_than_the_old_sixteen_hundred_tokens():
+    budgets = []
+
+    class BudgetTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            budgets.append(max_new_tokens)
+            ids = translator.re.findall(r"\[(p\d+u\d+)\]", prompt)
+            return "\n".join(f"[{unit_id}] 译文" for unit_id in ids)
+
+    pages = [
+        PageOCR(
+            1,
+            "1.png",
+            100,
+            100,
+            [
+                TextUnit(
+                    f"p001u{unit:02d}",
+                    [0, 0, 20, 20],
+                    [0, 0, 20, 20],
+                    "あ" * 40,
+                    1.0,
+                )
+                for unit in range(1, 41)
+            ],
+        )
+    ]
+    BudgetTranslator().translate_pages(pages, chunk_pages=4)
+    assert budgets[0] == translator.MAX_BATCH_OUTPUT_TOKENS
+
+
+def test_an_effect_answer_may_carry_the_label_the_prompt_asked_for():
+    sigh = TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], "SIGH", 1.0, True)
+    assert PromptTranslator._valid_sfx_translation(sigh, "[拟声词] 叹息") is True
+    assert PromptTranslator._valid_sfx_translation(sigh, "[sfx] 叹息") is True
+    assert PromptTranslator._valid_sfx_translation(sigh, "叹息叹息叹息") is False
+    assert PromptTranslator._valid_sfx_translation(sigh, "你没事吧？") is False
+
+
+def test_two_laughs_may_share_one_translation_without_being_a_leak():
+    first = TextUnit("p001u05", [0, 0, 20, 20], [0, 0, 20, 20], "HAH! AH!", 1.0)
+    second = TextUnit("p001u10", [0, 0, 20, 20], [0, 0, 20, 20], "HAH! AHI", 1.0)
+    sources = {"哈！啊！": {first.ja, second.ja}}
+    assert translator.short_effect_source(first.ja) is True
+    assert translator.duplicate_context_leak(first, "哈！啊！", sources) is False
+    filler = TextUnit(
+        "p001u11", [0, 0, 20, 20], [0, 0, 20, 20], "これは長い台詞です", 1.0
+    )
+    other = TextUnit(
+        "p001u12", [0, 0, 20, 20], [0, 0, 20, 20], "まるで別の台詞です", 1.0
+    )
+    leak_sources = {"完全一样的译文": {filler.ja, other.ja}}
+    assert translator.duplicate_context_leak(filler, "完全一样的译文", leak_sources) is True
+
+def test_an_echoed_context_is_retried_without_it():
+    prompts = []
+    fallbacks = []
+
+    class EchoingTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            prompts.append(prompt)
+            if "第1页：" in prompt:  # a story-context row, not a source row
+                # The 1.8B candidate hands a long story context back verbatim.
+                return prompt.split("【任务】")[0]
+            ids = translator.re.findall(r"\[(p\d+u\d+)\]", prompt)
+            return "\n".join(f"[{unit_id}] 译文" for unit_id in ids)
+
+        def _translate_one(self, unit, context, terms, glossary=None):
+            fallbacks.append(unit.id)
+            return "单条回退"
+
+    pages = [
+        PageOCR(
+            page,
+            f"{page}.png",
+            100,
+            100,
+            [TextUnit(f"p00{page}u01", [0, 0, 20, 20], [0, 0, 20, 20], "日本", 1.0)],
+        )
+        for page in (1, 2)
+    ]
+    EchoingTranslator().translate_pages(pages, chunk_pages=1)
+    # The echoed answer is retried once without the story context.
+    assert len(prompts) == 3
+    assert "前文：\n无" in prompts[2]
+    assert fallbacks == []
+    assert pages[1].units[0].zh == "译文"

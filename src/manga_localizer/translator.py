@@ -26,6 +26,15 @@ from .sfx import lookup_sfx
 
 
 LINE_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(.+?)\s*$")
+# A model may prefix its answer with the label the prompt asked for
+# (``[拟声词]``, ``[sfx]``).  The label is instruction, not translation, so it
+# must not be counted as output length.
+BRACKET_LABEL_RE = re.compile(r"[\[【][^\]】\n]{0,12}[\]】]")
+# One batch prompt carries every unit of up to ``chunk_pages`` pages; the four
+# densest pages of a test book reached 93 units and the answer was cut off
+# mid-list, sending the tail into per-line fallbacks.
+MAX_CHUNK_UNITS = 40
+MAX_BATCH_OUTPUT_TOKENS = 4_096
 SPLIT_ID_RE = re.compile(
     r"^\s*(?:\[id\]\s*)?\[?(p\d+u\d+)\]?\s*(.*?)\s*$", re.IGNORECASE
 )
@@ -138,6 +147,35 @@ def latin_only_source(text: str) -> bool:
         and not KANA_RE.search(text)
         and not KANJI_RE.search(text)
     )
+
+
+def short_effect_source(text: str) -> bool:
+    """True for a short cry that two lines may legitimately translate alike.
+
+    ``HAH! AH!`` and ``HAH! AHI`` both become 「哈！啊！」.  The batch duplicate
+    guard reads a shared translation as one line leaking into the next and threw
+    both away, sending correct effects down the single-line fallback.  Such a
+    cry carries no context that could leak, so it is exempt from that guard.
+    """
+    stripped = text.strip()
+    if not stripped or len(stripped) > 10 or KANJI_RE.search(stripped):
+        return False
+    return latin_only_source(stripped) or bool(INTERJECTION_HINT_RE.search(stripped))
+
+
+def duplicate_context_leak(
+    unit: TextUnit, candidate: str, candidate_sources: dict[str, set[str]]
+) -> bool:
+    """Did one batch answer reuse a translation across unrelated source lines?
+
+    A short cry is exempt: two laughs translating alike is the correct answer,
+    not a leak (see ``short_effect_source``).
+    """
+    if len(candidate) < 4:
+        return False
+    if short_effect_source(unit.ja):
+        return False
+    return len(candidate_sources.get(candidate.strip(), set())) > 1
 
 
 def source_language_label(pages: Iterable[PageOCR]) -> str:
@@ -469,7 +507,13 @@ class PromptTranslator:
     def _valid_sfx_translation(unit: TextUnit, candidate: str) -> bool:
         """Reject contextual dialogue hallucinated into a confirmed effect."""
         source = re.sub(r"[^ぁ-ゖァ-ヺーA-Za-z]", "", unit.ja)
-        proposed = re.sub(r"[^\u3400-\u9fffA-Za-z0-9]", "", candidate)
+        # The prompt tells the model to answer ``[拟声词] 叹息`` for effects, so the
+        # label has to come off before the length test: counting it made every
+        # short effect one character "too long" (``SIGH`` -> budget 4, answer
+        # ``拟声词叹息`` = 5) and dropped a correct translation.
+        proposed = re.sub(
+            r"[^\u3400-\u9fffA-Za-z0-9]", "", BRACKET_LABEL_RE.sub(" ", candidate)
+        )
         dialogue_leak = bool(
             re.search(
                 r"[?？]|(?:我|你|他|她|它|我们|你们|他们|她们|什么|莫非|"
@@ -947,6 +991,22 @@ class PromptTranslator:
                 resolved[name] = selected
         return resolved
 
+    def _batch_prompt(self, context: str, terms: str, source_rows: list[str]) -> str:
+        """Build one contextual batch prompt."""
+        return f"""【背景信息】
+这是按页连续阅读的{self.source_language}漫画。结合前文修正明显 OCR 错字，人物称呼和语气必须前后一致。
+固定译名：{terms}
+前文：
+{context}
+
+【任务】
+逐条翻译为{self.target_language}，风格必须是：{self.translation_register}，适合直接放进漫画气泡。
+标记为[拟声词]的项目要译成简短自然的中文拟声词，按画面语境保留节奏、重复和强弱；不得机械音译成无意义汉字。
+以自然中文和故事连贯为先；只补足当前原文语法成立所必需的省略主语，不得添加原文没有的情绪、评价、动作或口头禅。上下文不得补写进当前行，相邻单元不要重复同一信息。
+严格保留每行开头的[id]，一条输入对应一条输出，不合并、不遗漏。只输出[id]和译文。
+
+{chr(10).join(source_rows)}"""
+
     def translate_pages(
         self,
         pages: list[PageOCR],
@@ -972,8 +1032,27 @@ class PromptTranslator:
             "；".join(f"{source}译为{target}" for source, target in glossary.items())
             or "无"
         )
-        for start in range(0, len(pages), chunk_pages):
-            chunk = pages[start : start + chunk_pages]
+        start = 0
+        while start < len(pages):
+            # Keep a batch small enough that the answer survives.  The output
+            # budget below covers the answer, but a 93-unit prompt was cut off
+            # mid-list at the old 1600-token ceiling and its tail fell into
+            # per-line fallbacks, so the unit count is capped as well.
+            end = start
+            queued = 0
+            while end < len(pages) and end - start < chunk_pages:
+                page_units = sum(
+                    1
+                    for unit in pages[end].units
+                    if self._needs_translation(unit, preserve_sfx)
+                )
+                if end > start and queued + page_units > MAX_CHUNK_UNITS:
+                    break
+                queued += page_units
+                end += 1
+            chunk_start = start
+            chunk = pages[start:end]
+            start = end
             units = [
                 unit
                 for page in chunk
@@ -982,7 +1061,7 @@ class PromptTranslator:
             ]
             if not units:
                 if progress:
-                    progress(min(start + len(chunk), len(pages)), len(pages))
+                    progress(start, len(pages))
                 continue
             source_rows = []
             for page in chunk:
@@ -993,26 +1072,39 @@ class PromptTranslator:
                     if self._needs_translation(unit, preserve_sfx)
                 )
             previous = (
-                pages[max(0, start - context_pages) : start] if story_context else []
+                pages[max(0, chunk_start - context_pages) : chunk_start]
+                if story_context
+                else []
             )
-            prompt = f"""【背景信息】
-这是按页连续阅读的{self.source_language}漫画。结合前文修正明显 OCR 错字，人物称呼和语气必须前后一致。
-固定译名：{terms}
-前文：
-{self._page_text(previous) or "无"}
-
-【任务】
-逐条翻译为{self.target_language}，风格必须是：{self.translation_register}，适合直接放进漫画气泡。
-标记为[拟声词]的项目要译成简短自然的中文拟声词，按画面语境保留节奏、重复和强弱；不得机械音译成无意义汉字。
-以自然中文和故事连贯为先；只补足当前原文语法成立所必需的省略主语，不得添加原文没有的情绪、评价、动作或口头禅。上下文不得补写进当前行，相邻单元不要重复同一信息。
-严格保留每行开头的[id]，一条输入对应一条输出，不合并、不遗漏。只输出[id]和译文。
-
-{chr(10).join(source_rows)}"""
-            token_budget = min(1600, max(256, sum(len(unit.ja) for unit in units) * 3))
+            prompt = self._batch_prompt(
+                self._page_text(previous) or "无", terms, source_rows
+            )
+            # Three tokens per source character, up to 4096.  The old 1600
+            # ceiling truncated a 93-unit answer mid-list (all its remaining
+            # lines then took the single-line fallback, and the candidate pass
+            # returned 70 empty translations from the same cut).
+            token_budget = min(
+                MAX_BATCH_OUTPUT_TOKENS,
+                max(512, sum(len(unit.ja) for unit in units) * 3),
+            )
             translated = self._parse_indexed_translations(
                 self._generate(prompt, max_new_tokens=token_budget),
                 (unit.id for unit in units),
             )
+            if not translated and previous:
+                # The 1.8B candidate answers a long story-context prompt by
+                # echoing it back verbatim often enough to matter: one 36-unit
+                # batch came back as the context section itself, and each of
+                # its lines then paid its own model call.  The context is
+                # optional enrichment, so a second attempt without it is
+                # cheap and keeps the answer format the parser needs.
+                translated = self._parse_indexed_translations(
+                    self._generate(
+                        self._batch_prompt("无", terms, source_rows),
+                        max_new_tokens=token_budget,
+                    ),
+                    (unit.id for unit in units),
+                )
             candidate_sources: dict[str, set[str]] = {}
             for unit in units:
                 candidate = translated.get(unit.id, "").strip()
@@ -1020,13 +1112,9 @@ class PromptTranslator:
             for unit in units:
                 candidate = translated.get(unit.id, "")
                 unit.translation_attempts.append(candidate)
-                duplicate_context_leak = (
-                    len(candidate) >= 4
-                    and len(candidate_sources.get(candidate.strip(), set())) > 1
-                )
                 if (
                     self._candidate_is_acceptable(unit, candidate, glossary)
-                    and not duplicate_context_leak
+                    and not duplicate_context_leak(unit, candidate, candidate_sources)
                 ):
                     unit.zh = candidate
                 else:
@@ -1034,7 +1122,7 @@ class PromptTranslator:
                         unit, previous + chunk, terms, glossary
                     )
             if progress:
-                progress(min(start + len(chunk), len(pages)), len(pages))
+                progress(start, len(pages))
 
     def _translate_one(
         self,
@@ -1480,13 +1568,12 @@ class OllamaTranslator(PromptTranslator):
                 candidate = reviewed.get(unit.id, "").strip()
                 if candidate:
                     unit.translation_attempts.append(candidate)
-                duplicate_context_leak = (
-                    len(candidate) >= 4
-                    and len(candidate_sources.get(candidate, set())) > 1
+                duplicate_leak = duplicate_context_leak(
+                    unit, candidate, candidate_sources
                 )
                 if (
                     self._candidate_is_acceptable(unit, candidate, glossary)
-                    and not duplicate_context_leak
+                    and not duplicate_leak
                 ):
                     unit.zh = candidate
             if progress:

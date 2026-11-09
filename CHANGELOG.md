@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.10.6 - 2026-11-09
+
+- One dense batch no longer loses its tail.  The batch prompt covers up to
+  four pages, and the four densest pages of the English reference set held
+  93 units.  Its answer was capped at 1600 tokens, so the reply stopped
+  mid-list: six units fell into the single-line fallback on the first pass,
+  and the independent candidate pass returned seventy empty translations
+  from the same cut.  The budget now scales with the source (three tokens
+  per character, up to 4096) and a chunk stops at 40 units, which keeps the
+  request small enough that the answer always fits.
+- The [拟声词] label the prompt asks for is no longer counted as output.
+  ``_valid_sfx_translation`` measured the answer's length before stripping
+  the bracket label, so a correct ``[拟声词] 叹息`` for ``SIGH`` counted five
+  characters against a budget of four and was thrown away.
+- An echoed story context is retried without it.  The 1.8B candidate
+  answers a long context prompt by repeating the context back verbatim
+  often enough to matter: one 36-unit batch came back as the context
+  section itself, so none of its ids parsed and every line paid its own
+  model call.  When a batch answer parses to nothing and a story context
+  was supplied, the batch is asked once more without it.
+- Two short cries may now share one translation.  ``HAH! AH!`` and
+  ``HAH! AHI`` both read 「哈！啊！」; the duplicate guard treated a shared
+  answer as one line leaking into the next and rejected both.  A source of
+  ten characters or fewer with no kanji carries no context to leak.
 ## 0.10.5 - 2026-11-09
 
 - Do not pay for recall proposals a Latin book can never use.  A declared
@@ -8,13 +32,13 @@
   proposal is Japanese-only.  The hybrid pass still asked the vision model
   for those proposals and built the ink tiles anyway, which cost 13-21% of
   each page for geometry that could never be written back.  Both are now
-  skipped when the source language is declared en; uto keeps them.
+  skipped when the source language is declared en; auto keeps them.
   Measured on the five-page English reference set: OCR 1314.1 s -> 1027.6 s
   (-21.8%), whole run 1707.1 s -> 1430.3 s (-16.2%), with all 129 units and
   every per-unit verdict byte-identical.
 - Batched crop audits were tried and rejected.  Sending four tight crops in
   one request cut that stage from 328 s to 84 s, but the model changed its
-  own verdict on the same crop: RISE and PUMP came back rtwork one at
+  own verdict on the same crop: RISE and PUMP came back artwork one at
   a time and sfx in a batch of four, so two pages lost their lettering to
   an erase-and-replace.  No threshold can recover a verdict the model no
   longer gives, so the audit keeps one crop per request.
