@@ -50,6 +50,14 @@ DEFAULT_CONTEXT_TOKENS = 65_536
 START_TIMEOUT_S = 300.0
 STOP_TIMEOUT_S = 15.0
 
+# How long one server process may keep serving before it is replaced.
+# This build leaks -- Windows has flagged it (RADAR_PRE_LEAK_64) -- and
+# one process died of heap corruption mid-request after 93 minutes of a
+# long book.  A restart costs a few seconds per book and buys a fresh
+# heap, which is the only lever available against a crash inside the
+# server.
+SERVER_MAX_UPTIME_S = 1_800.0
+
 
 class LlamaServerError(RuntimeError):
     """A server could not be started, or was not there when it was needed."""
@@ -75,6 +83,10 @@ class LlamaSlot:
     context: int
     weights: Path
     projector: Path | None = None
+    # ``time.monotonic()`` when this process started, or 0.0 for a server
+    # that was already running when the app looked: its age is not ours
+    # to guess.
+    started_at: float = 0.0
 
 
 def _manifest_blob(blobs: Path, digest: str) -> Path | None:
@@ -416,6 +428,7 @@ class LlamaServerManager:
                 context=context,
                 weights=weights,
                 projector=projector,
+                started_at=time.monotonic(),
             )
             self._slots[role] = (slot, process)
             try:
@@ -487,6 +500,29 @@ class LlamaServerManager:
                 live = isinstance(process, _StubProcess) or process.poll() is None
                 if live and slot.alias == alias:
                     return slot
+        return None
+
+    def reusable_slot(self, tag: str) -> LlamaSlot | None:
+        """A live slot for ``tag`` that is young enough to keep serving.
+
+        A server that has been up past ``SERVER_MAX_UPTIME_S`` is
+        replaced even though it still answers: this build's heap is what
+        fails on a long book, so the age of the process is the one thing
+        worth acting on before it does.  A server someone else started
+        has no age we can trust and is adopted as before.
+        """
+        slot = self.slot_for_tag(tag)
+        if slot is None:
+            return None
+        age = time.monotonic() - slot.started_at if slot.started_at else 0.0
+        if age <= SERVER_MAX_UPTIME_S:
+            return slot
+        with self._lock:
+            self._stop_locked(slot.role)
+            self._notes[slot.role] = (
+                f"{slot.role} 已连续运行 {int(age / 60)} 分钟，"
+                f"为避免长驻退化已重启"
+            )
         return None
 
     def port_notes(self) -> dict[str, str]:
@@ -745,7 +781,7 @@ def open_slots(manager: LlamaServerManager, settings, emit=None) -> dict[str, Ll
             "请先在模型页下载该模型，或把设置里的模型名改成已下载的模型。"
         )
     slots: dict[str, LlamaSlot] = {}
-    existing = manager.slot_for_tag(editor_tag)
+    existing = manager.reusable_slot(editor_tag)
     if existing is not None:
         # Vision OCR already loaded this very model for the OCR pass.  Starting
         # a second copy would put two 7 GB weights on one GPU for no gain, so
@@ -818,7 +854,7 @@ def open_vision_slot(manager: LlamaServerManager, settings, emit=None) -> LlamaS
             f"模型 {tag} 没有 mmproj 多模态投影器，无法用 llama.cpp 做视觉 OCR。"
             "请换一个带视觉能力的模型，或把 OCR 后端改回 hybrid / builtin。"
         )
-    existing = manager.slot_for_tag(tag)
+    existing = manager.reusable_slot(tag)
     if existing is not None:
         # Already loaded for this very tag; a second copy of a 7 GB weight set
         # would not fit beside the first one.
@@ -842,6 +878,7 @@ __all__ = [
     "DEFAULT_REVIEW_PORT",
     "DEFAULT_VISION_PORT",
     "DEFAULT_CONTEXT_TOKENS",
+    "SERVER_MAX_UPTIME_S",
     "LlamaServerError",
     "LlamaServerManager",
     "LlamaSlot",

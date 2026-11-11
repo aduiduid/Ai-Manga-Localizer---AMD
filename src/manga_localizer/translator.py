@@ -276,6 +276,15 @@ class InferenceConnectionError(RuntimeError):
     pass
 
 
+class InferenceUnreachable(InferenceConnectionError):
+    """The server could not be reached: it is gone, or the link dropped.
+
+    Kept apart from the plain connection error because a process that
+    died under a request is worth restarting, while a server that
+    answered "400 Bad Request" is not.
+    """
+
+
 class DegenerateReply(RuntimeError):
     """The model answered with one repeated character instead of text."""
 
@@ -315,7 +324,7 @@ def _json_request(
             f"推理服务返回 HTTP {exc.code}: {detail or exc.reason}"
         ) from exc
     except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        raise InferenceConnectionError(f"无法连接推理服务 {url}: {exc}") from exc
+        raise InferenceUnreachable(f"无法连接推理服务 {url}: {exc}") from exc
 
 
 class PromptTranslator:

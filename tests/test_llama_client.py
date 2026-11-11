@@ -15,7 +15,11 @@ from PIL import Image
 
 from manga_localizer import llama_client
 from manga_localizer.llama_client import LlamaChatClient, png_bytes
-from manga_localizer.translator import DegenerateReply, InferenceConnectionError
+from manga_localizer.translator import (
+    DegenerateReply,
+    InferenceConnectionError,
+    InferenceUnreachable,
+)
 
 
 def _reply(content, finish_reason="stop"):
@@ -235,3 +239,65 @@ def test_the_translation_wait_is_capped(monkeypatch):
     client = _client(monkeypatch, recorder)
     client.chat("提示", max_tokens=4_096, timeout=9_999)
     assert recorder.payloads[0]["timeout"] == llama_client.MAX_REQUEST_WAIT_S
+
+
+def test_a_server_that_died_under_a_request_is_restarted_and_the_request_repeated(
+    monkeypatch,
+):
+    replies = [InferenceUnreachable("无法连接推理服务: [WinError 10054]"), _reply("译文")]
+
+    def flaky(url, payload=None, api_key="", timeout=180):
+        replies_left = replies.pop(0)
+        if isinstance(replies_left, Exception):
+            raise replies_left
+        return replies_left
+
+    monkeypatch.setattr("manga_localizer.llama_client._json_request", flaky)
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        llama_client,
+        "restart_llama_server",
+        lambda base_url: restarts.append(base_url) or "http://127.0.0.1:8080",
+    )
+    client = LlamaChatClient("http://127.0.0.1:8080", "m")
+    # A process that dies mid-request is replaced and the same request is sent
+    # again: one crash must not cost the book.
+    assert client.chat("提示", max_tokens=96) == "译文"
+    assert len(restarts) == 1
+    assert replies == []
+
+
+def test_a_dead_server_we_cannot_restart_is_reported_without_a_second_request(
+    monkeypatch,
+):
+    seen: list[int] = []
+
+    def dead(url, payload=None, api_key="", timeout=180):
+        seen.append(1)
+        raise InferenceUnreachable("无法连接推理服务: [WinError 10054]")
+
+    monkeypatch.setattr("manga_localizer.llama_client._json_request", dead)
+    monkeypatch.setattr(llama_client, "restart_llama_server", lambda base_url: None)
+    client = LlamaChatClient("http://127.0.0.1:8080", "m")
+    with pytest.raises(InferenceConnectionError):
+        client.chat("提示", max_tokens=96)
+    assert len(seen) == 1
+
+
+def test_the_restart_budget_is_finite(monkeypatch):
+    def dead(url, payload=None, api_key="", timeout=180):
+        raise InferenceUnreachable("无法连接推理服务: [WinError 10054]")
+
+    monkeypatch.setattr("manga_localizer.llama_client._json_request", dead)
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        llama_client,
+        "restart_llama_server",
+        lambda base_url: restarts.append(base_url) or "http://127.0.0.1:8080",
+    )
+    client = LlamaChatClient("http://127.0.0.1:8080", "m")
+    # A book that kills its server on every page must stop asking, not loop.
+    for _ in range(llama_client.MAX_RESTARTS + 3):
+        with pytest.raises(InferenceConnectionError):
+            client.chat("提示", max_tokens=96)
+    assert len(restarts) == llama_client.MAX_RESTARTS

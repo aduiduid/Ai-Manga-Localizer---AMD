@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.8 - 2026-11-11
+
+- A crashed llama-server is restarted under the request instead of failing the
+  book: Windows logged a heap corruption (`0xc0000374` in `ntdll.dll`) that
+  killed one process mid-request after 93 minutes, and the job died with it.
+  Any unreachable server is now replaced and the same request is sent once more,
+  within a finite restart budget.
+- A run that dies late resumes its own work.  `translation-draft.json` used to
+  be written and never read; the next run now loads it and only translates the
+  units still missing, so re-running the 152-page book that failed at 18:41
+  reused 1108 of its 1111 lines and finished the remaining 3 in 19 s.
+- Servers are replaced after 30 minutes of continuous uptime.  This build leaks
+  (Windows flags `llama-server.exe` with `RADAR_PRE_LEAK_64`), and the age of
+  the process is the only warning available before its heap gives way.
+
 ## 0.10.7 - 2026-11-11
 
 - A decoder that collapses into one repeated glyph no longer stalls a

@@ -171,13 +171,74 @@ class LocalizerPipeline:
         source: Path,
         pages: list[PageOCR],
         glossary: dict[str, str] | None = None,
+        target_language: str = "",
     ) -> None:
-        payload = {"source": str(source), "pages": [page.to_dict() for page in pages]}
+        payload = {
+            "source": str(source),
+            # Recorded so a later run can tell whether these lines are still
+            # wanted: resuming a draft written for another target language
+            # would leave half a book in the wrong one.
+            "target_language": target_language,
+            "pages": [page.to_dict() for page in pages],
+        }
         if glossary:
             payload["glossary"] = glossary
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+    @staticmethod
+    def _resume_translations(
+        work: Path, pages: list[PageOCR], target_language: str = ""
+    ) -> int:
+        """Reuse the lines a previous run already wrote into the draft.
+
+        A long book that dies late -- a crashed server, a cancellation --
+        leaves its OCR cache and its draft on disk, and the translation it
+        already paid for is worth more than the run.  Geometry still comes
+        from this run's OCR pages; only the text is carried over, and only
+        when the draft agrees on the page file and the unit id.  The
+        translator re-translates anything that no longer satisfies its
+        contract, so a stale or partial draft costs a wasted read at most.
+        """
+        path = work / "translation-draft.json"
+        if not path.is_file():
+            return 0
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        declared = str(payload.get("target_language") or "")
+        if declared and target_language and declared != target_language:
+            return 0
+        rows = payload.get("pages")
+        if not isinstance(rows, list):
+            return 0
+        saved: dict[str, dict[str, str]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("file") or "")
+            if not name:
+                continue
+            saved[name] = {
+                str(unit.get("id") or ""): str(unit.get("zh") or "")
+                for unit in row.get("units") or []
+                if isinstance(unit, dict)
+            }
+        if not saved:
+            return 0
+        reused = 0
+        for page in pages:
+            lines = saved.get(page.file)
+            if not lines:
+                continue
+            for unit in page.units:
+                text = lines.get(unit.id) or ""
+                if text and not unit.zh:
+                    unit.zh = text
+                    reused += 1
+        return reused
 
     @staticmethod
     def _load_cached_ocr(
@@ -391,6 +452,17 @@ class LocalizerPipeline:
                     )
                 self._emit(emit, "ocr", index, total, f"已识别 {image_path.name}")
 
+        resumed = self._resume_translations(work, pages, request.target_language)
+        if resumed:
+            # The draft of an interrupted run is worth more than the run.
+            self._emit(
+                emit,
+                "translate",
+                0,
+                total,
+                f"续用上次未完成的草稿：{resumed} 处译文",
+            )
+
         needs_translation = any(
             not unit.skip
             and not (request.preserve_sfx and unit.is_sfx)
@@ -492,10 +564,15 @@ class LocalizerPipeline:
                     source,
                     pages,
                     translator.resolved_glossary,
+                    request.target_language,
                 )
         else:
             self._write_transcript(
-                work / "translation-draft.json", source, pages, glossary
+                work / "translation-draft.json",
+                source,
+                pages,
+                glossary,
+                request.target_language,
             )
         if translator is not None:
             summarise = getattr(translator, "collapsed_summary", None)

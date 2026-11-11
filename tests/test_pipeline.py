@@ -369,3 +369,76 @@ def test_unboxed_dialogue_fails_but_preserved_sfx_is_safe():
         "私",
         "その",
     ]
+
+
+def test_a_draft_from_an_interrupted_run_is_reused(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "translation-draft.json").write_text(
+        json.dumps(
+            {
+                "source": "src",
+                "target_language": "简体中文",
+                "pages": [
+                    {
+                        "page": 1,
+                        "file": "001.jpg",
+                        "units": [
+                            {"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "FINALLY", "zh": "终于"},
+                            {"id": "p001u02", "bbox": [40, 2, 70, 40], "ja": "THANKS", "zh": "谢谢"},
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [
+                {"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "FINALLY", "zh": ""},
+                {"id": "p001u02", "bbox": [40, 2, 70, 40], "ja": "THANKS", "zh": ""},
+            ],
+        }
+    )
+    # The geometry of this run wins; only the text is carried over.
+    assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 2
+    assert [unit.zh for unit in page.units] == ["终于", "谢谢"]
+
+
+def test_a_draft_for_another_target_language_is_ignored(tmp_path):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "translation-draft.json").write_text(
+        json.dumps(
+            {
+                "target_language": "繁體中文",
+                "pages": [
+                    {
+                        "page": 1,
+                        "file": "001.jpg",
+                        "units": [{"id": "p001u01", "zh": "終於"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [{"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "FINALLY", "zh": ""}],
+        }
+    )
+    # Half a book in the wrong language is worse than re-translating it.
+    assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
+    assert page.units[0].zh == ""

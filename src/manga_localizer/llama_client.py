@@ -29,6 +29,7 @@ from .llama_server import llama_timeout, restart_llama_server
 from .translator import (
     DegenerateReply,
     InferenceConnectionError,
+    InferenceUnreachable,
     _endpoint,
     _json_request,
     degenerate_text,
@@ -48,6 +49,10 @@ REPEAT_LAST_N = 64
 # A translation reply is two lines at most: a server that has not answered in
 # five minutes is not about to, whatever the output budget says.
 MAX_REQUEST_WAIT_S = 300
+# A crashed or collapsed process is restarted, but not without limit: a
+# book that kills its server every few pages needs a person, not another
+# attempt.
+MAX_RESTARTS = 5
 
 
 class LlamaChatClient:
@@ -68,9 +73,10 @@ class LlamaChatClient:
         self.context_tokens = context_tokens
         self.max_output_tokens = max_output_tokens
         self.loaded = False
-        # One server restart per client after a collapsed generation; repeating
-        # it would stall the run for as long as the collapse lasts.
-        self.healed = False
+        # How many times this client has stood its server back up.  A
+        # collapse or a dead process is worth one restart, but a book that
+        # kills its server again and again is not a retry problem.
+        self.restarts = 0
 
     # -- transport ---------------------------------------------------------
     def _url(self) -> str:
@@ -104,22 +110,38 @@ class LlamaChatClient:
         """The wait for a translation request, never longer than the cap."""
         return min(MAX_REQUEST_WAIT_S, timeout or llama_timeout(budget))
 
-    def _heal(self) -> bool:
-        """Restart the server that just collapsed, once per client.
+    def _restart(self) -> bool:
+        """Bring this client's server back, within the restart budget.
 
-        False means the server is not ours to restart or the restart failed; the
-        caller then reports the failure instead of asking the same collapsed
-        sampler again.
+        False means the server is not ours to restart, the restart failed,
+        or the budget is spent; the caller then reports the failure instead
+        of asking a collapsed sampler or a dead port again.
         """
-        if self.healed:
+        if self.restarts >= MAX_RESTARTS:
             return False
-        self.healed = True
+        self.restarts += 1
         restarted = restart_llama_server(self.base_url)
         if not restarted:
             return False
         self.base_url = restarted
         self.loaded = False
         return True
+
+    def _exchange(self, payload: dict, wait: int) -> dict:
+        """POST, standing the server back up if the process died under it.
+
+        llama-server on this build can die mid-request -- a Windows heap
+        corruption took one down after 93 minutes -- and that is not a
+        reason to lose the book: the process is replaced and the same
+        request is sent once more.  Everything already translated is on
+        disk, so only the request is repeated, never the run.
+        """
+        try:
+            return self._post(payload, wait)
+        except InferenceUnreachable:
+            if not self._restart():
+                raise
+            return self._post(payload, wait)
 
     def _answer(
         self, payload: dict, budget: int, timeout: int | None
@@ -131,15 +153,15 @@ class LlamaChatClient:
         of one character.
         """
         wait = self._wait(timeout, budget)
-        text, reason = self._content(self._post(payload, wait))
+        text, reason = self._content(self._exchange(payload, wait))
         if not degenerate_text(text):
             return text, reason
-        if not self._heal():
+        if not self._restart():
             raise DegenerateReply(
                 "模型输出退化：整个预算重复输出同一字符"
                 f"（{len(text.strip())} 次），已停止重试"
             )
-        text, reason = self._content(self._post(payload, wait))
+        text, reason = self._content(self._exchange(payload, wait))
         if degenerate_text(text):
             raise DegenerateReply(
                 f"重启 llama-server 后仍然输出退化（重复 {len(text.strip())} 次）"
@@ -265,7 +287,9 @@ class LlamaChatClient:
             # The wait escalates with the budget: llama.cpp's vision calls run
             # longer than the daemon's on the same page, and a flat timeout
             # aborts exactly the generation that needed the bigger budget.
-            reply = self._post(payload, max(timeout or 0, llama_timeout(budget)))
+            reply = self._exchange(
+                payload, max(timeout or 0, llama_timeout(budget))
+            )
             text, reason = self._content(reply)
             last = text
             if reason == "length":

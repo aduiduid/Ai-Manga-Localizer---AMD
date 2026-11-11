@@ -428,3 +428,32 @@ def test_restart_reports_a_server_this_process_does_not_own(tmp_path, monkeypatc
 def test_restart_ignores_a_url_no_slot_serves(tmp_path, monkeypatch):
     monkeypatch.setattr(llama_server, "_MANAGERS", {})
     assert llama_server.restart_llama_server("http://127.0.0.1:8080") is None
+
+
+def test_a_server_past_its_uptime_is_replaced_instead_of_reused(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    created, _ = _fake_start(monkeypatch, manager)
+    slot = manager.start("editor", _files(tmp_path), port=8080, context=4096)
+    assert slot.started_at > 0.0
+    # This build leaks and one process died of heap corruption after 93 minutes,
+    # so a server that has been up past the limit is replaced even though it
+    # still answers: its age is the only warning available.
+    stale = LlamaSlot(
+        "editor",
+        slot.alias,
+        "http://127.0.0.1:8080",
+        8080,
+        4096,
+        slot.weights,
+        started_at=llama_server.time.monotonic() - llama_server.SERVER_MAX_UPTIME_S - 60,
+    )
+    manager._slots["editor"] = (stale, created[0])
+    assert manager.reusable_slot("DeepSeek-9B:latest") is None
+    assert "分钟" in manager.port_notes()["editor"]
+
+
+def test_a_young_server_is_still_reused(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    _fake_start(monkeypatch, manager)
+    slot = manager.start("editor", _files(tmp_path), port=8080, context=4096)
+    assert manager.reusable_slot("DeepSeek-9B:latest") is slot
