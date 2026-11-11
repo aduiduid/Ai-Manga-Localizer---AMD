@@ -393,3 +393,38 @@ def test_ocr_on_llama_cpp_alone_still_frees_the_servers(tmp_path, monkeypatch):
     released = release_runtime(settings)
     assert stopped == [True]
     assert released == ["DeepSeek-9B@8082"]
+def test_restart_replaces_the_server_serving_that_url(tmp_path, monkeypatch):
+    manifests, blobs = _layered_blobs(tmp_path)
+    manager = LlamaServerManager(tmp_path / "models")
+    manager._discovered = discover_ollama_models(manifests, blobs)
+    created, state = _fake_start(monkeypatch, manager)
+    monkeypatch.setattr(llama_server, "_MANAGERS", {"test": manager})
+    manager.start("editor", manager.resolve("DeepSeek-9B:latest"), port=8080, context=4096)
+    assert len(created) == 1
+    # A real terminate() frees the port; the fake has to be told that it died,
+    # otherwise start() finds the alias still being served and hands back a stub.
+    state["serving"].clear()
+    restarted = llama_server.restart_llama_server("http://127.0.0.1:8080")
+    assert restarted == "http://127.0.0.1:8080"
+    # A new process, not the collapsed one still holding the port.
+    assert len(created) == 2
+    assert len(manager.running()) == 1
+
+
+def test_restart_reports_a_server_this_process_does_not_own(tmp_path, monkeypatch):
+    manifests, blobs = _layered_blobs(tmp_path)
+    manager = LlamaServerManager(tmp_path / "models")
+    manager._discovered = discover_ollama_models(manifests, blobs)
+    created, state = _fake_start(monkeypatch, manager)
+    monkeypatch.setattr(llama_server, "_MANAGERS", {"test": manager})
+    # A server left over from an earlier session answers before we start one, so
+    # the slot is a stub: killing it would fight whoever owns it.
+    state["serving"][8080] = "DeepSeek-9B-latest"
+    manager.start("editor", manager.resolve("DeepSeek-9B:latest"), port=8080, context=4096)
+    assert created == []
+    assert llama_server.restart_llama_server("http://127.0.0.1:8080") is None
+
+
+def test_restart_ignores_a_url_no_slot_serves(tmp_path, monkeypatch):
+    monkeypatch.setattr(llama_server, "_MANAGERS", {})
+    assert llama_server.restart_llama_server("http://127.0.0.1:8080") is None

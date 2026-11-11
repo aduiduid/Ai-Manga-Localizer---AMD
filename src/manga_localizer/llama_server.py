@@ -601,6 +601,55 @@ def stop_llama_servers() -> None:
             continue
 
 
+def restart_llama_server(base_url: str) -> str | None:
+    """Restart the slot answering at ``base_url``; its new URL, or ``None``.
+
+    A long-uptime server can collapse into repeating one token for the whole
+    budget, and no request setting brings it back: the sampler still holds the
+    state that produced the collapse, so the answer is the same ``@@@@...``
+    however many times it is asked.  Restarting the process is the only lever
+    the client has.  ``None`` means "not ours, or the restart failed", and the
+    caller must then report the failure rather than retry.
+    """
+    with _MANAGERS_LOCK:
+        managers = list(_MANAGERS.values())
+    for manager in managers:
+        with manager._lock:
+            entry = next(
+                (
+                    (role, slot, process)
+                    for role, (slot, process) in manager._slots.items()
+                    if slot.base_url == base_url
+                ),
+                None,
+            )
+            if entry is None:
+                continue
+            role, slot, process = entry
+            if isinstance(process, _StubProcess):
+                # Left over from an earlier session; killing and restarting it
+                # would fight whoever owns it, so report instead.
+                return None
+            files = next(
+                (
+                    candidate
+                    for tag, candidate in manager.models().items()
+                    if tag.replace(":", "-").replace("/", "-") == slot.alias
+                ),
+                None,
+            )
+            if files is None:
+                return None
+            port, context = slot.port, slot.context
+            manager._stop_locked(role)
+        # Outside the lock: start() takes it again.
+        try:
+            return manager.start(role, files, port=port, context=context).base_url
+        except (LlamaServerError, OSError):
+            return None
+    return None
+
+
 # A batch runs one folder after another; loading the 7 GB model again between
 # folders would add half a minute each time, so the servers outlive a single
 # job while a batch is holding them.  The count, not a boolean, because a
@@ -807,6 +856,7 @@ __all__ = [
     "open_vision_slot",
     "probe",
     "release_llama_servers",
+    "restart_llama_server",
     "running_llama_slots",
     "stop_llama_servers",
 ]

@@ -35,6 +35,12 @@ BRACKET_LABEL_RE = re.compile(r"[\[【][^\]】\n]{0,12}[\]】]")
 # mid-list, sending the tail into per-line fallbacks.
 MAX_CHUNK_UNITS = 40
 MAX_BATCH_OUTPUT_TOKENS = 4_096
+# A collapsed decoder answers with one character repeated for the whole budget
+# (``@@@@...``).  One 74-page job did exactly that: 1,066 requests over 87
+# minutes, nine pages of progress.  A long run of a character a translation can
+# legitimately repeat -- "おーーーー", "……" -- is not a collapse.
+DEGENERATE_MIN_RUN = 8
+DEGENERATE_SAFE_REPEATS = "。、，．…‥・！？!?~～ー—ｰ♪♡※×〇"
 SPLIT_ID_RE = re.compile(
     r"^\s*(?:\[id\]\s*)?\[?(p\d+u\d+)\]?\s*(.*?)\s*$", re.IGNORECASE
 )
@@ -270,6 +276,18 @@ class InferenceConnectionError(RuntimeError):
     pass
 
 
+class DegenerateReply(RuntimeError):
+    """The model answered with one repeated character instead of text."""
+
+
+def degenerate_text(text: str) -> bool:
+    """Whether a reply is a decoder that collapsed onto a single token."""
+    stripped = text.strip()
+    if len(stripped) <= DEGENERATE_MIN_RUN or len(set(stripped)) != 1:
+        return False
+    return stripped[0] not in DEGENERATE_SAFE_REPEATS
+
+
 def _endpoint(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
@@ -301,6 +319,16 @@ def _json_request(
 
 
 class PromptTranslator:
+    # How much of the last run a collapsed decoder swallowed.  The pipeline
+    # reports it: a page left silently unresolved looks like a translation
+    # failure when the server is what stopped producing words.
+    collapsed_chunks = 0
+    collapsed_units = 0
+
+    def collapsed_summary(self) -> tuple[int, int]:
+        """Chunks and units a collapsed decoder swallowed in the last run."""
+        return self.collapsed_chunks, self.collapsed_units
+
     def __init__(
         self,
         target_language: str = "简体中文",
@@ -1033,6 +1061,20 @@ class PromptTranslator:
             or "无"
         )
         start = 0
+        self.collapsed_chunks = 0
+        self.collapsed_units = 0
+        announced = -1
+
+        def announce(value: int) -> None:
+            # One update per page the run has actually reached.  The bar used to
+            # move only when a whole chunk finished, so a page whose lines each
+            # took a model call looked hung; repeating a value would be noise.
+            nonlocal announced
+            if progress is None or value == announced:
+                return
+            announced = value
+            progress(value, len(pages))
+
         while start < len(pages):
             # Keep a batch small enough that the answer survives.  The output
             # budget below covers the answer, but a 93-unit prompt was cut off
@@ -1060,8 +1102,7 @@ class PromptTranslator:
                 if self._needs_translation(unit, preserve_sfx)
             ]
             if not units:
-                if progress:
-                    progress(start, len(pages))
+                announce(start)
                 continue
             source_rows = []
             for page in chunk:
@@ -1087,42 +1128,84 @@ class PromptTranslator:
                 MAX_BATCH_OUTPUT_TOKENS,
                 max(512, sum(len(unit.ja) for unit in units) * 3),
             )
-            translated = self._parse_indexed_translations(
-                self._generate(prompt, max_new_tokens=token_budget),
-                (unit.id for unit in units),
-            )
-            if not translated and previous:
-                # The 1.8B candidate answers a long story-context prompt by
-                # echoing it back verbatim often enough to matter: one 36-unit
-                # batch came back as the context section itself, and each of
-                # its lines then paid its own model call.  The context is
-                # optional enrichment, so a second attempt without it is
-                # cheap and keeps the answer format the parser needs.
+            collapsed = False
+            try:
                 translated = self._parse_indexed_translations(
-                    self._generate(
-                        self._batch_prompt("无", terms, source_rows),
-                        max_new_tokens=token_budget,
-                    ),
+                    self._generate(prompt, max_new_tokens=token_budget),
                     (unit.id for unit in units),
                 )
+                if not translated and previous:
+                    # The 1.8B candidate answers a long story-context prompt by
+                    # echoing it back verbatim often enough to matter: one
+                    # 36-unit batch came back as the context section itself, and
+                    # each of its lines then paid its own model call.  The
+                    # context is optional enrichment, so a second attempt
+                    # without it is cheap and keeps the answer format the parser
+                    # needs.
+                    translated = self._parse_indexed_translations(
+                        self._generate(
+                            self._batch_prompt("无", terms, source_rows),
+                            max_new_tokens=token_budget,
+                        ),
+                        (unit.id for unit in units),
+                    )
+            except DegenerateReply:
+                # The server stopped producing words, not translations.  Fanning
+                # this chunk out into one call per unit would ask the same
+                # collapsed sampler again for every line of it, which is how one
+                # job spent 87 minutes and advanced nine pages.  Leave the chunk
+                # unresolved and count it so the pipeline can say so.
+                collapsed = True
+                translated = {}
+            if collapsed:
+                self.collapsed_chunks += 1
+                self.collapsed_units += len(units)
             candidate_sources: dict[str, set[str]] = {}
             for unit in units:
                 candidate = translated.get(unit.id, "").strip()
+                if degenerate_text(candidate):
+                    candidate = ""
                 candidate_sources.setdefault(candidate, set()).add(unit.ja)
+            unit_page = {
+                unit.id: offset
+                for offset, page in enumerate(chunk)
+                for unit in page.units
+            }
             for unit in units:
                 candidate = translated.get(unit.id, "")
+                if degenerate_text(candidate):
+                    # A repeated glyph is not a translation that failed a rule.
+                    candidate = ""
                 unit.translation_attempts.append(candidate)
-                if (
+                if collapsed:
+                    pass
+                elif (
                     self._candidate_is_acceptable(unit, candidate, glossary)
                     and not duplicate_context_leak(unit, candidate, candidate_sources)
                 ):
                     unit.zh = candidate
                 else:
-                    unit.zh = self._translate_one(
-                        unit, previous + chunk, terms, glossary
-                    )
-            if progress:
-                progress(start, len(pages))
+                    try:
+                        unit.zh = self._translate_one(
+                            unit, previous + chunk, terms, glossary
+                        )
+                    except DegenerateReply:
+                        # Nothing this unit can do about a server that repeats
+                        # itself; the pipeline reports the count.
+                        self.collapsed_units += 1
+                announce(chunk_start + unit_page.get(unit.id, 0))
+            announce(start)
+
+    def _single_line(self, text: str) -> str:
+        """Normalise one generated line, refusing a collapsed decoder.
+
+        ``@@@@`` is not a translation that failed a rule, and storing it as an
+        attempt would both hide the server problem in the transcript and invite
+        the two retry calls that follow into the same collapsed sampler.
+        """
+        if degenerate_text(text):
+            raise DegenerateReply(f"模型输出退化：重复单字符 {len(text.strip())} 次")
+        return self._normalize_translation(self._first_line(text))
 
     def _translate_one(
         self,
@@ -1165,10 +1248,8 @@ class PromptTranslator:
 固定译名：{unit_terms}
 上下文：{context_text}
 【原文】{unit.ja}"""
-        candidate = self._normalize_translation(
-            self._first_line(
-                self._generate(prompt, max_new_tokens=max(32, min(128, limit * 3)))
-            )
+        candidate = self._single_line(
+            self._generate(prompt, max_new_tokens=max(32, min(128, limit * 3)))
         )
         unit.translation_attempts.append(candidate)
         if self._candidate_is_acceptable(unit, candidate, glossary):
@@ -1178,10 +1259,8 @@ class PromptTranslator:
 语义约束：{audit_constraint}
 固定译名：{unit_terms}
 【原文】{unit.ja}"""
-        retry_candidate = self._normalize_translation(
-            self._first_line(
-                self._generate(retry, max_new_tokens=max(32, min(96, limit * 3)))
-            )
+        retry_candidate = self._single_line(
+            self._generate(retry, max_new_tokens=max(32, min(96, limit * 3)))
         )
         unit.translation_attempts.append(retry_candidate)
         if self._candidate_is_acceptable(unit, retry_candidate, glossary):
@@ -1194,12 +1273,8 @@ class PromptTranslator:
 固定译名：{unit_terms}
 【原文】{unit.ja}
 【不合格输出】{retry_candidate or candidate or "空"}"""
-        repaired = self._normalize_translation(
-            self._first_line(
-                self._generate_repair(
-                    repair, max_new_tokens=max(32, min(96, limit * 3))
-                )
-            )
+        repaired = self._single_line(
+            self._generate_repair(repair, max_new_tokens=max(32, min(96, limit * 3)))
         )
         unit.translation_attempts.append(repaired)
         if self._candidate_is_acceptable(unit, repaired, glossary):
@@ -1899,6 +1974,14 @@ class LocalQualityTranslator(PromptTranslator):
         # candidate, while the second 9B pass receives a different comparison
         # and semantic-risk prompt.
         self.auditor = auditor or editor
+
+    def collapsed_summary(self) -> tuple[int, int]:
+        """Sum the roles: the editor, the candidate and the auditor each saw it."""
+        roles = (self.editor, self.candidate, self.auditor)
+        return (
+            sum(role.collapsed_chunks for role in roles),
+            sum(role.collapsed_units for role in roles),
+        )
 
     def translate_pages(
         self,

@@ -14,6 +14,10 @@ Two llama.cpp details are load-bearing and easy to lose in a rewrite:
 * Structured output uses ``response_format.json_schema`` (not Ollama's
   ``format``), and the served model must have been started with the matching
   grammar flag or the field is silently ignored.
+* A long-lived server can start repeating a single token for the whole budget.
+  llama-server's own sampler defaults leave repetition unpunished, so every
+  translation request carries a mild penalty and the client restarts the server
+  once when a reply still comes back as ``@@@@...``.
 """
 
 from __future__ import annotations
@@ -21,12 +25,29 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
-from .llama_server import llama_timeout
-from .translator import InferenceConnectionError, _endpoint, _json_request
+from .llama_server import llama_timeout, restart_llama_server
+from .translator import (
+    DegenerateReply,
+    InferenceConnectionError,
+    _endpoint,
+    _json_request,
+    degenerate_text,
+)
 
 # Matches OLLAMA_MAX_OUTPUT_TOKENS so a migrated setting keeps its meaning.
 DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 DEFAULT_CONTEXT_TOKENS = 65_536
+
+# llama-server leaves ``--repeat-penalty`` at 1.00, i.e. off.  A degenerate
+# sampler then repeats one token for the entire budget and every retry of the
+# same prompt returns the same run of one character.  1.1 is enough to break
+# the loop without the answer drift that 1.3/256 caused on a real prompt (it
+# answered by restating the story context instead of translating).
+REPEAT_PENALTY = 1.1
+REPEAT_LAST_N = 64
+# A translation reply is two lines at most: a server that has not answered in
+# five minutes is not about to, whatever the output budget says.
+MAX_REQUEST_WAIT_S = 300
 
 
 class LlamaChatClient:
@@ -47,6 +68,9 @@ class LlamaChatClient:
         self.context_tokens = context_tokens
         self.max_output_tokens = max_output_tokens
         self.loaded = False
+        # One server restart per client after a collapsed generation; repeating
+        # it would stall the run for as long as the collapse lasts.
+        self.healed = False
 
     # -- transport ---------------------------------------------------------
     def _url(self) -> str:
@@ -76,6 +100,52 @@ class LlamaChatClient:
             text = ""
         return text, str(choice.get("finish_reason") or "")
 
+    def _wait(self, timeout: int | None, budget: int) -> int:
+        """The wait for a translation request, never longer than the cap."""
+        return min(MAX_REQUEST_WAIT_S, timeout or llama_timeout(budget))
+
+    def _heal(self) -> bool:
+        """Restart the server that just collapsed, once per client.
+
+        False means the server is not ours to restart or the restart failed; the
+        caller then reports the failure instead of asking the same collapsed
+        sampler again.
+        """
+        if self.healed:
+            return False
+        self.healed = True
+        restarted = restart_llama_server(self.base_url)
+        if not restarted:
+            return False
+        self.base_url = restarted
+        self.loaded = False
+        return True
+
+    def _answer(
+        self, payload: dict, budget: int, timeout: int | None
+    ) -> tuple[str, str]:
+        """One request, restarting the server if the decoder collapsed.
+
+        A collapse is not a translation that failed a rule: the sampler stopped
+        producing words, and asking the same process again returns the same run
+        of one character.
+        """
+        wait = self._wait(timeout, budget)
+        text, reason = self._content(self._post(payload, wait))
+        if not degenerate_text(text):
+            return text, reason
+        if not self._heal():
+            raise DegenerateReply(
+                "模型输出退化：整个预算重复输出同一字符"
+                f"（{len(text.strip())} 次），已停止重试"
+            )
+        text, reason = self._content(self._post(payload, wait))
+        if degenerate_text(text):
+            raise DegenerateReply(
+                f"重启 llama-server 后仍然输出退化（重复 {len(text.strip())} 次）"
+            )
+        return text, reason
+
     # -- chat --------------------------------------------------------------
     def chat(
         self,
@@ -92,9 +162,10 @@ class LlamaChatClient:
             "stream": False,
             "temperature": temperature,
             "max_tokens": budget,
+            "repeat_penalty": REPEAT_PENALTY,
+            "repeat_last_n": REPEAT_LAST_N,
         }
-        reply = self._post(payload, timeout or llama_timeout(budget))
-        text, _ = self._content(reply)
+        text, _ = self._answer(payload, budget, timeout)
         return text.strip()
 
     def chat_json(
@@ -123,13 +194,14 @@ class LlamaChatClient:
                 "stream": False,
                 "temperature": temperature,
                 "max_tokens": budget,
+                "repeat_penalty": REPEAT_PENALTY,
+                "repeat_last_n": REPEAT_LAST_N,
                 "response_format": {
                     "type": "json_schema",
                     "json_schema": {"name": "reply", "schema": schema},
                 },
             }
-            reply = self._post(payload, timeout or llama_timeout(budget))
-            text, reason = self._content(reply)
+            text, reason = self._answer(payload, budget, timeout)
             last = text
             if reason == "length":
                 continue

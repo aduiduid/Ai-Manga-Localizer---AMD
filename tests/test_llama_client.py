@@ -13,8 +13,9 @@ import json
 import pytest
 from PIL import Image
 
+from manga_localizer import llama_client
 from manga_localizer.llama_client import LlamaChatClient, png_bytes
-from manga_localizer.translator import InferenceConnectionError
+from manga_localizer.translator import DegenerateReply, InferenceConnectionError
 
 
 def _reply(content, finish_reason="stop"):
@@ -182,3 +183,55 @@ def test_a_vision_timeout_grows_with_the_escalated_budget(monkeypatch):
     assert first == 600
     assert second == 1_200
 
+def test_a_translation_request_asks_for_a_repeat_penalty(monkeypatch):
+    recorder = _Recorder([_reply("译文")])
+    client = _client(monkeypatch, recorder)
+    assert client.chat("提示", max_tokens=96) == "译文"
+    payload = recorder.payloads[0]["payload"]
+    # llama-server defaults to 1.00, i.e. repetition is unpunished: that is how
+    # one job answered "@@@..." for 87 minutes with nothing to interrupt it.
+    assert payload["repeat_penalty"] == llama_client.REPEAT_PENALTY
+    assert payload["repeat_last_n"] == llama_client.REPEAT_LAST_N
+
+
+def test_a_collapsed_reply_restarts_the_server_once_and_retries(monkeypatch):
+    recorder = _Recorder([_reply("@" * 96), _reply("译文")])
+    restarts = []
+
+    def restart(base_url):
+        restarts.append(base_url)
+        return "http://127.0.0.1:9090"
+
+    monkeypatch.setattr(llama_client, "restart_llama_server", restart)
+    client = _client(monkeypatch, recorder)
+    assert client.chat("提示", max_tokens=96) == "译文"
+    assert restarts == ["http://127.0.0.1:8080"]
+    assert client.base_url == "http://127.0.0.1:9090"
+    assert len(recorder.payloads) == 2
+
+
+def test_a_second_collapse_is_reported_rather_than_retried(monkeypatch):
+    recorder = _Recorder([_reply("@" * 96), _reply("@" * 96)])
+    monkeypatch.setattr(
+        llama_client, "restart_llama_server", lambda base_url: "http://127.0.0.1:9090"
+    )
+    client = _client(monkeypatch, recorder)
+    with pytest.raises(DegenerateReply):
+        client.chat("提示", max_tokens=96)
+    assert len(recorder.payloads) == 2
+
+
+def test_a_collapse_from_a_server_we_do_not_own_is_reported(monkeypatch):
+    recorder = _Recorder([_reply("@" * 96)])
+    monkeypatch.setattr(llama_client, "restart_llama_server", lambda base_url: None)
+    client = _client(monkeypatch, recorder)
+    with pytest.raises(DegenerateReply):
+        client.chat("提示", max_tokens=96)
+    assert len(recorder.payloads) == 1
+
+
+def test_the_translation_wait_is_capped(monkeypatch):
+    recorder = _Recorder([_reply("译文")])
+    client = _client(monkeypatch, recorder)
+    client.chat("提示", max_tokens=4_096, timeout=9_999)
+    assert recorder.payloads[0]["timeout"] == llama_client.MAX_REQUEST_WAIT_S

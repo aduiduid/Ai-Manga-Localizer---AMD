@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.7 - 2026-11-11
+
+- A decoder that collapses into one repeated glyph no longer stalls a
+  book.  The reply is recognised as a collapse, that batch is skipped
+  instead of being fanned out into one model call per line, and the job
+  reports how many batches and lines were left in the source language.
+- Translation requests now ask for a mild repeat penalty (1.1 over the
+  last 64 tokens); llama-server's own default is off.  A collapsed reply
+  restarts that llama-server once, then reports instead of retrying.
+- Progress is reported for every page as it is translated, not once per
+  four-page chunk, and a collapsed run says so in the job message.
+- Every request has a hard wait ceiling, so a silent server ends in an
+  error instead of an indefinite wait.
+
 ## 0.10.6 - 2026-11-09
 
 - One dense batch no longer loses its tail.  The batch prompt covers up to

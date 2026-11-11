@@ -497,6 +497,21 @@ class LocalizerPipeline:
             self._write_transcript(
                 work / "translation-draft.json", source, pages, glossary
             )
+        if translator is not None:
+            summarise = getattr(translator, "collapsed_summary", None)
+            collapsed_chunks, collapsed_units = summarise() if summarise else (0, 0)
+            if collapsed_chunks:
+                # Staying quiet here reads as "the translator failed on these
+                # pages".  It is the server that stopped producing words, and the
+                # pages kept their source text, so the job says which it was.
+                self._emit(
+                    emit,
+                    "translate",
+                    total,
+                    total,
+                    f"推理服务输出退化，{collapsed_chunks} 个批次"
+                    f"（{collapsed_units} 处）已跳过并保留原文",
+                )
         quality = completion_summary(pages, request.preserve_sfx)
         fallback_ids = preserve_unresolved_units(pages, quality)
         if fallback_ids:

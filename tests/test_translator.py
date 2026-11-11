@@ -7,6 +7,7 @@ from manga_localizer.config import ollama_timeout
 from manga_localizer.name_dictionary import NameCandidate
 from manga_localizer.ocr import PageOCR, TextUnit
 from manga_localizer.translator import (
+    DegenerateReply,
     HyMTTranslator,
     InferenceConnectionError,
     LocalQualityTranslator,
@@ -223,7 +224,10 @@ def test_chunk_translation_reports_incremental_page_progress():
         chunk_pages=2,
         progress=lambda current, total: updates.append((current, total)),
     )
-    assert updates == [(2, 5), (4, 5), (5, 5)]
+    # The bar climbs per page and never jumps backwards.  It used to move only
+    # when a whole chunk finished, which is what made a slow page look hung.
+    assert updates == [(0, 5), (1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]
+    assert updates == sorted(updates)
 
 
 def test_context_batch_parser_accepts_hymt_split_id_lines():
@@ -1765,3 +1769,131 @@ def test_an_echoed_context_is_retried_without_it():
     assert "前文：\n无" in prompts[2]
     assert fallbacks == []
     assert pages[1].units[0].zh == "译文"
+def test_a_collapsed_batch_is_not_fanned_out_into_a_call_per_unit():
+    single = []
+
+    class CollapsingTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            if "【任务】" in prompt:
+                # A collapsed decoder repeats one character for the whole budget.
+                raise DegenerateReply("批量回复退化")
+            return "译文"
+
+        def _translate_one(self, unit, context, terms, glossary=None):
+            single.append(unit.id)
+            return "单条"
+
+    pages = [
+        PageOCR(
+            page,
+            f"{page}.png",
+            100,
+            100,
+            [TextUnit(f"p00{page}u01", [0, 0, 20, 20], [0, 0, 20, 20], "日本", 1.0)],
+        )
+        for page in range(1, 5)
+    ]
+    work = CollapsingTranslator()
+    work.translate_pages(pages, chunk_pages=4)
+    # A collapsed chunk used to cost one 4096-token request per line, which is
+    # how a 74-page job spent 87 minutes and advanced nine pages.
+    assert single == []
+    assert work.collapsed_summary() == (1, 4)
+    assert all(page.units[0].zh == "" for page in pages)
+
+
+def test_a_collapsed_single_call_leaves_the_line_unresolved():
+    class CollapsingTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            if not translator.re.findall(r"\[(p\d+u\d+)\]", prompt):
+                raise DegenerateReply("单条退化")
+            return ""
+
+    pages = [
+        PageOCR(
+            1,
+            "1.png",
+            100,
+            100,
+            [TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], "日本", 1.0)],
+        )
+    ]
+    work = CollapsingTranslator()
+    work.translate_pages(pages, chunk_pages=1)
+    unit = pages[0].units[0]
+    assert unit.zh == ""
+    assert unit.translation_attempts == [""]
+    assert work.collapsed_summary() == (0, 1)
+
+
+def test_a_repeated_glyph_candidate_is_dropped_instead_of_stored():
+    class CollapsingTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            ids = translator.re.findall(r"\[(p\d+u\d+)\]", prompt)
+            if not ids:
+                return ""
+            return "\n".join(f"[{unit_id}] {chr(64) * 96}" for unit_id in ids)
+
+        def _translate_one(self, unit, context, terms, glossary=None):
+            return "兜底"
+
+    pages = [
+        PageOCR(
+            1,
+            "1.png",
+            100,
+            100,
+            [TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], "日本", 1.0)],
+        )
+    ]
+    CollapsingTranslator().translate_pages(pages, chunk_pages=1)
+    unit = pages[0].units[0]
+    # The transcript records "no candidate here", never a run of "@".
+    assert unit.translation_attempts == [""]
+    assert unit.zh == "兜底"
+
+
+def test_degenerate_text_names_a_collapsed_decoder_not_repeated_punctuation():
+    assert translator.degenerate_text("@" * 96) is True
+    assert translator.degenerate_text("哈" * 40) is True
+    assert translator.degenerate_text("") is False
+    assert translator.degenerate_text("正常译文") is False
+    assert translator.degenerate_text("哈哈……") is False
+    assert translator.degenerate_text("おーーーーー") is False
+
+
+def test_progress_reports_each_page_before_the_chunk_finishes():
+    ticks = []
+
+    class PlainTranslator(PromptTranslator):
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            ids = translator.re.findall(r"\[(p\d+u\d+)\]", prompt)
+            return "\n".join(f"[{unit_id}] 译文" for unit_id in ids)
+
+    pages = [
+        PageOCR(
+            page,
+            f"{page}.png",
+            100,
+            100,
+            [
+                TextUnit(
+                    f"p{page:03d}u{unit:02d}", [0, 0, 20, 20], [0, 0, 20, 20], "日本", 1.0
+                )
+                for unit in range(1, 4)
+            ],
+        )
+        for page in (1, 2)
+    ]
+    PlainTranslator().translate_pages(
+        pages,
+        chunk_pages=4,
+        progress=lambda current, total: ticks.append((current, total)),
+    )
+    # Both pages travel in one chunk, and the bar reports page 1 while that
+    # chunk is still being translated instead of jumping once when it ends.
+    assert ticks == [(0, 2), (1, 2), (2, 2)]
