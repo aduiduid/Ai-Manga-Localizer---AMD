@@ -675,3 +675,15 @@ def test_ml_bootstrap_installs_matching_torchvision_backend():
     assert "'torch==2.8.0+cu129' 'torchvision==0.23.0+cu129'" in shell
     assert "doctor --require-ml" in powershell
     assert "doctor --require-ml" in shell
+
+
+def test_a_failed_poll_reschedules_instead_of_ending_the_updates():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    poll = javascript.split("async function pollJob(){", 1)[1].split("\n", 1)[0]
+    # One dropped request used to end the loop for good: the job kept running
+    # with the progress bar frozen where it stopped and the page never learned
+    # that it had finished.
+    assert "state.pollFailures=0;" in poll
+    assert "state.pollFailures=(state.pollFailures||0)+1" in poll
+    assert "state.pollTimer=setTimeout(pollJob,Math.min(8000," in poll
+    assert "pollFailures:0" in javascript

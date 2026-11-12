@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.9 - 2026-11-12
+
+- A browser tab that vanishes mid-poll no longer prints a traceback in the
+  console.  On Windows the proactor's `_call_connection_lost` calls `shutdown()`
+  on a socket the client already reset, which raises `ConnectionResetError`
+  (WinError 10054) and lands in the event loop's default exception handler once
+  per closed tab.  The loop now drops that one exception and forwards the rest.
+- The job panel no longer freezes after a single failed poll.  Every failure
+  used to toast and stop rescheduling, so a momentary connection error left the
+  page showing a stale percentage forever; polls now back off to at most 8 s and
+  keep going.
+
 ## 0.10.8 - 2026-11-11
 
 - A crashed llama-server is restarted under the request instead of failing the

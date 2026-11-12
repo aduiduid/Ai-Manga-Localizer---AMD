@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -190,6 +191,38 @@ def _queued_targets(
     return tasks, problems, duplicates
 
 
+def quiet_connection_resets(loop: asyncio.AbstractEventLoop) -> None:
+    """Stop the loop from reporting the socket a closed browser tab left behind.
+
+    On Windows the proactor loop calls ``shutdown()`` on a connection whose peer
+    has already reset it, raises ``ConnectionResetError`` from inside
+    ``_call_connection_lost``, and hands the traceback to the loop's exception
+    handler, which prints it at ERROR level.  A polling page drops one
+    connection per second, so refreshing or closing the tab prints a wall of
+    tracebacks that reads like a crashing server -- and every one of them is
+    about a socket that is already gone.  Only that exception is dropped here;
+    anything else still reaches the handler that was in place.
+    """
+    previous = loop.get_exception_handler()
+
+    def handler(current: asyncio.AbstractEventLoop, context: dict) -> None:
+        if isinstance(context.get("exception"), ConnectionResetError):
+            return
+        if previous is not None:
+            previous(current, context)
+        else:
+            current.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+
+
+@asynccontextmanager
+async def _serve_lifespan(_app: FastAPI):
+    """Install the handler on the loop uvicorn is actually serving from."""
+    quiet_connection_resets(asyncio.get_running_loop())
+    yield
+
+
 def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     paths = (paths or AppPaths.from_env()).ensure()
     models = ModelManager(paths)
@@ -197,7 +230,11 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         JobService(paths, pipeline_factory) if pipeline_factory else JobService(paths)
     )
     batches = BatchService(paths, jobs)
-    app = FastAPI(title="Manga Localizer Studio", version=__version__)
+    app = FastAPI(
+        title="Manga Localizer Studio",
+        version=__version__,
+        lifespan=_serve_lifespan,
+    )
     tasks: dict[str, dict] = {}
     task_lock = threading.RLock()
     task_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-bootstrap")

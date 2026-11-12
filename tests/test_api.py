@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -507,3 +508,35 @@ def test_inference_check_rejects_local_models_above_9b(tmp_path):
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert "最多支持 9B" in response.json()["message"]
+
+
+def test_the_server_quiets_connection_resets_from_closed_browser_tabs(tmp_path):
+    """A reset socket is not a failing server.
+
+    Windows raises ``ConnectionResetError`` from the proactor's
+    ``_call_connection_lost`` whenever the peer is already gone, and the loop's
+    default handler prints that traceback at ERROR.  Every poll of a page that is
+    being refreshed or closed does it, so only that exception is dropped -- every
+    other loop error still reaches the handler that was in place.
+    """
+    forwarded: list[str] = []
+
+    async def serve() -> None:
+        app = create_app(make_paths(tmp_path), pipeline_factory=FakePipeline)
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda _loop, context: forwarded.append(context["message"])
+        )
+        async with app.router.lifespan_context(app):
+            loop.call_exception_handler(
+                {
+                    "message": "connection_lost",
+                    "exception": ConnectionResetError(10054, "reset by peer"),
+                }
+            )
+            loop.call_exception_handler(
+                {"message": "callback failed", "exception": ValueError("boom")}
+            )
+
+    asyncio.run(serve())
+    assert forwarded == ["callback failed"]
