@@ -523,6 +523,105 @@ def test_fast_profile_renders_without_loading_lama(tmp_path):
     assert output.exists()
 
 
+def _balloon_page():
+    """A 120x40 white ellipse on a pink page carrying a two-line text strip."""
+    image = np.full((400, 400, 3), (232, 130, 180), dtype=np.uint8)
+    cv2.ellipse(image, (200, 200), (60, 20), 0, 0, 360, (255, 255, 255), -1)
+    for y in (190, 203):
+        for x in range(160, 240, 20):
+            cv2.rectangle(image, (x, y), (x + 12, y + 6), (10, 10, 10), -1)
+    return image
+
+
+def test_growing_follows_a_curved_balloon_instead_of_stalling():
+    # Crawling one pixel at a time and re-testing each edge against the span
+    # grown so far stalled on the curve: the 80x20 strip stopped near 95x32
+    # inside the 120x40 balloon, and 12px CJK still did not fit.
+    image = _balloon_page()
+    grown = ArtworkPreservingRenderer._uniform_balloon_box(
+        image, [160, 190, 240, 210]
+    )
+    assert grown[0] <= 141 and grown[2] >= 259
+    assert grown[1] <= 181 and grown[3] >= 219
+    assert grown[2] - grown[0] >= 118
+    assert grown[3] - grown[1] >= 38
+
+
+def test_typesetting_inside_a_curved_balloon_reaches_the_readable_floor(tmp_path):
+    renderer = _measuring_renderer(tmp_path)
+    image = _balloon_page()
+    box, fitting = _typeset(image, renderer, [160, 190, 240, 210], "嘿，姑娘们，Twilight 在楼上等着呢。")
+    assert box[0] < 160 and box[2] > 240
+    assert fitting is not None
+    assert fitting[1] >= MIN_READABLE_FONT
+
+
+def _mid_tone_fixture():
+    """Dark lettering on a coloured balloon, with dark art in the same window."""
+    image = np.full((120, 160, 3), (200, 150, 180), dtype=np.uint8)
+    for x in range(40, 120, 16):
+        cv2.rectangle(image, (x, 40), (x + 8, 80), (15, 15, 15), -1)
+    # A lock of hair, outside the lettering's ring but inside the window and
+    # small enough to pass the component guard.
+    cv2.rectangle(image, (10, 20), (30, 60), (15, 15, 15), -1)
+    return image
+
+
+def test_erase_keeps_dark_artwork_outside_the_lettering_ring():
+    image = _mid_tone_fixture()
+    window = [0, 0, 160, 120]
+    # The focus box has to be mostly ground: a box filled with glyphs flips the
+    # polarity vote and nothing is erased at all.
+    focus = [30, 10, 140, 105]
+    stale, _, _ = ArtworkPreservingRenderer._erase(
+        image.copy(), window, focus=focus
+    )
+    assert _dark_pixels(stale, (10, 20, 31, 61)) == 0, "the hair was in reach"
+    cleaned, _, _ = ArtworkPreservingRenderer._erase(
+        image.copy(), window, focus=focus, bands=[[36, 36, 124, 84]]
+    )
+    assert _dark_pixels(cleaned, (10, 20, 31, 61)) > 700, "the hair must survive"
+    assert _dark_pixels(cleaned, (40, 40, 120, 81)) == 0, "the glyphs must not"
+
+
+def test_the_cleanup_bands_never_reach_far_past_the_lettering(tmp_path):
+    renderer = _measuring_renderer(tmp_path)
+    source = tmp_path / "window.png"
+    image = Image.new("RGB", (300, 200), (232, 130, 180))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((80, 40, 220, 100), fill=(238, 150, 90))
+    draw.rectangle((90, 60, 210, 70), fill=(10, 10, 10))
+    draw.rectangle((100, 150, 200, 180), fill=(20, 20, 20))
+    image.save(source)
+    unit = TextUnit(
+        "p001u01", [90, 60, 210, 70], [88, 58, 212, 72], "日本語", 1.0, False, "中文对白"
+    )
+    page = PageOCR(1, source.name, 300, 200, [unit])
+    style = renderer._analyze_style(np.asarray(image).copy(), unit)
+    seen = []
+
+    def record(rgb, box, focus=None, bands=None):
+        seen.append((list(box), [list(band) for band in bands or []]))
+        return rgb, 0.0, 0.0
+
+    renderer._erase = record
+    renderer._draw = lambda *_args, **_kwargs: None
+    renderer.render_page(source, page, tmp_path / "window-out.png")
+    assert seen, "the quality profile cleans a flat balloon"
+    window, bands = seen[0]
+    across = max(8, round(style.font_size * 0.35))
+    along = max(24, round(style.font_size * 1.2))
+    # The searched rectangle stays generous on purpose: the paper branch and
+    # the glyph polarity are read from it, and a crop holding nothing but
+    # lettering makes both statistics meaningless.  The bands are what keeps
+    # the promise, so the band is what has to stay near the lettering.
+    assert bands and bands[0][3] <= 70 + across
+    assert bands[0][2] <= 210 + along
+    assert bands[0][3] < 150, "the hat 80px below must stay out of the band"
+    assert window[3] < 200, "the search stays on the page"
+
+
+
 def test_unknown_cleanup_profile_is_rejected():
     with pytest.raises(ValueError, match="Unknown cleanup profile"):
         ArtworkPreservingRenderer(cleanup_profile="turbo")
@@ -633,7 +732,11 @@ def test_typesetting_grows_a_short_strip_into_its_plaque(tmp_path):
     # declared height even 8px CJK does not fit, so the box has to grow.
     box, fitting = _typeset(rgb, renderer, [160, 211, 239, 232], "我想。这件事你得自己决定")
     assert box != [160, 211, 239, 232]
-    assert box[1] < 211 and box[3] == 232
+    # The plaque itself is the box now: the strip grows up to the plaque's top
+    # inner edge and down to its bottom one.  The pixel crawl used to stop at
+    # the strip's own bottom, because growing upward made the left and right
+    # edge lines cross the dark border on every further step.
+    assert box[1] <= 182 and box[3] >= 260
     assert fitting is not None
     assert fitting[1] >= MIN_READABLE_FONT
 
@@ -675,3 +778,24 @@ def test_wrapping_keeps_latin_words_and_their_punctuation_together():
     # 51px inner width: "Twilight，" is 63px, which used to be shredded into
     # "Twiligh" + "t" and push a lone comma onto a third line.
     assert _wrap(draw, "来吧，Twilight，", font, 51) == ["来吧，", "Twilight，"]
+
+def test_two_boxes_in_one_shared_balloon_do_not_claim_the_same_space():
+    # Two balloons that touch are a single region for the colour search, so
+    # both boxes would grow to the whole merged shape and the two translations
+    # would be painted on top of each other.  ``avoid`` splits the shared space
+    # along the midline between the two boxes.
+    image = np.full((260, 300, 3), (232, 130, 180), dtype=np.uint8)
+    cv2.ellipse(image, (150, 110), (110, 70), 0, 0, 360, (255, 255, 255), -1)
+    upper = [110, 80, 190, 92]
+    lower = [110, 128, 190, 140]
+    both = ArtworkPreservingRenderer._uniform_balloon_box(image, upper)
+    assert both[3] > lower[1], "the merged region does reach the lower box"
+    first = ArtworkPreservingRenderer._uniform_balloon_box(
+        image, upper, avoid=[lower]
+    )
+    second = ArtworkPreservingRenderer._uniform_balloon_box(
+        image, lower, avoid=[upper]
+    )
+    assert first[3] <= second[1] or second[3] <= first[1], "the boxes must not overlap"
+    assert first[3] > upper[3] and second[1] < lower[1], "both keep room to grow"
+

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.10.10 - 2026-11-12
+
+- Short dialogue stops being squeezed to an unreadable size.  The typesetting
+  box grew one pixel at a time and re-tested its edges against the span grown so
+  far, which only ever worked on a rectangle: on a balloon the box got taller
+  first, the taller edge line crossed the widening curve, and growth stopped
+  while there was still room inside.  A 78x22 box stalled at 83x28, no readable
+  size fitted, and the overflow sent the line onto the panel outside.  The page
+  is now split into same-coloured regions and the balloon is the one the box's
+  rim touches; on the reported page the same text reaches 14-20px instead of
+  8-13px and stays inside its balloon.
+- Two balloons that touch are one region, so each box is cut back to the midline
+  between it and its nearest neighbour.  Without that both boxes grew to the
+  whole merged shape and the two translations were painted on top of each other.
+- Cleaning no longer eats the artwork around the lettering.  The mask is clipped
+  to the lettering's own band (a little wider along the text, a little shorter
+  across it), so a balloon outline, a lock of hair or a hat brim inside the
+  searched rectangle can no longer come back inpainted.  On the reported page
+  the pixels changed outside those bands fell from 17188 to 0, and the total
+  changed from 32387 to 16463, while the source text is still removed as
+  thoroughly as before (residue inside the lettering: 91 -> 93 pixels).
+- The searched rectangle itself stays generous on purpose: the paper branch and
+  the glyph polarity are read from it, and a crop holding nothing but lettering
+  makes both statistics meaningless.
+
 ## 0.10.9 - 2026-11-12
 
 - A browser tab that vanishes mid-poll no longer prints a traceback in the

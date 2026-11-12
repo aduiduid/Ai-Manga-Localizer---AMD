@@ -644,18 +644,25 @@ class ArtworkPreservingRenderer:
         return rgb
 
     @staticmethod
-    def _interior_component_mask(binary: np.ndarray, dilation: int) -> np.ndarray:
+    def _interior_component_mask(
+        binary: np.ndarray, dilation: int, max_area_ratio: float = 0.18
+    ) -> np.ndarray:
         """Select text-like components without touching surrounding line art.
 
         Manga detector rectangles often cross panel art. Artwork normally enters
         through a rectangle edge, while glyph components sit inside it. Keeping
         edge-connected and very large components prevents the cleanup pass from
         turning characters, furniture, and panel borders into white blocks.
+
+        ``max_area_ratio`` is measured against the searched region, and that
+        region is now the lettering's own ring rather than a 96 px square, so a
+        tighter ratio is still a generous absolute ceiling in which every glyph
+        fits while a lock of hair or a hat brim does not.
         """
         height, width = binary.shape
         count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
         mask = np.zeros_like(binary, dtype=np.uint8)
-        max_area = max(64, round(width * height * 0.18))
+        max_area = max(64, round(width * height * max_area_ratio))
         for label in range(1, count):
             x, y, component_width, component_height, area = stats[label]
             touches_edge = (
@@ -732,15 +739,42 @@ class ArtworkPreservingRenderer:
         rgb: np.ndarray,
         box: list[int],
         focus: list[int] | None = None,
+        bands: list[list[int]] | None = None,
     ) -> tuple[np.ndarray, float, float]:
+        """Erase the source glyphs inside ``box``.
+
+        ``focus`` decides which side of the local median the glyphs are on, and
+        ``bands`` is the lettering's own ring: the mask is clipped to it, so a
+        balloon border, a lock of hair or a hat brim that falls inside the
+        searched rectangle is left alone.  The mask used to be free to claim
+        anything in the rectangle, which is how those came back inpainted.
+        """
         x0, y0, x1, y1 = box
         crop = rgb[y0:y1, x0:x1].copy()
         gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
         mean = float(gray.mean()) if gray.size else 255.0
         white_ratio = float((gray > 225).mean()) if gray.size else 1.0
+        allowed = None
+        if bands:
+            height, width = gray.shape
+            allowed = np.zeros(gray.shape, dtype=np.uint8)
+            for band_x0, band_y0, band_x1, band_y1 in bands:
+                top = max(0, min(height, band_y0 - y0))
+                bottom = max(0, min(height, band_y1 - y0))
+                left = max(0, min(width, band_x0 - x0))
+                right = max(0, min(width, band_x1 - x0))
+                allowed[top:bottom, left:right] = 1
+
+        def clip(mask: np.ndarray) -> np.ndarray:
+            if allowed is None:
+                return mask
+            return np.where(allowed > 0, mask, 0).astype(np.uint8)
+
         if white_ratio > 0.45 or (mean > 175 and white_ratio > 0.35):
-            mask = ArtworkPreservingRenderer._interior_component_mask(
-                (gray < 150).astype(np.uint8), 5
+            mask = clip(
+                ArtworkPreservingRenderer._interior_component_mask(
+                    (gray < 150).astype(np.uint8), 5
+                )
             )
             if mask.any():
                 crop[mask > 0] = ArtworkPreservingRenderer._background_color(
@@ -760,7 +794,11 @@ class ArtworkPreservingRenderer:
                 seeds = (gray < level - 45).astype(np.uint8)
             else:
                 seeds = (gray > level + 45).astype(np.uint8)
-            mask = ArtworkPreservingRenderer._interior_component_mask(seeds, 7)
+            mask = clip(
+                ArtworkPreservingRenderer._interior_component_mask(
+                    seeds, 7, max_area_ratio=0.06
+                )
+            )
             if mask.any():
                 crop = cv2.inpaint(crop, mask, 6, cv2.INPAINT_TELEA)
         rgb[y0:y1, x0:x1] = crop
@@ -806,38 +844,37 @@ class ArtworkPreservingRenderer:
         return rgb, mean, white_ratio
 
     @staticmethod
-    def _looks_like_background(
-        pixels: np.ndarray, background: np.ndarray, tolerance: float
-    ) -> bool:
-        if not pixels.size:
-            return False
-        distance = np.abs(pixels.astype(np.int16) - background).max(axis=1)
-        # A whole edge is never unanimously flat when the lettering runs edge to
-        # edge across the short side of its box ("SUPONGO..." filled all 79
-        # columns of a 21px tall strip), so a strict "every pixel matches" test
-        # can never grow that box.  Nine tenths still rejects the balloon border
-        # and the artwork behind it, which are a different colour across the
-        # entire edge rather than in scattered columns.
-        return bool((distance <= tolerance).mean() >= 0.9)
-
-    @staticmethod
     def _uniform_balloon_box(
         rgb: np.ndarray,
         box: list[int],
         tolerance: float = 22.0,
         width_limit: float = 1.7,
         height_limit: float = 2.4,
-        step_limit: int = 200,
+        avoid: list[list[int]] | None = None,
     ) -> list[int]:
         """Grow ``box`` to the flat balloon or sign it sits on.
 
         A detector box around short lettering can be much shorter than the
         balloon it belongs to ("SUPONGO..." occupied 79x21 inside a 79x42
         plaque).  Typesetting inside the detector box alone forces the font
-        down to 9px, where CJK strokes merge into a smear.  Growing into the
-        surrounding pixels that still match the local background colour gives
-        the translation room to stay readable, and stops at the balloon border
-        because those pixels are no longer background-coloured.
+        down to 9px, where CJK strokes merge into a smear, so the box has to
+        reach the balloon's real inside.
+
+        Growing one pixel at a time and re-testing each edge against the span
+        grown so far only works on a rectangle.  On a balloon the box gets
+        taller first, the taller edge line then crosses the widening curve, and
+        growth stops while the box is still inside the bubble (a 78x22 box grew
+        to 83x28 against a 120x40 balloon, still too small for 12px) -- so the
+        text spilled onto the panel outside.  Instead the page is split into
+        regions that match the local background colour, and the balloon is the
+        region the box's rim touches.  That follows any outline, curved or not,
+        and a line of lettering cutting the inside in two simply contributes two
+        regions.
+
+        Two balloons that touch are one region, so ``avoid`` -- the other boxes
+        on the page -- splits the shared space along the midline between this
+        box and its nearest neighbour.  Without it both boxes grow to the whole
+        merged region and the two translations are painted on top of each other.
         """
         page_height, page_width = rgb.shape[:2]
         x0, y0, x1, y1 = box
@@ -845,47 +882,72 @@ class ArtworkPreservingRenderer:
         if not sample.size:
             return list(box)
         background = np.median(sample, axis=0)
-        left, top, right, bottom = x0, y0, x1, y1
         # A proportional limit alone is useless on very short strips: 2.4x of a
         # 15px box is still 36px, which no 12px CJK line fits into.  The flat
         # allowance keeps those boxes growing until the balloon border blocks
         # them, which is the only stop that actually matters.
         max_width = max((x1 - x0) * width_limit, (x1 - x0) + 64)
         max_height = max((y1 - y0) * height_limit, (y1 - y0) + 48)
-        for _ in range(step_limit):
-            changed = False
-            if bottom - top < max_height:
-                if top > 0 and ArtworkPreservingRenderer._looks_like_background(
-                    rgb[top - 1, left:right], background, tolerance
-                ):
-                    top -= 1
-                    changed = True
-                if bottom < page_height and (
-                    ArtworkPreservingRenderer._looks_like_background(
-                        rgb[bottom, left:right], background, tolerance
+        matches = (
+            np.abs(rgb.astype(np.int16) - background).max(axis=2) <= tolerance
+        ).astype(np.uint8)
+        _, labels = cv2.connectedComponents(matches, 8)
+        touched: set[int] = set()
+        for ring in (1, 2, 3):
+            for row in (y0 - ring, y1 + ring - 1):
+                if 0 <= row < page_height:
+                    touched.update(int(value) for value in np.unique(labels[row, x0:x1]))
+            for column in (x0 - ring, x1 + ring - 1):
+                if 0 <= column < page_width:
+                    touched.update(
+                        int(value) for value in np.unique(labels[y0:y1, column])
                     )
-                ):
-                    bottom += 1
-                    changed = True
-            if right - left < max_width:
-                if left > 0 and ArtworkPreservingRenderer._looks_like_background(
-                    rgb[top:bottom, left - 1], background, tolerance
-                ):
-                    left -= 1
-                    changed = True
-                if right < page_width and (
-                    ArtworkPreservingRenderer._looks_like_background(
-                        rgb[top:bottom, right], background, tolerance
-                    )
-                ):
-                    right += 1
-                    changed = True
-            if not changed:
-                break
-        return [left, top, right, bottom]
+        touched.discard(0)
+        if not touched:
+            return list(box)
+        rows, columns = np.nonzero(np.isin(labels, sorted(touched)))
+        grow_x = max_width - (x1 - x0)
+        grow_y = max_height - (y1 - y0)
+        grown = [
+            max(int(columns.min()), x0 - grow_x),
+            max(int(rows.min()), y0 - grow_y),
+            min(int(columns.max()) + 1, x1 + grow_x),
+            min(int(rows.max()) + 1, y1 + grow_y),
+        ]
+        for other in avoid or []:
+            if (
+                grown[2] <= other[0]
+                or other[2] <= grown[0]
+                or grown[3] <= other[1]
+                or other[3] <= grown[1]
+            ):
+                continue
+            apart_x = (other[0] + other[2]) / 2.0 - (grown[0] + grown[2]) / 2.0
+            apart_y = (other[1] + other[3]) / 2.0 - (grown[1] + grown[3]) / 2.0
+            if abs(apart_y) >= abs(apart_x):
+                if apart_y >= 0:
+                    grown[3] = min(grown[3], (y1 + other[1]) // 2)
+                else:
+                    grown[1] = max(grown[1], (other[3] + y0) // 2)
+            elif apart_x >= 0:
+                grown[2] = min(grown[2], (x1 + other[0]) // 2)
+            else:
+                grown[0] = max(grown[0], (other[2] + x0) // 2)
+        if grown[2] <= grown[0] or grown[3] <= grown[1]:
+            return list(box)
+        return [
+            min(grown[0], x0),
+            min(grown[1], y0),
+            max(grown[2], x1),
+            max(grown[3], y1),
+        ]
 
     def _typeset_box(
-        self, rgb: np.ndarray, unit: TextUnit, style: TextStyle
+        self,
+        rgb: np.ndarray,
+        unit: TextUnit,
+        style: TextStyle,
+        avoid: list[list[int]] | None = None,
     ) -> list[int]:
         """The rectangle the translation is typeset into.
 
@@ -925,7 +987,7 @@ class ArtworkPreservingRenderer:
         declared_size = largest(declared)
         if declared_size >= MIN_READABLE_FONT:
             return declared
-        grown = self._uniform_balloon_box(rgb, declared)
+        grown = self._uniform_balloon_box(rgb, declared, avoid=avoid)
         best = grown if largest(grown) > declared_size else declared
         if largest(best) >= MIN_READABLE_FONT:
             return best
@@ -1104,9 +1166,33 @@ class ArtworkPreservingRenderer:
                 # edge-connected component guard so balloon borders survive.
                 cx0, cy0, cx1, cy1 = unit.crop_bbox or unit.bbox
                 # OCR boxes frequently cover the main kanji column but omit a
-                # neighbouring kana column.  A 96 px high-resolution search
-                # margin captures that column; component filtering, not a flat
-                # fill, decides which pixels are actually changed.
+                # neighbouring kana column, so the bands reach a little further
+                # than the box itself: long along the text, short across it.
+                # They are the lettering's own ring -- the mask is clipped to
+                # them, so a lock of hair, a hat brim or the balloon's own
+                # outline inside the searched rectangle can no longer come back
+                # inpainted.  The perpendicular pad is wider than the mask
+                # dilation, so no glyph loses its antialiased edge.
+                along = max(24, round(style.font_size * 1.2))
+                across = max(8, round(style.font_size * 0.35))
+                if (cx1 - cx0) >= (cy1 - cy0):
+                    pad_x, pad_y = along, across
+                else:
+                    pad_x, pad_y = across, along
+                bands = [
+                    [
+                        max(0, ex0 - pad_x),
+                        max(0, ey0 - pad_y),
+                        min(page.width, ex1 + pad_x),
+                        min(page.height, ey1 + pad_y),
+                    ]
+                    for ex0, ey0, ex1, ey1 in (unit.erase_boxes or [unit.bbox])
+                ]
+                # The searched rectangle stays generous: the paper branch and
+                # the glyph polarity are read from it, and a crop holding
+                # nothing but lettering makes both statistics meaningless --
+                # shrunk to the bands, the area cap also starts dropping whole
+                # glyphs, which leaves the source text showing through.
                 margin = min(128, max(96, round(style.font_size * 0.8)))
                 bounded = [
                     max(0, cx0 - margin),
@@ -1114,7 +1200,7 @@ class ArtworkPreservingRenderer:
                     min(page.width, cx1 + margin),
                     min(page.height, cy1 + margin),
                 ]
-                rgb, _, _ = self._erase(rgb, bounded, focus=unit.bbox)
+                rgb, _, _ = self._erase(rgb, bounded, focus=unit.bbox, bands=bands)
                 continue
             # Grouping several OCR lines is useful for coherent recognition and
             # typesetting, but erasing their union also destroys every drawing
@@ -1145,7 +1231,16 @@ class ArtworkPreservingRenderer:
             # Sample the balloon colour from the untouched page, not from the
             # already-erased buffer: inpainted pixels no longer describe the
             # original background and would let the growth run past the border.
-            box = self._typeset_box(original, unit, styles[unit.id])
+            box = self._typeset_box(
+                original,
+                unit,
+                styles[unit.id],
+                avoid=[
+                    other.crop_bbox or other.bbox
+                    for other in active
+                    if other.id != unit.id
+                ],
+            )
             x0, y0, x1, y1 = box
             region = rendered.crop((x0, y0, x1, y1))
             self._draw(region, unit.zh, [0, 0, x1 - x0, y1 - y0], styles[unit.id])
