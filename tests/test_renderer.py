@@ -23,6 +23,25 @@ from manga_localizer.renderer import (
 )
 
 
+def test_a_latin_source_is_never_typeset_vertically():
+    """A nearly square Latin box must not become right-to-left columns.
+
+    ``"'Sup"`` in a 43x27 box met the ``height >= width * 0.62`` rule
+    meant for stacks of Japanese columns, so the three-character
+    translation was drawn one character per column starting at the
+    right edge: it read backwards (\u300c\uff1f\u6837\u548b\u300d).
+    """
+    rgb = np.full((70, 70, 3), 240, dtype=np.uint8)
+    box = [8, 16, 51, 43]
+    latin = TextUnit("p001u10", box, list(box), "'Sup", 0.93)
+    latin.zh = "\u548b\u6837\uff1f"
+    assert ArtworkPreservingRenderer._analyze_style(rgb, latin).vertical is False
+
+    japanese = TextUnit("p001u01", box, list(box), "\u305d\u308c\u306a\u306e", 0.93)
+    japanese.zh = "\u7136\u800c"
+    assert ArtworkPreservingRenderer._analyze_style(rgb, japanese).vertical is True
+
+
 def _measured_font():
     """A real CJK font, or a skip: the wrapping tests measure glyph widths."""
     try:
@@ -798,4 +817,42 @@ def test_two_boxes_in_one_shared_balloon_do_not_claim_the_same_space():
     )
     assert first[3] <= second[1] or second[3] <= first[1], "the boxes must not overlap"
     assert first[3] > upper[3] and second[1] < lower[1], "both keep room to grow"
+
+def test_an_artwork_strip_window_still_erases_its_letters():
+    # The artwork profile cleans one detector line at a time, so its window is
+    # barely wider than that line: 100x30 here, where each letter is 252px.
+    # A 6% area cap is 180px, smaller than a single letter, so every glyph was
+    # dismissed as "too big to be text" and the English stayed on the page
+    # under the translation ("ARRIVED", "LOOKS ADORABLE", "ARTNER").
+    image = Image.new("RGB", (200, 120), (245, 205, 230))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((10, 20, 190, 100), fill=(238, 212, 233))
+    for x in (40, 62, 84, 106):
+        draw.rectangle((x, 42, x + 11, 62), fill=(14, 14, 14))
+    strip = [34, 38, 134, 68]
+    rgb = np.asarray(image).copy()
+    source_ink = _dark_pixels(rgb, (34, 38, 134, 68))
+    assert source_ink > 900
+
+    tight, _, _ = ArtworkPreservingRenderer._erase(
+        rgb.copy(), strip, area_ratio=0.06
+    )
+    assert _dark_pixels(tight, (34, 38, 134, 68)) == source_ink, "6% keeps every glyph"
+
+    cleaned, _, _ = ArtworkPreservingRenderer._erase(
+        rgb.copy(), strip, area_ratio=0.12
+    )
+    assert _dark_pixels(cleaned, (34, 38, 134, 68)) == 0, "12% fits a whole letter"
+
+
+def test_the_grown_box_is_always_integral():
+    # A proportional growth limit is a float, and the box goes straight into
+    # PIL's crop/paste: page 38 of Pink World died with "'float' object cannot
+    # be interpreted as an integer" once that limit won over the flat
+    # allowance.  Odd widths are what expose it.
+    image = np.full((200, 240, 3), (232, 130, 180), dtype=np.uint8)
+    cv2.ellipse(image, (120, 100), (100, 70), 0, 0, 360, (255, 255, 255), -1)
+    for box in ([100, 90, 155, 103], [101, 91, 154, 102], [61, 41, 79, 49]):
+        grown = ArtworkPreservingRenderer._uniform_balloon_box(image, box)
+        assert all(type(value) is int for value in grown), (box, grown)
 

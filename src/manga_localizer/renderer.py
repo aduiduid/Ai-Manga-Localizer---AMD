@@ -15,7 +15,12 @@ from PIL import Image, ImageDraw, ImageFont
 from .config import AppPaths
 from .inpainting import LaMaInpainter
 from .model_manager import ModelManager
-from .ocr import PageOCR, TextUnit, prune_detached_orthogonal_outliers
+from .ocr import (
+    JP_RE,
+    PageOCR,
+    TextUnit,
+    prune_detached_orthogonal_outliers,
+)
 
 
 FONT_URL = (
@@ -421,8 +426,15 @@ class ArtworkPreservingRenderer:
             for box in source_boxes
             if (box[2] - box[0]) > (box[3] - box[1])
         ) >= len(source_boxes) / 2
+        # A Latin source is horizontal by definition.  The height rule
+        # below exists for stacks of Japanese columns, and on a nearly
+        # square Latin box it turned "'Sup" into three one-character
+        # columns drawn from the right, so the translation read
+        # backwards.
         vertical = unit.special == "cover_title" or (
-            height >= width * 0.62 and not stacked_lines
+            JP_RE.search(unit.ja) is not None
+            and height >= width * 0.62
+            and not stacked_lines
         )
 
         dark = (gray < 105).astype(np.uint8)
@@ -740,6 +752,7 @@ class ArtworkPreservingRenderer:
         box: list[int],
         focus: list[int] | None = None,
         bands: list[list[int]] | None = None,
+        area_ratio: float = 0.06,
     ) -> tuple[np.ndarray, float, float]:
         """Erase the source glyphs inside ``box``.
 
@@ -748,8 +761,19 @@ class ArtworkPreservingRenderer:
         balloon border, a lock of hair or a hat brim that falls inside the
         searched rectangle is left alone.  The mask used to be free to claim
         anything in the rectangle, which is how those came back inpainted.
+
+        ``area_ratio`` caps one component as a share of ``box``, so it has to
+        match how large ``box`` is.  The quality path searches a generous
+        window around the unit, where 6% leaves room for a whole glyph.  The
+        artwork path calls this once per detector line on a window barely wider
+        than the line itself, and there 6% of the area is smaller than a single
+        letter: the letter was dropped as "too big to be text" and stayed on the
+        page underneath the translation.
         """
-        x0, y0, x1, y1 = box
+        # Integral by construction.  numpy accepts floats in a slice and
+        # silently truncates them, which hides the mistake until the mask and
+        # the write-back disagree by one pixel.
+        x0, y0, x1, y1 = (int(round(value)) for value in box)
         crop = rgb[y0:y1, x0:x1].copy()
         gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
         mean = float(gray.mean()) if gray.size else 255.0
@@ -796,7 +820,7 @@ class ArtworkPreservingRenderer:
                 seeds = (gray > level + 45).astype(np.uint8)
             mask = clip(
                 ArtworkPreservingRenderer._interior_component_mask(
-                    seeds, 7, max_area_ratio=0.06
+                    seeds, 7, max_area_ratio=area_ratio
                 )
             )
             if mask.any():
@@ -1218,10 +1242,11 @@ class ArtworkPreservingRenderer:
                     max(0, min(page.height, ey1 + pad_y)),
                 ]
                 if bounded[2] > bounded[0] and bounded[3] > bounded[1]:
-                    erase = (
-                        self._erase_complete if profile == "quality" else self._erase
-                    )
-                    rgb, _, _ = erase(rgb, bounded)
+                    # Only the artwork profile reaches here; quality took one of
+                    # the branches above.  The window is barely wider than one
+                    # detector line, so the component cap has to be relative to
+                    # that window and generous enough to hold a whole letter.
+                    rgb, _, _ = self._erase(rgb, bounded, area_ratio=0.12)
         rendered = Image.fromarray(rgb)
         for unit in active:
             # The detector box is the default typesetting region; a box too
@@ -1241,7 +1266,10 @@ class ArtworkPreservingRenderer:
                     if other.id != unit.id
                 ],
             )
-            x0, y0, x1, y1 = box
+            # PIL wants integers and this box is geometry, not pixel
+            # indices: round once here so the crop, the drawing and the paste
+            # all speak the same language whatever _typeset_box returns.
+            x0, y0, x1, y1 = (int(round(value)) for value in box)
             region = rendered.crop((x0, y0, x1, y1))
             self._draw(region, unit.zh, [0, 0, x1 - x0, y1 - y0], styles[unit.id])
             rendered.paste(region, (x0, y0))

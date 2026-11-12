@@ -1331,6 +1331,21 @@ def _outlined_light_text_regions_near(
     return regions
 
 
+#: Recognition confidence a box needs before its string is taken as text on a
+#: page that is read as Japanese.
+EFFECT_SCORE_FLOOR = 0.72
+#: The same floor on a page whose text is Latin.  Paddle's recognizer is a
+#: Chinese/English one, so its Latin strings stay trustworthy well below the
+#: Japanese floor: an audit of six English pages found six boxes in
+#: [0.58, 0.72) that clear the small-box floor and every one of them was real
+#: text ("'SUP", "puMP", "S-SLOW", "$I'm--!", "MY DICKYOU CUmE.", ".HEH"),
+#: while everything lower was a one- or two-glyph mis-reading the 650 px^2 floor
+#: drops anyway.  The "'SUP" bubble (34x19 px, score 0.67) was read correctly
+#: and thrown away by the Japanese floor, and no later stage can recover a box
+#: the detector was never allowed to keep.
+LATIN_EFFECT_SCORE_FLOOR = 0.58
+
+
 class PaddleMangaOCR:
     """Paddle text localization followed by manga-specific Japanese recognition.
 
@@ -1427,7 +1442,9 @@ class PaddleMangaOCR:
         return raw.get("res", raw)
 
     @staticmethod
-    def _regions(payload: dict) -> list[dict]:
+    def _regions(
+        payload: dict, effect_score: float = EFFECT_SCORE_FLOOR
+    ) -> list[dict]:
         # A recognition payload carries dt_polys *and* rec_texts.  Preferring the
         # detector polys dropped every recognized string, so each region reached
         # MangaOCR as an empty box and the Japanese-only reader hallucinated the
@@ -1464,7 +1481,11 @@ class PaddleMangaOCR:
                 # px^2, so the old 1,200 px^2 floor dropped it: the balloon kept
                 # its first and last lines, the group only erased the middle
                 # ones, and the leftovers showed around the Chinese text.
-                confident_effect = score >= 0.72 and bool(text)
+                # ``effect_score`` is the caller's floor: a page read as
+                # Latin passes the lower one, because there the
+                # recognized string is the evidence and the confidence
+                # tuned on Japanese pages is not.
+                confident_effect = score >= effect_score and bool(text)
                 if not (has_japanese or large_detector_box or confident_effect):
                     continue
                 if (
@@ -1659,6 +1680,7 @@ class PaddleMangaOCR:
         image = Image.open(image_path).convert("RGB")
         results = list(self.detector.predict(str(image_path)))
         payload = self._payload(results[0]) if results else {}
+        recognition_payload: dict = {}
         regions = self._regions(payload)
         if self.recognition_detector is not None:
             recognition_results = list(
@@ -1692,6 +1714,14 @@ class PaddleMangaOCR:
         # line.  Paddle's recognizer reads Latin text reliably, so a Latin page
         # keeps only the boxes that actually carry a string.
         if page_reads_as_latin(regions, self._declared_language()):
+            # A Latin page is read by Paddle's own recognizer, so a low
+            # score is no longer evidence of artwork: merge the boxes
+            # below the Japanese floor back in before the text-less ones
+            # are dropped.
+            regions = merge_region_candidates(
+                regions,
+                self._regions(recognition_payload, LATIN_EFFECT_SCORE_FLOOR),
+            )
             regions = [item for item in regions if str(item.get("text", "")).strip()]
         groups = _groups(regions)
         groups.sort(

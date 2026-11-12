@@ -1,3 +1,3 @@
 """Manga Localizer Studio."""
 
-__version__ = "0.10.10"
+__version__ = "0.10.11"

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.10.11 - 2026-11-12
+
+- Typesetting cannot fail on a fractional box.  The growth allowance is a ratio
+  (1.7x, 2.4x), so an odd-sized box grew by a fraction of a pixel; numpy slices
+  truncate that silently but `PIL.paste` does not, and page 38 of a 98-page book
+  ended the job at 38% with "'float' object cannot be interpreted as an integer".
+  The allowance is rounded and both `_erase` and `render_page` coerce their box,
+  so the geometry is integral by construction instead of by luck.
+- A page whose text is Latin keeps the strings Paddle read below the Japanese
+  confidence floor.  The 0.72 floor was tuned on Japanese pages, where a low
+  score usually means a hallucinated reading; on an English page the recognized
+  string is the evidence.  The "'SUP" bubble (43x27 px, score 0.67) was read
+  correctly and dropped, so it was never translated and stayed in English beside
+  the Chinese text.
+- An audit of six English pages shows the lower floor only adds real text
+  ("'SUP", "puMP PUMP", "S-SLOW DOWN.", "$I'm--!", "MY DICKYOU CUmE.", ".HEH")
+  and removes nothing: two-line captions join up, and no page loses a unit.
+- A Latin source is never typeset as columns.  The vertical rule (height at least
+  0.62 of width) exists for stacks of Japanese columns, but on a nearly square
+  Latin box it drew the three-character translation one character per column from
+  the right edge, so the bubble read backwards ("？样咋").  Vertical layout now
+  also requires Japanese in the source text.
+- Page caches from earlier versions are invalidated, because a cached page still
+  holds the OCR result without the recovered bubble.
+- The fast (artwork) profile erases the whole line again.  It cleans one detector
+  line at a time, so its search window is barely wider than the line; the 6%
+  component cap introduced for the generous quality window is smaller than a
+  single letter at that size, and every glyph was dismissed as artwork, leaving
+  "ARRIVED", "LOOKS ADORABLE" and "ARTNER" showing through the translation.  The
+  cap is now a parameter: 12% for the tight artwork window, 6% for quality.
+
 ## 0.10.10 - 2026-11-12
 
 - Short dialogue stops being squeezed to an unreadable size.  The typesetting

@@ -12,6 +12,7 @@ import numpy as np
 from manga_localizer.ocr import (
     HybridMangaOCR,
     JP_RE,
+    LATIN_EFFECT_SCORE_FLOOR,
     OllamaVisionOCR,
     PageOCR,
     PaddleMangaOCR,
@@ -2174,3 +2175,140 @@ def test_ink_tiles_stay_quiet_on_an_empty_page():
     gray = np.full((1140, 999), 255, dtype=np.uint8)
 
     assert ink_tile_hints(page, gray) == []
+
+def test_the_japanese_floor_drops_the_sup_bubble_paddle_read_correctly():
+    """Paddle read "'Sup" and the confidence floor threw the box away.
+
+    The bubble's recognized box is 43x27 px and its string scored 0.67, under
+    the 0.72 floor, so the page reached the renderer without the bubble at all.
+    """
+    payload = {
+        "rec_boxes": [[385, 679, 428, 706]],
+        "rec_texts": ["'Sup"],
+        "rec_scores": [0.6686],
+    }
+
+    assert PaddleMangaOCR._regions(payload) == []
+    kept = PaddleMangaOCR._regions(payload, LATIN_EFFECT_SCORE_FLOOR)
+
+    assert [(item["text"], item["box"]) for item in kept] == [
+        ("'Sup", [385, 679, 428, 706])
+    ]
+
+
+def test_the_latin_floor_still_drops_a_tiny_misreading():
+    """Relaxing the floor must not let one-glyph noise through.
+
+    A 15x7 px box scored 0.61 on an English page; it stays under the 650 px^2
+    floor that only a confident string of two characters or more may cross.
+    """
+    payload = {
+        "rec_boxes": [[146, 78, 161, 85], [700, 1109, 794, 1122]],
+        "rec_texts": ["5", "MY DICKYOU CUmE."],
+        "rec_scores": [0.61, 0.6315],
+    }
+
+    kept = PaddleMangaOCR._regions(payload, LATIN_EFFECT_SCORE_FLOOR)
+
+    assert [item["text"] for item in kept] == ["MY DICKYOU CUmE."]
+
+
+def test_a_declared_latin_page_keeps_a_low_confidence_bubble(tmp_path):
+    """The floor is chosen per page, not per region.
+
+    The detector payload carries no text; the recognizer's box for the bubble
+    scored 0.67 and only the lower floor lets it in.
+    """
+    source = tmp_path / "page.png"
+    Image.new("RGB", (800, 1129), "white").save(source)
+
+    class Detector:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "dt_polys": [
+                            [[40, 60], [760, 60], [760, 110], [40, 110]],
+                        ],
+                        "dt_scores": [0.9],
+                    }
+                }
+            ]
+
+    class Recognizer:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "rec_boxes": [
+                            [40, 60, 760, 110],
+                            [385, 679, 428, 706],
+                        ],
+                        "rec_texts": ["ASK YOUR MOTHER ABOUT THE STARS", "'SUP"],
+                        "rec_scores": [0.94, 0.6686],
+                    }
+                }
+            ]
+
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.detector = Detector()
+    service.recognition_detector = Recognizer()
+    service.reader = lambda _crop: "それなのに"
+    service.profile = "quality"
+    service.source_language = "en"
+
+    page = service.analyze(source, 1)
+
+    assert [unit.ja for unit in page.units] == [
+        "ASK YOUR MOTHER ABOUT THE STARS",
+        "'SUP",
+    ]
+
+
+def test_a_declared_japanese_page_does_not_relax_its_floor(tmp_path):
+    """A Japanese book keeps the floor that was tuned on its own pages.
+
+    The Latin bubble beside a kana caption is dropped there: on a Japanese page
+    a low-score Latin string is a misreading until the page says otherwise.
+    """
+    source = tmp_path / "page.png"
+    Image.new("RGB", (800, 1129), "white").save(source)
+
+    class Detector:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "dt_polys": [
+                            [[40, 60], [760, 60], [760, 110], [40, 110]],
+                        ],
+                        "dt_scores": [0.9],
+                    }
+                }
+            ]
+
+    class Recognizer:
+        def predict(self, _image):
+            return [
+                {
+                    "res": {
+                        "rec_boxes": [
+                            [40, 60, 760, 110],
+                            [385, 679, 428, 706],
+                        ],
+                        "rec_texts": ["それはなのに", "'SUP"],
+                        "rec_scores": [0.94, 0.6686],
+                    }
+                }
+            ]
+
+    service = PaddleMangaOCR.__new__(PaddleMangaOCR)
+    service.detector = Detector()
+    service.recognition_detector = Recognizer()
+    service.reader = lambda _crop: "それなのに"
+    service.profile = "quality"
+    service.source_language = "ja"
+
+    page = service.analyze(source, 1)
+
+    assert [unit.ja for unit in page.units] == ["それなのに"]

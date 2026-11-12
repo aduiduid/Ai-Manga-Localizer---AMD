@@ -65,7 +65,10 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 12: the tight-crop audit may no longer demote a unit the full page read as
 # dialogue, so a cached page still holds the Latin aside ("SUPONGO...") that the
 # crop pass labelled artwork_text and left untranslated.
-OCR_CACHE_VERSION = 12
+# 13: a page read as Latin now keeps recognized strings below the Japanese
+# confidence floor, so a cached page still misses the "'SUP" bubble that Paddle
+# read correctly and the 0.72 floor threw away.
+OCR_CACHE_VERSION = 13
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same
