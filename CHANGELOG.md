@@ -1,3 +1,17 @@
+## 0.10.13 - 2026-11-12
+
+- The task queue no longer rebuilds itself on every poll.  Each tick used to
+  replace all rows with fresh markup, which destroyed the row and the cancel
+  button under the cursor roughly once a second and restarted every CSS
+  transition on the page.  Rows are now compared as strings and only the ones
+  that changed are swapped, so a tick that moves one folder touches one row.
+- A settings change is saved once, 300ms after the last edit, and no longer
+  drags a full model re-discovery (`/api/models?refresh=true`) behind it.  With
+  26 controls saving on every `change` event, arrowing through a dropdown used
+  to fire two requests per keystroke.
+- The history list keeps its DOM when the data is unchanged, and its rows share
+  one delegated click listener instead of one listener per row.
+
 ## 0.10.12 - 2026-11-12
 
 - Instruction labels never reach the page.  The effect prompt asks the model

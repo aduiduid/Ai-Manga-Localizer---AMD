@@ -687,3 +687,31 @@ def test_a_failed_poll_reschedules_instead_of_ending_the_updates():
     assert "state.pollFailures=(state.pollFailures||0)+1" in poll
     assert "state.pollTimer=setTimeout(pollJob,Math.min(8000," in poll
     assert "pollFailures:0" in javascript
+def test_a_poll_tick_keeps_the_rows_the_user_is_about_to_click():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    # Every tick used to rewrite the whole task list, so the row under the
+    # cursor and its drop button were destroyed and rebuilt about once a second.
+    assert "batchRows:null" in javascript
+    assert "function paintBatchRows(rows,htmls)" in javascript
+    assert "if(painted[index]===htmls[index])continue" in javascript
+    assert "paintBatchRows(rows,tasks.map(" in javascript
+    assert "rows.innerHTML=tasks.length?" not in javascript
+
+
+def test_settings_are_saved_once_after_the_user_stops_changing_them():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "function queueSettingsSave()" in javascript
+    assert 'setTimeout(saveSettings,300)' in javascript
+    assert 'addEventListener("change",queueSettingsSave)' in javascript
+    assert 'addEventListener("change",saveSettings)' not in javascript
+    save = javascript.split("async function saveSettings(){", 1)[1].split("\n", 1)[0]
+    # A settings save used to drag a full model re-discovery behind it.
+    assert "refreshModels" not in save
+
+
+def test_the_history_list_is_only_rebuilt_when_it_changed():
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "if(html!==state.jobsHtml){state.jobsHtml=html;list.innerHTML=html}" in javascript
+    # One listener on the container instead of one per row.
+    assert "$$('.job-item').forEach(" not in javascript
+    assert '"#jobList").addEventListener("click"' in javascript
