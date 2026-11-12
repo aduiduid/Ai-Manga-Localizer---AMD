@@ -47,6 +47,7 @@ from .translator import (
     OllamaTranslator,
     OpenAICompatibleTranslator,
     PromptTranslator,
+    clean_translations,
     ensure_ollama_model,
 )
 
@@ -592,6 +593,18 @@ class LocalizerPipeline:
                     f"推理服务输出退化，{collapsed_chunks} 个批次"
                     f"（{collapsed_units} 处）已跳过并保留原文",
                 )
+        # Every backend, staged role and resumed draft can leave the prompt's
+        # ``[拟声词]`` label inside the answer; strip it once here instead of
+        # teaching the renderer about translation instructions.
+        relabelled = clean_translations(pages)
+        if relabelled:
+            self._emit(
+                emit,
+                "translate",
+                total,
+                total,
+                f"{relabelled} 处译文里的说明标签已剥离",
+            )
         quality = completion_summary(pages, request.preserve_sfx)
         fallback_ids = preserve_unresolved_units(pages, quality)
         if fallback_ids:

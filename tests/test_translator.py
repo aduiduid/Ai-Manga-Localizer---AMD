@@ -1897,3 +1897,55 @@ def test_progress_reports_each_page_before_the_chunk_finishes():
     # Both pages travel in one chunk, and the bar reports page 1 while that
     # chunk is still being translated instead of jumping once when it ends.
     assert ticks == [(0, 2), (1, 2), (2, 2)]
+
+def test_a_label_the_prompt_asked_for_never_reaches_the_page():
+    # The effect prompt asks for ``[拟声词] 咔嚓咔嚓``; 180 answers in one book
+    # carried the label into the artwork, where it reads as printed dialogue.
+    assert translator.strip_instruction_labels("[拟声词] 咔嚓咔嚓", "MUNCH") == "咔嚓咔嚓"
+    assert translator.strip_instruction_labels("FAP [拟声词：啪嗒]", "FAP") == "啪嗒"
+    assert translator.strip_instruction_labels("[sfx] 砰", "THUD") == "砰"
+
+
+def test_an_answer_that_was_only_a_label_falls_back_to_the_sound():
+    assert translator.strip_instruction_labels("[拟声词]", "PLAP") == ""
+    assert translator.effect_fallback("PLAP") == translator.GENERIC_EFFECT
+    assert translator.effect_fallback("THUD") == "咚"
+    assert translator.effect_fallback("WHMP!").endswith("！")
+
+
+def test_a_boxed_word_the_model_chose_keeps_the_word_and_loses_the_box():
+    # ``[拍]`` is not an instruction, it is the model boxing its own answer.
+    assert translator.strip_instruction_labels("[拍]", "SLAP") == "拍"
+    assert translator.strip_instruction_labels("现在过来。[拍]", "NOW COME HERE. SLAP") == (
+        "现在过来。拍"
+    )
+    # An id-shaped bracket is not a label and must survive untouched.
+    assert translator.strip_instruction_labels("这是[1]测试", "これはテスト") == "这是[1]测试"
+
+
+def test_the_cleaning_pass_covers_every_unit_of_a_page():
+    pages = [
+        PageOCR(
+            1,
+            "001.png",
+            100,
+            100,
+            [
+                TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], "PLAP", 1.0,
+                         zh="[拟声词]"),
+                TextUnit("p001u02", [0, 0, 20, 20], [0, 0, 20, 20], "SLAP", 1.0,
+                         zh="[拍]"),
+                TextUnit("p001u03", [0, 0, 20, 20], [0, 0, 20, 20], "HELLO", 1.0,
+                         zh="你好。"),
+                TextUnit("p001u04", [0, 0, 20, 20], [0, 0, 20, 20], "KEEP", 1.0,
+                         zh="保留", skip=True),
+            ],
+        )
+    ]
+    changed = translator.clean_translations(pages)
+    units = {unit.id: unit.zh for unit in pages[0].units}
+    assert changed == 2
+    assert units["p001u01"] == translator.GENERIC_EFFECT
+    assert units["p001u02"] == "拍"
+    assert units["p001u03"] == "你好。"
+    assert units["p001u04"] == "保留"

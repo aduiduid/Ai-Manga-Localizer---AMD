@@ -169,6 +169,104 @@ def short_effect_source(text: str) -> bool:
     return latin_only_source(stripped) or bool(INTERJECTION_HINT_RE.search(stripped))
 
 
+# The effect prompt asks for an inline label -- ``[拟声词] 咔嚓咔嚓``,
+# ``FAP [拟声词：啪]`` -- and the batch prompt asks for a bracketed id, so the
+# model writes brackets into the answer too (``[拍]``).  Both are instructions,
+# not translation: one 98-page book printed 180 of them onto the artwork.
+INSTRUCTION_BRACKET_RE = re.compile(r"[\[\u3010]([^\]\u3011\n]{0,16})[\]\u3011]")
+EFFECT_LABEL_RE = re.compile(
+    r"^(?:拟声词|拟音词|拟音|拟声|效果音|音效|背景音|动效|声音|轻声|"
+    r"sfx|sound\s*effect|sound)\s*[:：]?\s*",
+    re.IGNORECASE,
+)
+# ponytail: an effect the model refused to name collapses to one impact glyph.
+# Extend ``sfx._LATIN_SFX`` when a book needs the real sound (SLAP -> 啪,
+# CLICK -> 咔哒); printing the English source instead is not an option.
+GENERIC_EFFECT = "啪"
+
+
+def strip_instruction_labels(text: str, source: str = "") -> str:
+    """Remove the labels a model echoes back instead of naming the sound.
+
+    A label can carry its own answer after the colon (``[拟声词：啪]`` -> ``啪``),
+    so that payload survives; a bare ``[拟声词]`` leaves nothing and the caller
+    falls back to ``effect_fallback``.  A Latin source word repeated outside the
+    bracket (``FAP [拟声词：啪]``) is the model copying its input, not
+    translating it, so it goes too.
+    """
+    if not INSTRUCTION_BRACKET_RE.search(text):
+        return text
+    latin_source = latin_only_source(source)
+    source_words = {
+        re.sub(r"[^a-z]", "", word.casefold())
+        for word in re.findall(r"[A-Za-z]+", source)
+    }
+    source_words.discard("")
+
+    def unwrap(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        labelled = EFFECT_LABEL_RE.sub("", inner).strip()
+        if labelled != inner:
+            return f" {labelled} " if labelled else " "
+        # ``[拍]`` / ``[晃]`` is the model boxing the word it chose for the
+        # sound.  A bracket never belongs on the page, so the word survives and
+        # the box does not -- for a Japanese source too.
+        if len(inner) <= 6 and not re.search(r"[A-Za-z0-9]", inner):
+            return f" {inner} "
+        return match.group(0)
+
+    cleaned = re.sub(r"\s+", " ", INSTRUCTION_BRACKET_RE.sub(unwrap, text)).strip()
+    if latin_source:
+        kept = [
+            token
+            for token in cleaned.split(" ")
+            if re.sub(r"[^a-z]", "", token.casefold()) not in source_words
+        ]
+        # The model copies its Latin input instead of translating it; the rest
+        # of the answer is Chinese and reads worse with the gaps left behind.
+        cleaned = " ".join(kept).strip()
+    # Joining tokens left a space next to the Chinese that was never there.
+    return re.sub(r"(?<=[\u3400-\u9fff。，、！？…；：])\s+|\s+(?=[\u3400-\u9fff])", "", cleaned)
+
+
+def effect_fallback(source: str) -> str:
+    """Name a sound for an effect whose translation was only a label.
+
+    The English source was already rejected as untranslated, so the answer has
+    to be Chinese even when no rule recognises the sound.
+    """
+    meaning = lookup_sfx(source)
+    if meaning is not None:
+        return meaning.chinese
+    emphasis = "！" if re.search(r"[!！]|ッ\s*$", source.strip()) else ""
+    return GENERIC_EFFECT + emphasis
+
+
+def clean_translations(pages: Iterable[PageOCR]) -> int:
+    """Strip instruction labels from every finished translation in place.
+
+    Runs once over the whole book so every backend, every staged role and every
+    resumed draft meets the same rule; the renderer never learns a label exists.
+    """
+    changed = 0
+    for page in pages:
+        for unit in page.units:
+            if unit.skip or not unit.zh:
+                continue
+            if not INSTRUCTION_BRACKET_RE.search(unit.zh):
+                continue
+            cleaned = strip_instruction_labels(unit.zh, unit.ja)
+            if not KANJI_RE.search(cleaned):
+                # The label was the whole answer.  The source was already
+                # rejected as untranslated, so printing it back is the one
+                # outcome the caller ruled out.
+                cleaned = effect_fallback(unit.ja)
+            if cleaned and cleaned != unit.zh:
+                unit.zh = cleaned
+                changed += 1
+    return changed
+
+
 def duplicate_context_leak(
     unit: TextUnit, candidate: str, candidate_sources: dict[str, set[str]]
 ) -> bool:

@@ -1,3 +1,16 @@
+## 0.10.12 - 2026-11-12
+
+- Instruction labels never reach the page.  The effect prompt asks the model
+  to answer `[拟声词] 咔嚓咔嚓`, and 180 answers across one 98-page book kept
+  the label, so the brackets were typeset into the artwork as if they were
+  dialogue.  A single cleaning pass now runs after every backend, staged role
+  and resumed draft, right before the transcript is written.
+- A bracketed word the model chose survives without its box: `[拍]` becomes
+  拍, because the bracket was never the answer.
+- An answer that was only a label falls back to the sound: the `sfx` dictionary
+  first, then one impact glyph, so a stripped unit is never left empty and the
+  renderer never has to skip it.
+
 # Changelog
 
 ## 0.10.11 - 2026-11-12
