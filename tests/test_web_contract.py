@@ -474,15 +474,15 @@ def test_llama_backend_option_and_fields():
     html = (WEB / "index.html").read_text(encoding="utf-8")
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
     i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
-    # Both backend pickers name llama.cpp; the workspace one runs jobs and the
-    # settings one only persists, so they carry separate translations.
-    assert 'data-i18n="translation.inference.llama"' in html
-    assert 'data-i18n="settings.inference.llama"' in html
+    # Both backend pickers name llama.cpp with the same string: one enum has one
+    # label, so the two views cannot drift apart again.
+    assert html.count('data-i18n="translation.inference.llama"') == 2
+    assert 'data-i18n="settings.inference.llama"' not in html
     # Two inference pickers plus the two OCR pickers: llama.cpp can drive either
     # stage, and the OCR one is what keeps a hybrid run off the Ollama daemon.
     assert html.count('<option value="llama"') == 4
-    assert 'data-i18n="translation.ocr.llama"' in html
-    assert 'data-i18n="settings.ocr.llama"' in html
+    assert html.count('data-i18n="translation.ocr.llama"') == 2
+    assert 'data-i18n="settings.ocr.llama"' not in html
     # The setup block mirrors the seven backend fields the API accepts.
     assert 'id="llamaFields" class="backend-fields" hidden' in html
     for field in (
@@ -521,7 +521,6 @@ def test_llama_backend_option_and_fields():
     assert "const missing=state.models.filter(model=>isBootstrapModel(model)&&model.required&&!model.ready);$(\"#bootstrapModels\").hidden" in javascript
     keys = [
         "translation.inference.llama",
-        "settings.inference.llama",
         "settings.llama.title",
         "settings.llama.detail",
         "settings.llama.model",
@@ -717,14 +716,34 @@ def test_the_history_list_is_only_rebuilt_when_it_changed():
     assert '"#jobList").addEventListener("click"' in javascript
 
 
+def test_the_three_quality_tiers_differ_only_in_the_work_they_choose():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    # One dropdown on the workspace, none in settings: quality belongs to the job.
+    assert html.count('id="qualityProfile"') == 1
+    for value in ("quality", "fast", "fast_translate_quality_render"):
+        assert html.count(f'<option value="{value}"') == 1, value
+    assert 'data-i18n="translation.quality.hybrid"' in html
+    assert i18n.count('"translation.quality.hybrid"') == 3
+    # The settings pickers reuse the workspace strings, so the two views can no
+    # longer describe one backend with two different names.
+    for key in ("settings.ocr.hybrid", "settings.ocr.builtin", "settings.ocr.llama", "settings.ocr.ollama"):
+        assert key not in i18n, key
+    for key in ("settings.inference.ollama", "settings.inference.builtin", "settings.inference.llama", "settings.inference.llama7b", "settings.inference.online"):
+        assert key not in i18n, key
+    # The status line keys stay: they are not labels of a backend.
+    for key in ("settings.inference.notChecked", "settings.inference.checking", "settings.inference.connected"):
+        assert i18n.count(f'"{key}"') == 3, key
+
+
 def test_the_single_model_backend_has_its_own_option_and_hides_the_candidate_fields():
     html = (WEB / "index.html").read_text(encoding="utf-8")
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
     i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
     # One option in each inference picker; the OCR pickers keep their own four.
     assert html.count('<option value="llama_7b"') == 2
-    assert 'data-i18n="translation.inference.llama7b"' in html
-    assert 'data-i18n="settings.inference.llama7b"' in html
+    assert html.count('data-i18n="translation.inference.llama7b"') == 2
+    assert 'data-i18n="settings.inference.llama7b"' not in html
     assert (
         'id="llamaSingleHint" class="backend-hint" '
         'data-i18n="settings.llama.singleHint" hidden' in html
@@ -742,7 +761,6 @@ def test_the_single_model_backend_has_its_own_option_and_hides_the_candidate_fie
     assert '$("#llamaModel").disabled=single' in javascript
     for key in (
         "translation.inference.llama7b",
-        "settings.inference.llama7b",
         "settings.llama.singleHint",
     ):
         assert i18n.count(f'"{key}"') == 3, key

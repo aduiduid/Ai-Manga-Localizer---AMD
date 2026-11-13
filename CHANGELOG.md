@@ -1,3 +1,17 @@
+## 0.12.0 - 2026-11-13
+
+- One quality choice now answers three separate questions.  A new profile,
+  `fast_translate_quality_render`, keeps the single-pass translation of the fast
+  profile and renders with the quality clean-up (LaMa repaint, connected-component
+  balloons, bounded erase bands).  On a dense art page that ran 53.2 s as
+  `quality` and 32.1 s in the new profile, with 3362 differing pixels out of
+  904800 -- the lettering differs, the repaired art does not.
+- The quality dropdown gains "Fast translation + quality render (single model + LaMa)".
+- The settings view no longer renames the OCR and inference backends: both views
+  show the workspace labels, so one enum has exactly one label.  The status keys
+  (`notChecked`/`checking`/`connected`) stay, because they describe a connection
+  rather than a backend.
+
 ## 0.11.1 - 2026-11-13
 
 - A third llama.cpp backend, ``llama_7b``, runs one file for a single

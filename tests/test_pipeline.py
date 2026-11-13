@@ -459,6 +459,80 @@ def _pipeline_paths(tmp_path):
     )
 
 
+def test_the_hybrid_profile_pays_for_quality_pixels_but_not_for_review(monkeypatch, tmp_path):
+    """Fast translation and quality rendering are independent choices."""
+    from manga_localizer import pipeline as pipeline_module
+    from manga_localizer.config import (
+        cleanup_profile_for,
+        ocr_profile_for,
+        translate_quality,
+    )
+
+    # One dropdown, three answers: review, page reading, pixel repair.
+    assert translate_quality("quality") is True
+    assert translate_quality("fast") is False
+    assert translate_quality("fast_translate_quality_render") is False
+    assert ocr_profile_for("fast") == "fast"
+    assert ocr_profile_for("fast_translate_quality_render") == "quality"
+    assert cleanup_profile_for("fast") == "artwork"
+    assert cleanup_profile_for("quality") == "quality"
+    assert cleanup_profile_for("fast_translate_quality_render") == "quality"
+
+    # The renderer only knows "quality" and "artwork"; the hybrid profile lands
+    # on the LaMa path without renderer.py learning a third name.
+    renderer = pipeline_module.ArtworkPreservingRenderer(
+        cleanup_profile=cleanup_profile_for("fast_translate_quality_render"),
+        paths=_pipeline_paths(tmp_path),
+    )
+    assert renderer.cleanup_profile == "quality"
+
+    slot = LlamaSlot(
+        role="editor",
+        alias=LLAMA_SINGLE_MODEL,
+        base_url="http://127.0.0.1:8080",
+        port=8080,
+        context=65536,
+        weights=tmp_path / "model.gguf",
+    )
+    asked: dict[str, str] = {}
+
+    class FakeManager:
+        def port_notes(self):
+            return {}
+
+        def stop(self, role):
+            pass
+
+        def can_relaunch(self, role):
+            return False
+
+    monkeypatch.setattr(
+        pipeline_module, "manager_from_settings", lambda paths, settings: FakeManager()
+    )
+
+    def fake_open_slots(manager, settings, emit=None):
+        asked["model"] = settings.llama_model
+        asked["review"] = settings.llama_review_model
+        return {"editor": slot, "review": None}
+
+    monkeypatch.setattr(pipeline_module, "open_slots", fake_open_slots)
+    request = PipelineRequest(
+        source=tmp_path / "src",
+        output=tmp_path / "out",
+        quality_profile="fast_translate_quality_render",
+        inference_backend="llama",
+        ocr_backend="builtin",
+        llama_model="model",
+        llama_review_model="review-model",
+    )
+    translator = LocalizerPipeline(_pipeline_paths(tmp_path))._llama_translator(
+        request, lambda *args: None, 5
+    )
+    # The hybrid profile keeps one pass: the candidate never runs.
+    assert type(translator) is LlamaTranslator
+    assert asked == {"model": "model", "review": "review-model"}
+
+
 def test_the_single_model_backend_pins_one_file_and_opens_no_candidate(monkeypatch, tmp_path):
     from manga_localizer import pipeline as pipeline_module
 

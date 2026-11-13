@@ -19,6 +19,9 @@ from .config import (
     LLAMA_CONTEXT_TOKENS,
     AppPaths,
     UserSettings,
+    cleanup_profile_for,
+    ocr_profile_for,
+    translate_quality,
 )
 from .hardware import apply_cpu_threads
 from .name_dictionary import JapaneseNameDictionary
@@ -346,7 +349,7 @@ class LocalizerPipeline:
                     image_path,
                     index,
                     request.ocr_backend,
-                    request.quality_profile,
+                    ocr_profile_for(request.quality_profile),
                     (
                         request.ollama_ocr_model
                         if request.ocr_backend in VISION_OCR_BACKENDS
@@ -370,7 +373,7 @@ class LocalizerPipeline:
                     ocr = PaddleMangaOCR(
                         self.paths,
                         request.device,
-                        request.quality_profile,
+                        ocr_profile_for(request.quality_profile),
                         request.source_language,
                     )
                 elif request.ocr_backend == "hybrid":
@@ -383,7 +386,7 @@ class LocalizerPipeline:
                         request.ollama_base_url,
                         request.ollama_ocr_model,
                         request.device,
-                        request.quality_profile,
+                        ocr_profile_for(request.quality_profile),
                         request.source_language,
                     )
                 elif request.ocr_backend == "llama":
@@ -395,7 +398,7 @@ class LocalizerPipeline:
                         "",
                         source_language=request.source_language,
                         device=request.device,
-                        profile=request.quality_profile,
+                        profile=ocr_profile_for(request.quality_profile),
                         semantics=self._llama_vision(request, emit),
                     )
                 elif request.ocr_backend == "ollama":
@@ -441,7 +444,7 @@ class LocalizerPipeline:
                     page_payload["_cache"] = {
                         "version": OCR_CACHE_VERSION,
                         "ocr_backend": request.ocr_backend,
-                        "quality_profile": request.quality_profile,
+                        "quality_profile": ocr_profile_for(request.quality_profile),
                         "ocr_model": (
                             request.ollama_ocr_model
                             if request.ocr_backend in VISION_OCR_BACKENDS
@@ -506,7 +509,7 @@ class LocalizerPipeline:
                 request.target_language,
                 JapaneseNameDictionary(self.paths.cache),
             )
-            if request.quality_profile == "quality":
+            if translate_quality(request.quality_profile):
                 model_manager = ModelManager(self.paths)
                 if not model_manager.is_ready("hy-mt2"):
                     self._emit(emit, "translate", 0, total, "下载 Hy-MT2 独立翻译候选")
@@ -630,7 +633,7 @@ class LocalizerPipeline:
             else glossary,
         )
 
-        if request.quality_profile == "quality":
+        if cleanup_profile_for(request.quality_profile) == "quality":
             manager = ModelManager(self.paths)
             if not manager.lama_weights_path().exists():
                 self._emit(emit, "render", 0, total, "首次使用：下载 LaMa 补画模型")
@@ -644,7 +647,7 @@ class LocalizerPipeline:
         if request.output_format not in {"webp", "png"}:
             raise ValueError(f"Unknown lossless output format: {request.output_format}")
         renderer = ArtworkPreservingRenderer(
-            cleanup_profile=request.quality_profile,
+            cleanup_profile=cleanup_profile_for(request.quality_profile),
             paths=self.paths,
             device=request.device,
         )
@@ -737,7 +740,7 @@ class LocalizerPipeline:
         if single:
             # One model, one pass: no candidate, no auditor, no cross-check.
             return editor
-        if request.quality_profile != "quality":
+        if not translate_quality(request.quality_profile):
             return editor
         if staged:
             self._emit(

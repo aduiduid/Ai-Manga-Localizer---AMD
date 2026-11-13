@@ -14,6 +14,8 @@ from .config import (
     AppPaths,
     UserSettings,
     configure_model_caches,
+    cleanup_profile_for,
+    translate_quality,
 )
 
 
@@ -88,7 +90,7 @@ def ollama_specs(runtime: OllamaRuntime, ocr_backend: str, quality_profile: str)
     if runtime.translation_model:
         wanted.append((runtime.translation_model, "translation"))
     if (
-        quality_profile == "quality"
+        translate_quality(quality_profile)
         and runtime.hy_mt2_tag
         and runtime.hy_mt2_tag != runtime.translation_model
     ):
@@ -144,7 +146,7 @@ def llama_specs(
     else:
         wanted = [((settings.llama_model or "").strip(), "translation")]
         review = (settings.llama_review_model or "").strip()
-        if settings.quality_profile == "quality" and review and review != wanted[0][0]:
+        if translate_quality(settings.quality_profile) and review and review != wanted[0][0]:
             wanted.append((review, "review"))
     # ``hybrid``/``ollama`` read pages through Ollama but the model itself may
     # already be one of these blobs, so listing it is still honest.  ``llama``
@@ -287,12 +289,15 @@ class ModelManager:
                         or inference_backend == "builtin"
                         or (
                             inference_backend == "ollama"
-                            and quality_profile == "quality"
+                            and translate_quality(quality_profile)
                             # Served from Ollama instead of the torch weights.
                             and not (runtime and runtime.hy_mt2_tag)
                         )
                     )
-                    and (spec.id != "lama" or quality_profile == "quality")
+                    and (
+                        spec.id != "lama"
+                        or cleanup_profile_for(quality_profile) == "quality"
+                    )
                     and (
                         # llama.cpp vision OCR still uses the Paddle/MangaOCR
                         # detector for geometry, so those weights stay required.

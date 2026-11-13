@@ -32,6 +32,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .config import translate_quality
+
 # llama-server's own default port is 9931, which would collide with nothing the
 # user expects; the documented ports are used instead because the UI shows them.
 DEFAULT_MAIN_PORT = 8080
@@ -915,7 +917,7 @@ def open_slots(
             port=editor_port,
             context=editor_context,
         )
-    if getattr(settings, "quality_profile", "quality") == "quality":
+    if translate_quality(getattr(settings, "quality_profile", "quality")):
         review_tag = (getattr(settings, "llama_review_model", "") or "").strip()
         if review_tag and review_tag != editor_tag:
             review_files = manager.resolve(review_tag)

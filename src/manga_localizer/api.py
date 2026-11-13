@@ -28,6 +28,7 @@ from .config import (
     LLAMA_CONTEXT_TOKENS,
     AppPaths,
     UserSettings,
+    translate_quality,
 )
 from .hardware import detect_cpu, normalize_cpu_threads
 from .jobs import JobService
@@ -58,7 +59,9 @@ class SettingsPayload(BaseModel):
     story_context: bool = True
     context_pages: int = Field(6, ge=0, le=12)
     preserve_sfx: bool = False
-    quality_profile: Literal["quality", "fast"] = "quality"
+    quality_profile: Literal[
+        "quality", "fast", "fast_translate_quality_render"
+    ] = "quality"
     output_format: Literal["webp", "png"] = "webp"
     prefer_modelscope: bool = True
     device: str = "auto"
@@ -111,7 +114,9 @@ class BootstrapPayload(BaseModel):
 class InferenceCheckPayload(BaseModel):
     inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"]
     ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
-    quality_profile: Literal["quality", "fast"] = "quality"
+    quality_profile: Literal[
+        "quality", "fast", "fast_translate_quality_render"
+    ] = "quality"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
     ollama_ocr_model: str = DEFAULT_OLLAMA_VISION_MODEL
@@ -400,7 +405,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                     wanted = [
                         payload.llama_model,
                         payload.llama_review_model
-                        if payload.quality_profile == "quality"
+                        if translate_quality(payload.quality_profile)
                         else "",
                     ]
                 missing = [
@@ -568,7 +573,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                 required_local = []
                 if payload.inference_backend == "builtin" or (
                     payload.inference_backend == "ollama"
-                    and payload.quality_profile == "quality"
+                    and translate_quality(payload.quality_profile)
                 ):
                     required_local.append("hy-mt2")
                 if payload.ocr_backend != "ollama":

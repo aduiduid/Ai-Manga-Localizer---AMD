@@ -70,6 +70,27 @@ LLAMA_SINGLE_MODEL = "HY-MT2-7B-Q6_K"
 # for the single request a translation pass makes at a time.
 LLAMA_CONTEXT_TOKENS = 65_536
 
+# One user-facing choice, three answers about the shape of the work.  Translation
+# decides whether the staged review runs, OCR decides how a page is read, and
+# cleanup decides whether pixels are repainted.  Keeping them separate is what
+# lets a single-model translation sit next to the quality renderer.
+QUALITY_PROFILES = ("quality", "fast", "fast_translate_quality_render")
+
+
+def translate_quality(profile: str) -> bool:
+    """Whether this profile spends the second and third pass on review."""
+    return profile == "quality"
+
+
+def ocr_profile_for(profile: str) -> str:
+    """The OCR gear: only the light profile also reads pages cheaply."""
+    return "fast" if profile == "fast" else "quality"
+
+
+def cleanup_profile_for(profile: str) -> str:
+    """The renderer gear: ``quality`` repaints with LaMa, ``artwork`` does not."""
+    return "artwork" if profile == "fast" else "quality"
+
 
 @dataclass(frozen=True)
 class AppPaths:
