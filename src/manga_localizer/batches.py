@@ -154,7 +154,7 @@ def release_runtime(settings: UserSettings | None) -> list[str]:
     if settings is not None:
         # Either stage can be the one that started a llama-server: OCR reads
         # pages through it too, so the translation backend alone is not the test.
-        if settings.inference_backend == "llama" or settings.ocr_backend == "llama":
+        if settings.inference_backend in {"llama", "llama_7b"} or settings.ocr_backend == "llama":
             live = running_llama_slots()
             for slot in live:
                 released.append(f"{slot.alias}@{slot.port}")

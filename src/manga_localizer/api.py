@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .batches import BatchService, make_task
 from .config import (
+    LLAMA_SINGLE_MODEL,
     DEFAULT_LLAMA_MAIN_PORT,
     DEFAULT_LLAMA_MODEL,
     DEFAULT_LLAMA_REVIEW_MODEL,
@@ -71,7 +72,7 @@ class SettingsPayload(BaseModel):
     # graph would clip.
     notify_volume: int = Field(70, ge=0, le=100)
     ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
-    inference_backend: Literal["builtin", "ollama", "llama", "online"] = "ollama"
+    inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
     ollama_ocr_model: str = DEFAULT_OLLAMA_VISION_MODEL
@@ -108,7 +109,7 @@ class BootstrapPayload(BaseModel):
 
 
 class InferenceCheckPayload(BaseModel):
-    inference_backend: Literal["builtin", "ollama", "llama", "online"]
+    inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"]
     ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
     quality_profile: Literal["quality", "fast"] = "quality"
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -286,7 +287,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     def model_status(refresh: bool = Query(False)):
         del refresh
         active = UserSettings.load(paths.settings)
-        if active.inference_backend == "llama":
+        if active.inference_backend in {"llama", "llama_7b"}:
             # llama.cpp loads the Ollama blobs directly, so the model page lists
             # the manifests that resolve instead of asking a daemon.
             try:
@@ -380,7 +381,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
 
     @app.post("/api/inference/check")
     def check_inference(payload: InferenceCheckPayload):
-        if payload.inference_backend == "llama":
+        if payload.inference_backend in {"llama", "llama_7b"}:
             # The llama.cpp path loads the very GGUFs Ollama downloaded, so the
             # check is "can we find the blob and the executable", not "is the
             # daemon answering".  The OCR side may still be on Ollama, which is
@@ -391,28 +392,32 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                     setattr(settings, key, value)
             try:
                 manager = manager_from_settings(paths, settings)
-                missing = [
-                    tag
-                    for tag in (
+                if payload.inference_backend == "llama_7b":
+                    # One model, one pass: the candidate is never loaded, so it
+                    # must not be demanded here either.
+                    wanted = [LLAMA_SINGLE_MODEL]
+                else:
+                    wanted = [
                         payload.llama_model,
                         payload.llama_review_model
                         if payload.quality_profile == "quality"
                         else "",
-                    )
-                    if tag and manager.resolve(tag) is None
+                    ]
+                missing = [
+                    tag for tag in wanted if tag and manager.resolve(tag) is None
                 ]
                 executable = manager.find_executable()
             except LlamaServerError as exc:
                 return {
                     "ok": False,
-                    "backend": "llama",
+                    "backend": payload.inference_backend,
                     "message": str(exc),
                     "models": [],
                 }
             if missing:
                 return {
                     "ok": False,
-                    "backend": "llama",
+                    "backend": payload.inference_backend,
                     "message": f"未找到 GGUF 模型 {', '.join(missing)}",
                     "models": [],
                 }
@@ -443,12 +448,12 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                         ocr_note = f"；OCR 模型 {payload.ollama_ocr_model} 未找到"
             return {
                 "ok": ocr_ready,
-                "backend": "llama",
+                "backend": payload.inference_backend,
                 "message": (
-                    f"llama.cpp 就绪：{executable.name}、{payload.llama_model}"
+                    f"llama.cpp 就绪：{executable.name}、{wanted[0]}"
                     + ocr_note
                 ),
-                "models": [payload.llama_model, payload.llama_review_model],
+                "models": [tag for tag in wanted if tag],
             }
         if payload.inference_backend == "builtin" and payload.ocr_backend == "builtin":
             ready = models.is_ready("hy-mt2")
@@ -458,7 +463,10 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
                 "message": "Hy-MT2 已就绪" if ready else "Hy-MT2 尚未下载",
                 "models": ["hy-mt2"] if ready else [],
             }
-        if payload.ocr_backend == "llama" and payload.inference_backend != "llama":
+        if payload.ocr_backend == "llama" and payload.inference_backend not in {
+            "llama",
+            "llama_7b",
+        }:
             # OCR on llama.cpp while the translation side stays where it was.
             # The vision model must still resolve to a GGUF that carries an
             # mmproj projector, which has nothing to do with the translator.

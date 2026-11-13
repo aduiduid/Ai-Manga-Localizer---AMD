@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from PIL import Image
 
 from .config import (
+    LLAMA_SINGLE_MODEL,
     DEFAULT_LLAMA_MAIN_PORT,
     DEFAULT_LLAMA_MODEL,
     DEFAULT_LLAMA_REVIEW_MODEL,
@@ -542,7 +543,7 @@ class LocalizerPipeline:
                 request.target_language,
                 JapaneseNameDictionary(self.paths.cache),
             )
-        elif request.inference_backend == "llama":
+        elif request.inference_backend in {"llama", "llama_7b"}:
             translator = self._llama_translator(request, emit, total)
         else:
             raise ValueError(f"Unknown inference backend: {request.inference_backend}")
@@ -686,16 +687,35 @@ class LocalizerPipeline:
         needed at all: a folder whose transcript is already reviewed must not
         pay for a 7 GB model load.
         """
+        # The single-model backend pins one file and never opens the candidate
+        # pass, so the slot it wants is the shape a quality run takes when no
+        # review model is configured.
+        single = request.inference_backend == "llama_7b"
         manager = manager_from_settings(self.paths, request)
+        if single and request.ocr_backend == "llama":
+            # This model carries no mmproj, so the vision server is a different
+            # process from a different file and OCR is done with it already.
+            # Leaving it up would put the 9B and the 7B on the card together.
+            manager.stop("vision")
         notes = getattr(manager, "port_notes", lambda: {})()
         if notes:
             self._emit(
                 emit, "translate", 0, total, "；".join(notes.values())
             )
-        self._emit(emit, "translate", 0, total, "启动 llama.cpp 推理服务")
+        self._emit(
+            emit,
+            "translate",
+            0,
+            total,
+            f"单模型模式，仅运行 {LLAMA_SINGLE_MODEL}"
+            if single
+            else "启动 llama.cpp 推理服务",
+        )
         slots = open_slots(
             manager,
-            request,
+            replace(request, llama_model=LLAMA_SINGLE_MODEL, llama_review_model="")
+            if single
+            else request,
             emit=lambda message: self._emit(emit, "translate", 0, total, message),
         )
         review_slot = slots.get("review")
@@ -711,9 +731,12 @@ class LocalizerPipeline:
             names,
             manager=manager,
             role="editor",
-            label=request.llama_model,
+            label=LLAMA_SINGLE_MODEL if single else request.llama_model,
             evict=staged,
         )
+        if single:
+            # One model, one pass: no candidate, no auditor, no cross-check.
+            return editor
         if request.quality_profile != "quality":
             return editor
         if staged:

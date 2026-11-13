@@ -73,3 +73,36 @@ def test_lama_download_is_checksum_validated_and_atomic(monkeypatch, tmp_path):
     assert weights.read_bytes() == payload
     assert manager.is_ready("lama")
     assert not weights.with_suffix(".pt.part").exists()
+
+
+def test_the_single_model_backend_lists_one_row_and_no_review_row():
+    from manga_localizer.config import LLAMA_SINGLE_MODEL, UserSettings
+    from manga_localizer.model_manager import llama_specs
+
+    nine_b = "DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest"
+    settings = UserSettings(
+        inference_backend="llama_7b",
+        quality_profile="quality",
+        ocr_backend="builtin",
+        llama_model=nine_b,
+        llama_review_model="hy-mt2-1.8b:q8",
+    )
+    rows = llama_specs({}, settings)
+    # Neither the 9B nor the 1.8B candidate is loaded by this backend.
+    assert [row["id"] for row in rows] == [f"llama:{LLAMA_SINGLE_MODEL}"]
+    assert [row["role"] for row in rows] == ["llama.cpp 主翻译模型"]
+
+    vision = UserSettings(
+        inference_backend="llama_7b",
+        quality_profile="quality",
+        ocr_backend="llama",
+        ollama_ocr_model=nine_b,
+        llama_model=nine_b,
+        llama_review_model="hy-mt2-1.8b:q8",
+    )
+    # The vision model is a different process from a different file, so a
+    # hybrid or llama OCR run still lists it.
+    assert [row["id"] for row in llama_specs({}, vision)] == [
+        f"llama:{LLAMA_SINGLE_MODEL}",
+        f"llama:{nine_b}",
+    ]

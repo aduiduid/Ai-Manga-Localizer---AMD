@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Callable
 from urllib.request import Request, urlopen
 
-from .config import AppPaths, UserSettings, configure_model_caches
+from .config import (
+    LLAMA_SINGLE_MODEL,
+    AppPaths,
+    UserSettings,
+    configure_model_caches,
+)
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -133,10 +138,14 @@ def llama_specs(
     daemon to ask.  ``available`` is ``None`` when the manifest folder itself
     could not be read, which is reported as offline rather than missing.
     """
-    wanted: list[tuple[str, str]] = [((settings.llama_model or "").strip(), "translation")]
-    review = (settings.llama_review_model or "").strip()
-    if settings.quality_profile == "quality" and review and review != wanted[0][0]:
-        wanted.append((review, "review"))
+    if settings.inference_backend == "llama_7b":
+        # The single-model backend runs one file and opens no candidate pass.
+        wanted: list[tuple[str, str]] = [(LLAMA_SINGLE_MODEL, "translation")]
+    else:
+        wanted = [((settings.llama_model or "").strip(), "translation")]
+        review = (settings.llama_review_model or "").strip()
+        if settings.quality_profile == "quality" and review and review != wanted[0][0]:
+            wanted.append((review, "review"))
     # ``hybrid``/``ollama`` read pages through Ollama but the model itself may
     # already be one of these blobs, so listing it is still honest.  ``llama``
     # means llama.cpp reads the pages directly, which is exactly this file.

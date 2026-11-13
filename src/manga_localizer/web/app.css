@@ -68,3 +68,4 @@
 .execution-copy small.error{color:var(--danger)}
 .backend-hint{background:#f3efe7;border-style:dashed}
 .backend-hint>p{font-size:11px;line-height:1.7;color:var(--muted)}
+#llamaSingleHint{grid-column:1/-1;margin:0}

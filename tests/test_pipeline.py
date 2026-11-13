@@ -3,9 +3,13 @@ import json
 import pytest
 from PIL import Image
 
+from manga_localizer.config import AppPaths, LLAMA_SINGLE_MODEL
+from manga_localizer.llama_server import LlamaSlot
+from manga_localizer.llama_translator import LlamaTranslator
 from manga_localizer.pipeline import (
     OCR_CACHE_VERSION,
     LocalizerPipeline,
+    PipelineRequest,
     completion_summary,
     merge_glossaries,
     page_from_dict,
@@ -442,3 +446,117 @@ def test_a_draft_for_another_target_language_is_ignored(tmp_path):
     # Half a book in the wrong language is worse than re-translating it.
     assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
     assert page.units[0].zh == ""
+
+
+def _pipeline_paths(tmp_path):
+    root = tmp_path / "home"
+    return AppPaths(
+        root,
+        root / "models",
+        root / "cache",
+        root / "jobs",
+        root / "settings.json",
+    )
+
+
+def test_the_single_model_backend_pins_one_file_and_opens_no_candidate(monkeypatch, tmp_path):
+    from manga_localizer import pipeline as pipeline_module
+
+    slot = LlamaSlot(
+        role="editor",
+        alias=LLAMA_SINGLE_MODEL,
+        base_url="http://127.0.0.1:8080",
+        port=8080,
+        context=65536,
+        weights=tmp_path / "HY-MT2-7B-Q6_K.gguf",
+    )
+    asked: dict[str, str] = {}
+    calls: list[tuple[str, str]] = []
+
+    class FakeManager:
+        def port_notes(self):
+            return {}
+
+        def stop(self, role):
+            calls.append(("stop", role))
+
+        def can_relaunch(self, role):
+            return False
+
+    def fake_manager_from_settings(paths, settings):
+        return FakeManager()
+
+    def fake_open_slots(manager, settings, emit=None):
+        asked["model"] = settings.llama_model
+        asked["review"] = settings.llama_review_model
+        return {"editor": slot, "review": None}
+
+    monkeypatch.setattr(pipeline_module, "manager_from_settings", fake_manager_from_settings)
+    monkeypatch.setattr(pipeline_module, "open_slots", fake_open_slots)
+
+    request = PipelineRequest(
+        source=tmp_path / "src",
+        output=tmp_path / "out",
+        quality_profile="quality",
+        inference_backend="llama_7b",
+        ocr_backend="llama",
+        llama_model="DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest",
+        llama_review_model="hy-mt2-1.8b:q8",
+    )
+    messages: list[str] = []
+    translator = LocalizerPipeline(_pipeline_paths(tmp_path))._llama_translator(
+        request, lambda phase, current, total, message: messages.append(message), 5
+    )
+    # The one pass is the editor itself: no candidate, no auditor, no cross-check.
+    assert type(translator) is LlamaTranslator
+    assert translator.evict is False
+    # The recipe pins the single file and clears the review model.
+    assert asked == {"model": LLAMA_SINGLE_MODEL, "review": ""}
+    assert f"单模型模式，仅运行 {LLAMA_SINGLE_MODEL}" in messages
+    # A vision server from the OCR stage is a second model on the card.
+    assert ("stop", "vision") in calls
+
+
+def test_the_single_model_backend_keeps_a_vision_server_it_never_started(monkeypatch, tmp_path):
+    from manga_localizer import pipeline as pipeline_module
+
+    slot = LlamaSlot(
+        role="editor",
+        alias=LLAMA_SINGLE_MODEL,
+        base_url="http://127.0.0.1:8080",
+        port=8080,
+        context=65536,
+        weights=tmp_path / "HY-MT2-7B-Q6_K.gguf",
+    )
+    calls: list[tuple[str, str]] = []
+
+    class FakeManager:
+        def port_notes(self):
+            return {}
+
+        def stop(self, role):
+            calls.append(("stop", role))
+
+        def can_relaunch(self, role):
+            return False
+
+    monkeypatch.setattr(
+        pipeline_module, "manager_from_settings", lambda paths, settings: FakeManager()
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "open_slots",
+        lambda manager, settings, emit=None: {"editor": slot, "review": None},
+    )
+    request = PipelineRequest(
+        source=tmp_path / "src",
+        output=tmp_path / "out",
+        quality_profile="quality",
+        inference_backend="llama_7b",
+        ocr_backend="builtin",
+    )
+    translator = LocalizerPipeline(_pipeline_paths(tmp_path))._llama_translator(
+        request, lambda *args: None, 5
+    )
+    assert type(translator) is LlamaTranslator
+    assert calls == []

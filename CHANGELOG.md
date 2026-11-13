@@ -1,3 +1,15 @@
+## 0.11.1 - 2026-11-13
+
+- A third llama.cpp backend, ``llama_7b``, runs one file for a single
+  translation pass: no candidate, no auditor, no cross-check.  One process on
+  one port, and the vision server is stopped first when OCR ran on llama.cpp,
+  so the 7B never shares the card with the 9B.
+- The setup block hides the model, review model and preset fields while that
+  backend is chosen, and notes that the pass trades the 9B's correction work
+  for speed.
+- The model list reports the single file as the only row for that backend,
+  with no review row.
+
 ## 0.11.0 - 2026-11-13
 
 - A GGUF file dropped into `data/llama-models` is now found by its own name, so

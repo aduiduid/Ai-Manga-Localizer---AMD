@@ -498,7 +498,7 @@ def test_llama_backend_option_and_fields():
     assert 'id="llamaContextTokens" type="number" min="4096" max="262144"' in html
     # llama exposes its own block; Ollama's block still serves a hybrid OCR run,
     # and a llama OCR run reuses the vision-model input of Ollama's block.
-    assert '$("#llamaFields").hidden=backend!=="llama"&&ocr!=="llama"' in javascript
+    assert '$("#llamaFields").hidden=backend!=="llama"&&backend!=="llama_7b"&&ocr!=="llama"' in javascript
     assert "$(\"#ollamaFields\").hidden=backend!==\"ollama\"&&!['hybrid','ollama','llama'].includes(ocr)" in javascript
     # Loading, collecting and saving all seven values keeps the form honest.
     assert '$("#llamaModel").value=settings.llama_model||""' in javascript
@@ -715,3 +715,34 @@ def test_the_history_list_is_only_rebuilt_when_it_changed():
     # One listener on the container instead of one per row.
     assert "$$('.job-item').forEach(" not in javascript
     assert '"#jobList").addEventListener("click"' in javascript
+
+
+def test_the_single_model_backend_has_its_own_option_and_hides_the_candidate_fields():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    # One option in each inference picker; the OCR pickers keep their own four.
+    assert html.count('<option value="llama_7b"') == 2
+    assert 'data-i18n="translation.inference.llama7b"' in html
+    assert 'data-i18n="settings.inference.llama7b"' in html
+    assert (
+        'id="llamaSingleHint" class="backend-hint" '
+        'data-i18n="settings.llama.singleHint" hidden' in html
+    )
+    # The block opens for the single-model backend too, and the fields that
+    # describe a second model step aside while it is chosen.
+    assert (
+        '$("#llamaFields").hidden=backend!=="llama"&&backend!=="llama_7b"&&ocr!=="llama"'
+        in javascript
+    )
+    assert 'const single=backend==="llama_7b"' in javascript
+    for node in ("llamaModel", "llamaReviewModel", "llamaReviewPreset"):
+        assert f'showNode($("#{node}").closest("label"),!single)' in javascript, node
+    assert 'showNode($("#llamaSingleHint"),single)' in javascript
+    assert '$("#llamaModel").disabled=single' in javascript
+    for key in (
+        "translation.inference.llama7b",
+        "settings.inference.llama7b",
+        "settings.llama.singleHint",
+    ):
+        assert i18n.count(f'"{key}"') == 3, key

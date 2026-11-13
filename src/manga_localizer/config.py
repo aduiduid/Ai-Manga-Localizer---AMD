@@ -62,6 +62,10 @@ DEFAULT_LLAMA_VISION_PORT = 8082
 DEFAULT_LLAMA_MODEL = DEFAULT_OLLAMA_MODEL
 DEFAULT_LLAMA_REVIEW_MODEL = "hy-mt2-1.8b:q8"
 
+# The single-model backend names one specific file instead of taking a
+# setting: the point of it is "run this one alone, one pass, least VRAM".
+LLAMA_SINGLE_MODEL = "HY-MT2-7B-Q6_K"
+
 # llama-server's ``-c`` is per slot; one slot per server keeps the whole budget
 # for the single request a translation pass makes at a time.
 LLAMA_CONTEXT_TOKENS = 65_536
