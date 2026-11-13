@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "manga-localizer-studio"
-version = "0.12.1"
+version = "0.13.0"
 description = "Local-first manga OCR, coherent translation, and artwork-preserving text replacement."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "MIT" }
-authors = [{ name = "Manga Localizer Studio contributors" }]
+authors = [{ name = "aduiduid", url = "https://github.com/aduiduid" }]
 keywords = ["manga", "ocr", "translation", "localization", "modelscope"]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -51,9 +51,9 @@ test = [
 manga-localizer = "manga_localizer.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/whmc76/manga-localizer-studio"
-Repository = "https://github.com/whmc76/manga-localizer-studio"
-Issues = "https://github.com/whmc76/manga-localizer-studio/issues"
+Homepage = "https://github.com/aduiduid/Ai-Manga-Localizer---AMD"
+Repository = "https://github.com/aduiduid/Ai-Manga-Localizer---AMD"
+Issues = "https://github.com/aduiduid/Ai-Manga-Localizer---AMD/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/manga_localizer"]

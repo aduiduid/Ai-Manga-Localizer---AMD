@@ -1,6 +1,6 @@
 # 性能体检报告（0.10.4，llama.cpp 全链路）
 
-实测日期：2026-11-09。装置：`_home\tmp\prof1.py` / `prof2.py` / `prof3_batch.py` / `prof4_missing.py`，
+实测日期：2026-11-09。装置：四个一次性剖析脚本（`prof1.py` / `prof2.py` / `prof3_batch.py` / `prof4_missing.py`，未入库），
 对 `LlamaVisionOCR._chat` 与 `LlamaChatClient.chat/chat_json/chat_vision` 打桩计时，按阶段打点。
 硬件：RX 9070 XT（Vulkan，`-ngl 99`）、Ryzen 7 5700X（16 线程）、`llama_context_tokens=65536`、`-np 1`。
 

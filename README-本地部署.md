@@ -2,7 +2,7 @@
 
 上游：https://github.com/whmc76/manga-localizer-studio （v0.5.2，MIT）
 
-安装在 `D:\Manga Localizer----Ben-Ding-Fan-Yi`（纯 ASCII 路径，无需任何 junction）。
+安装在任意**纯 ASCII** 路径下，例如 `D:\MangaLocalizer`（无需任何 junction）。
 
 ## 怎么用
 
@@ -11,7 +11,7 @@
 命令行也可以，参数透传给 CLI：
 
 ```
-start.bat run "E:\工作区\漫画\日文\某本" -o "E:\工作区\漫画\中文\某本"
+start.bat run "D:\manga\某本" -o "D:\manga\某本--已汉化"
 start.bat doctor
 start.bat models status
 ```
@@ -51,9 +51,9 @@ ollama qwen3.5-9b 6.6 GB + hy-mt2-1.8b:q8 1.9 GB。
 
 Paddle 的 C++ 推理和 `torch.jit.load` 都**打不开含中文的路径**，会报
 `json.exception.parse_error.101` / `open file failed because of errno 2`。
-所以安装目录名 `Manga Localizer----Ben-Ding-Fan-Yi` 是纯 ASCII 的，**不要再改成中文名**。
+所以安装目录名必须是纯 ASCII 的，**不要带中文**。
 
-之前目录在 `E:\工作区\漫画\Manga Localizer--本地自动翻译` 时，靠 `E:\mls` junction 绕开这个问题；
+如果目录名里带了中文，可以用一个纯 ASCII 的 junction（如 `D:\mls`）绕开这个问题；
 搬到 D 盘并改成 ASCII 名之后 junction 已删除，`start.bat` 全部用 `%~dp0` 相对路径。
 
 配套的两处上游改动（不依赖 junction，但仍然是必需的历史修复）：

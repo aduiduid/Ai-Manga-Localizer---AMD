@@ -22,3 +22,24 @@ jobs/
 docs/benchmarks/*.json
 docs/benchmarks/*.txt
 .runlogs/
+
+# Model weights.  They are gigabytes and every one of them is downloadable
+# again; the repository only carries the code that loads them.
+*.gguf
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.ckpt
+*.bin
+models/
+llama-models/
+ollama-models/
+
+# Local runtime data: MLS_HOME contents, the USERPROFILE sandbox the launcher
+# creates, and the per-page OCR cache written next to rendered output.
+data/
+_home/
+_cache/
+_dl/
+*.ocr.json

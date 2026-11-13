@@ -1,3 +1,10 @@
+## 0.13.0 - 2026-11-13
+
+- **The repository now carries code only.** `.gitignore` excludes `*.gguf`, `*.pt`, `*.pth`, `*.safetensors`, `*.onnx`, `*.ckpt`, `models/`, `llama-models/`, `ollama-models/`, `data/`, `_home/`, `_cache/` and `*.ocr.json`, so a clone is a few megabytes instead of 27 GB.  Local duplicates (three extra copies of the HuggingFace cache, two of PaddleX, the uv download cache) were removed; finished books and job history were backed up outside the working copy.
+- **`start.bat` works on a fresh clone.** It now looks for `.venv` next to itself and runs `scripts/bootstrap.ps1 -SkipModels` when it is missing, instead of assuming a parent folder with a pre-built environment.  The old machine-specific launcher is gone from the repository.
+- **`scripts/download_models.ps1` fetches the weights.** It wraps `manga_localizer.cli models download` with the same directories `start.bat` exports, so `-All`, `-Model lama` and the bare default all land where the UI looks.  README gained a model table with each file's destination, size and source, plus how GGUF tags map to files in `data\llama-models`.
+- **No personal paths left in tracked files.** `pyproject.toml` now names this fork and its author instead of copying the upstream URLs, and the deployment notes use placeholders instead of one machine's drive layout.
+
 ## 0.12.1 - 2026-11-13
 
 - Every backend option now names its speed and the models it runs, so the

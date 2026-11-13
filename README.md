@@ -42,31 +42,40 @@
 
 ## 环境要求
 
-| 项目 | 本机实测 |
+| 项目 | 要求 |
 | --- | --- |
-| 系统 | Windows 10/11（Linux 亦可，脚本在 `scripts/`） |
-| CPU | AMD Ryzen 5 5600G（6 核 12 线程，OCR 纯 CPU 跑 5–6 核） |
-| 显卡 | AMD Radeon RX 9070 XT —— 只给 Ollama / llama.cpp 用 Vulkan，Paddle 没有 ROCm/DirectML 后端 |
-| 磁盘 | 完整本地质量模式约 15 GB（含 DeepSeek-V4-Pro-Qwen3.5-9B i1-Q6_K 8.3 GB + Hy-MT2 1.9 GB 两份权重；llama.cpp 用硬链接复用同一批 GGUF，不额外占盘） |
-| Python | 3.12.15（uv 托管），torch 2.8.0+cpu / paddlepaddle 3.3.1 / paddleocr 3.7.0 / paddlex 3.7.2 |
-| 推理服务 | Ollama 0.40.14（免安装版放在 `_dl\ollama\`，只保留 vulkan 后端）；llama.cpp 后端直接复用其中自带的 `llama-server.exe`（`0.8.0-dev`，commit `39febd2ad`） |
+| 系统 | Windows 10/11（Linux 亦可，脚本在 `scripts/`）；主操作系统以外未做验证 |
+| Python | **3.11 或 3.12**（`requires-python = ">=3.11,<3.13"`）。推荐装 [uv](https://docs.astral.sh/uv/)，缺它会自动回落到 `venv` + `pip` |
+| 系统组件 | **Vulkan 驱动**（AMD / NVIDIA 均可）。本地大模型走 Vulkan，没有可用驱动时只会退回 CPU，速度会慢一个数量级 |
+| 磁盘 | 纯代码约 3 MB；完整本地质量模式 **约 16 GB**（9B 主模型 8.3 GB + 7B 候选 5.9 GB + 1.8B 候选 1.9 GB，以及 Paddle / MangaOCR / LaMa） |
+| 内存 | 建议 16 GB 以上。OCR 是纯 CPU，跑满 5–6 个核心 |
 
-**安装路径必须是纯 ASCII。** Paddle 的 C++ 推理和 `torch.jit.load` 都打不开含中文的路径，会报 `json.exception.parse_error.101` / `open file failed because of errno 2`。目录名请保持 `Manga Localizer----Ben-Ding-Fan-Yi` 这类纯 ASCII 形式，**不要再改成中文名**；如果搬动目录，还要同步改 `.venv\pyvenv.cfg` 的 `home` 和 `site-packages\_editable_impl_manga_localizer_studio.pth`。
+**参考配置**（本文档的实测环境）：AMD Ryzen 5 5600G（6 核 12 线程）+ AMD Radeon RX 9070 XT（16 GB，Vulkan）；torch 2.8.0+cpu / paddlepaddle 3.3.1 / paddleocr 3.7.0 / paddlex 3.7.2；便携 Ollama 0.40.14（只保留 vulkan 后端），llama.cpp 后端复用其中自带的 `llama-server.exe`（`0.8.0-dev`）。
+
+> **显卡说明**：Paddle 没有 ROCm／DirectML 后端，所以 OCR 始终跑 CPU；GPU 只服务于 Ollama 与 llama.cpp 的翻译／视觉模型。NVIDIA 机器同样可用，装 CUDA 版 torch 也不会被用到，纯属浪费空间。
+
+**安装路径必须是纯 ASCII。** Paddle 的 C++ 推理和 `torch.jit.load` 都打不开含中文的路径，会报 `json.exception.parse_error.101` / `open file failed because of errno 2`。目录名请保持纯 ASCII（例如 `D:\MangaLocalizer`），**不要带中文**；如果搬动目录，还要同步改 `.venv\pyvenv.cfg` 的 `home` 和 `site-packages\_editable_impl_manga_localizer_studio.pth`。
 
 ## 安装与启动
 
-**全新安装**：克隆后先跑引导脚本（`-Profile cpu` 会装 `torch==2.8.0+cpu`、`torchvision==0.23.0+cpu` 并卸载 `paddlepaddle-gpu`），再启动 UI —— 权重留给 UI 里的「准备缺失模型」按需拉取，省掉一次几 GB 的下载。
+克隆后**一条命令就能跑起来**。`start.bat` 发现没有 `.venv` 时会自动调用 `scripts/bootstrap.ps1` 建环境、装依赖（首次需要几分钟、下载约 2 GB 的 Python 包），然后启动 UI：
 
 ```powershell
 git clone https://github.com/aduiduid/Ai-Manga-Localizer---AMD.git
 cd Ai-Manga-Localizer---AMD
-.\scripts\bootstrap.ps1 -Profile cpu -SkipModels
-.\start-windows.bat
+.\start.bat
+```
+
+打开 <http://127.0.0.1:8765>。想先把依赖和权重都装齐（适合离线前预热），手动跑引导脚本：
+
+```powershell
+.\scripts\bootstrap.ps1 -Profile cpu            # 依赖 + 全部模型权重 + doctor 自检
+.\scripts\bootstrap.ps1 -Profile cpu -SkipModels # 只装依赖，权重留给 UI 按需拉
 ```
 
 > AMD 机器上**不要装 CUDA 版 torch**：本分支的设备回落逻辑本身就假设 `torch.cuda.is_available()` 为假，CUDA 轮子既用不到又会让 `torch` 体积翻几倍。`bootstrap.ps1` 的 `-Profile auto` 只在检测到 `nvidia-smi` 时选 `cuda129`，其余情况回落 `cpu`；AMD 机器请显式写 `-Profile cpu`。若本机没装 `uv`，脚本会自动回落到 `python -m venv` + `pip` 的兼容路径。
 
-**本机的启动方式**：本机把项目放在 `<根>\app\` 下（仓库根 = 项目根，环境在 `<根>\app\.venv`），根目录的 `start.bat` 已固化本机用到的全部环境变量 —— `MLS_HOME`、`PADDLE_PDX_CACHE_HOME`、`HF_ENDPOINT=https://hf-mirror.com`、`OLLAMA_MODELS`、`MLS_HY_MT2_OLLAMA`，并把 `USERPROFILE`／`TEMP` 挪到 `_home\`（Paddle 会往 `~/.cache/paddle` 写），同时自动拉起 `_dl\ollama\ollama.exe serve`。
+**启动脚本做了什么**：仓库根目录的 `start.bat` 会在首次运行时调用 `scripts/bootstrap.ps1` 建好 `.venv` 并装依赖，然后把 `MLS_HOME`、`PADDLE_PDX_CACHE_HOME`、`HF_HOME` 全部指向本目录的 `data\`，并把 `USERPROFILE`／`TEMP` 挪到 `_home\`（Paddle 会往 `~/.cache/paddle` 写）。所有缓存与权重都留在 checkout 内部，不污染 C 盘。
 
 ```
 start.bat                              :: 打开 http://127.0.0.1:8765
@@ -75,7 +84,42 @@ start.bat doctor                       :: 环境 + 实际模型清单
 start.bat models status
 ```
 
-`start.bat` 假定 `%~dp0app\.venv\Scripts\python.exe` 已存在（CPU 版 torch）；换机器请改脚本里的 `PY` 路径。**改这个脚本必须保持 CRLF 行尾**，写成 LF 会被 cmd 拆碎成 `'Localizer' is not recognized...`。
+`start.bat` 用 `%~dp0` 定位自己，所以在哪个目录 clone 都能用，不需要改脚本。它会把 `MLS_HOME`、`PADDLE_PDX_CACHE_HOME`、`HF_HOME` 指到 checkout 内的 `data\`，把 `USERPROFILE`／`TEMP` 挪到 `_home\`，**所有缓存与权重都留在项目目录内**。**改这个脚本必须保持 CRLF 行尾**，写成 LF 会被 cmd 拆碎成 `'Localizer' is not recognized...`。
+
+## 模型获取
+
+代码库里不含任何权重（`.gitignore` 排除了 `*.gguf`、`*.pt`、`*.safetensors` 等）。三种拿法，任选一种：
+
+**1）UI 里点「准备缺失模型」** —— 只下载当前后端需要的那几个，最省事。
+
+**2）CLI 一次性拉全** —— 走 `model_manager` 里固化的 URL 与 SHA-256 校验，原子写入：
+
+```powershell
+.\start.bat models download all     # 或单个：paddleocr / manga-ocr / lama / hy-mt2
+.\start.bat models status           # 看清每个权重在不在、多大
+```
+
+**3）手动放置** —— 下表是每个文件的落点，下载后按目录丢进去即可：
+
+| 权重 | 目标目录 | 大小 | 来源 |
+| --- | --- | --- | --- |
+| PaddleOCR（PP-OCRv5 det/rec） | `data\models\paddlex\` | ~130 MB | 首次运行自动拉，源固定为 ModelScope |
+| Manga OCR | `data\models\huggingface\` | ~850 MB | `kha-white/manga-ocr-base`（HuggingFace，走 `HF_ENDPOINT` 镜像） |
+| Big-LaMa | `data\models\lama\big-lama.pt` | 196 MB | [simple-lama-inpainting v0.1.0](https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt)，SHA-256 `7ba7aa7a…9e6b4c` |
+| Hy-MT2 1.8B（CPU torch 后端用） | `data\models\hy-mt2\` | 3.9 GB | ModelScope `Tencent-Hunyuan/Hy-MT2-1.8B` |
+| **GGUF 主模型 / 候选模型** | `data\llama-models\<名字>.gguf` 或 Ollama 的 blob 存储 | 见下 | 自行下载，或用 <https://ollama.com> |
+
+**GGUF 怎么放**：llama.cpp 后端按**标签名**找权重 —— 字段里填 `HY-MT2-7B-Q6_K`，它就会去找 `data\llama-models\HY-MT2-7B-Q6_K.gguf`；填 `hy-mt2-1.8b:q8` 则先在 Ollama 的 manifest 里找，找不到再回退到同名裸文件。多模态视觉 OCR 还要求同目录下有 `<名字>-mmproj.gguf` 投影器，缺了会在启动前明确报错而不是静默跑错。
+
+默认配置用到三个（都可以在设置页改）：
+
+| 用途 | 默认标签 | 大约 |
+| --- | --- | --- |
+| 主译 + 视觉 OCR（多模态） | `DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest` | 6.85 GB + 0.86 GB mmproj |
+| 质量模式候选 | `hy-mt2-1.8b:q8` | 1.78 GB |
+| 「7B 专精极速单跑」模式 | `HY-MT2-7B-Q6_K` | 5.74 GB |
+
+> 如果只想先用起来，把「推理后端」选成 **内置 Hy-MT2（极速）**、**OCR 后端** 选 **内置专用 OCR**，就只需要 PaddleOCR + Manga OCR + Hy-MT2 1.8B，不用碰 GGUF。
 
 ## 使用
 

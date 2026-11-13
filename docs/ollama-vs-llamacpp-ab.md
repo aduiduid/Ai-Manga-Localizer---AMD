@@ -26,7 +26,7 @@
 - **纯冷启动**：每组开跑前卸载 daemon 里的全部模型 / 杀掉所有 `llama-server`，并清空输出目录（无 OCR 缓存、无渲染结果）。
 - **两组**：A = `inference_backend=ollama` + `ocr_backend=hybrid`；B = `inference_backend=llama` + `ocr_backend=llama`。同一个 `LocalizerPipeline`、同一份设置（quality 档、context_pages 12、cpu_threads 16、目标语言简体中文），**唯一变量是后端**。
 - **显存采样**：每 2 s 记录 `\GPU Process Memory(*)\Dedicated Usage` 与 `Shared Usage`，按进程 exe 路径区分"Ollama 自带 runner"与"本项目 stage 的 runner"（两者进程名都叫 `llama-server`，只看名字会误判）。
-- 装置脚本：`_home\tmp\ab_harness.py`（跑测）、`ab_gpu.ps1`（采样）、`ab_compare.py`（比对）、`ab_probe_analyze.py`（纯视觉对撞）。
+- 装置脚本：`ab_harness.py`（跑测）、`ab_gpu.ps1`（采样）、`ab_compare.py`（比对）、`ab_probe_analyze.py`（纯视觉对撞），均为一次性脚本，未入库。
 
 ## 三、总表
 
@@ -135,7 +135,7 @@
 | 关掉 daemon（11434 关闭）后 llama.cpp 能否工作 | **能**。起视觉槽 + 一次 `analyze` = 4 个框 / 13.0 s，框与分数正常（0.91–0.95） |
 | 模型从哪里来 | 直接读 `ollama-models\blobs\sha256-*`（标准 GGUF），通过硬链接映射到 `data\llama-models\*.gguf` |
 | 模型**解析**依赖 daemon 吗 | 不依赖进程，但**依赖 `ollama-models\manifests-v2\` 目录**。删掉该目录后 llama 路径会报"未找到 GGUF 模型" |
-| 卸载 Ollama 能省多少磁盘 | 程序本体 **120 MB**（`_dl\ollama`）。模型 **9,714 MB 必须保留**（`data\llama-models` 里是硬链接，物理上不额外占盘） |
+| 卸载 Ollama 能省多少磁盘 | 程序本体 **120 MB**（便携 Ollama 目录）。模型 **9,714 MB 必须保留**（`data\llama-models` 里是硬链接，物理上不额外占盘） |
 | 需要保留/迁移什么 | 只删 `_dl\ollama` 即可；`ollama-models` 原地保留（或移动后把 `llama_ollama_root` 指过去） |
 
 ## 七、Ollama 仍不可替代的场景
@@ -156,7 +156,7 @@
 
 ## 九、复现方式
 
-四组跑完后，临时夹具与装置脚本已清理（`_home\tmp\ab-final` 与 `ab_harness.py` / `ab_compare.py` / `ab_probe_analyze.py` / `ab_gpu.ps1` 均已删除），要复跑需按下面的做法重建：
+四组跑完后，临时夹具与装置脚本已清理（`ab-final` 目录与 `ab_harness.py` / `ab_compare.py` / `ab_probe_analyze.py` / `ab_gpu.ps1` 均已删除），要复跑需按下面的做法重建：
 
 1. 从被测书里各复制 5 页 / 1 页到临时目录（注意别动原书）。
 2. 冷启动：ollama 组先 `release_ollama_model()` 卸掉全部模型，llama 组先 `stop_llama_servers()` 并杀掉残留进程；删掉输出里的 `.manga-localizer-work`。
