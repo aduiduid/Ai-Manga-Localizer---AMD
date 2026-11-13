@@ -1,3 +1,17 @@
+## 0.11.0 - 2026-11-13
+
+- A GGUF file dropped into `data/llama-models` is now found by its own name, so
+  it resolves and the model list reports it, with its size, as soon as a field
+  points at it.
+- The candidate model no longer has to fit beside the main model.  When the two
+  weight files together exceed 12 GB, the candidate waits for its pass: the
+  editor's server stops after the first pass and the candidate starts for its
+  own, so a 7B candidate (6,503 MB) never sits beside the 9B editor (8,083 MB)
+  on a 16 GB card.  A pair that fits (9B + 1.8B) still runs side by side.
+- The review model row gained a preset picker (1.8B beside the main model, 7B
+  taking turns with it).  The preset only fills in the tag field, so any tag can
+  still be typed by hand.
+
 ## 0.10.13 - 2026-11-12
 
 - The task queue no longer rebuilds itself on every poll.  Each tick used to

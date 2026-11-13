@@ -27,7 +27,7 @@ import socket
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -87,6 +87,33 @@ class LlamaSlot:
     # that was already running when the app looked: its age is not ours
     # to guess.
     started_at: float = 0.0
+
+
+# Two weight sets stay on the card together only while the pair is small.  The
+# 9B editor measured 8,083 MB of dedicated VRAM at its 64K context and the 1.8B
+# candidate 2,165 MB at 8K, which fit in the 15,439 MiB the card had free; the
+# 7.5B candidate adds 6,503 MB to the same editor -- 14,586 MB -- and does not.
+PAIR_RESIDENT_LIMIT_BYTES = 12 * 1024**3
+
+
+def pair_fits_resident(editor: OllamaModelFiles, candidate: OllamaModelFiles) -> bool:
+    """Whether both GGUFs can be held by the GPU at the same time.
+
+    Only the weight files are counted; the KV cache and the desktop come out of
+    what is left, which is why 12 GiB of weights is already too much on a 16 GB
+    card once one of them wants a book-sized context.
+    """
+    try:
+        total = editor.weights.stat().st_size + candidate.weights.stat().st_size
+    except OSError:
+        # A path we cannot measure is not a reason to start stopping servers.
+        return True
+    return total <= PAIR_RESIDENT_LIMIT_BYTES
+
+
+def _stem(tag: str) -> str:
+    """The file name a tag maps to inside the models directory."""
+    return tag.replace(":", "-").replace("/", "-")
 
 
 def _manifest_blob(blobs: Path, digest: str) -> Path | None:
@@ -191,20 +218,46 @@ class LlamaServerManager:
         self._slots: dict[str, tuple[LlamaSlot, subprocess.Popen]] = {}
         self._notes: dict[str, str] = {}
         self._holders = 0
+        # How each role's server is started, so a pass that released it can ask
+        # for the same one again without the caller keeping a parallel record.
+        self._recipes: dict[str, tuple[OllamaModelFiles, int, int]] = {}
         self._discovered: dict[str, OllamaModelFiles] | None = None
 
     # -- discovery ---------------------------------------------------------
     def _ollama_dirs(self) -> tuple[Path, Path]:
         root = self.ollama_root
-        if root is not None:
-            return root / "manifests-v2" / "ollama.com" / "library", root / "blobs"
-        return Path(""), Path("")
+        if root is None:
+            # ``Path("")`` is the working directory, and ``models()`` would walk
+            # every file in it looking for manifests.
+            missing = self.models_root / "ollama-manifests"
+            return missing, missing
+        return root / "manifests-v2" / "ollama.com" / "library", root / "blobs"
 
     def models(self) -> dict[str, OllamaModelFiles]:
         with self._lock:
             if self._discovered is None:
                 manifests, blobs = self._ollama_dirs()
-                self._discovered = discover_ollama_models(manifests, blobs)
+                found = discover_ollama_models(manifests, blobs)
+                # A GGUF the user dropped into the models directory has no
+                # manifest, but ``resolve`` loads it by its own name: the list
+                # has to offer the tag or nobody can ask for it.  A file a
+                # manifest already points at -- directly or through the
+                # hardlink ``_model_path`` gives it -- is already listed.
+                known = {files.weights for files in found.values()}
+                known |= {
+                    self.models_root / f"{_stem(tag)}.gguf" for tag in found
+                }
+                if self.models_root.is_dir():
+                    for path in sorted(self.models_root.glob("*.gguf")):
+                        if path in known or path.name.endswith("-mmproj.gguf"):
+                            continue
+                        projector = path.with_name(f"{path.stem}-mmproj.gguf")
+                        found[path.stem] = OllamaModelFiles(
+                            tag=path.stem,
+                            weights=path,
+                            projector=projector if projector.is_file() else None,
+                        )
+                self._discovered = found
             return self._discovered
 
     def resolve(self, tag: str) -> OllamaModelFiles | None:
@@ -221,7 +274,22 @@ class LlamaServerManager:
         for candidate in (f"{tag}:latest", stripped, f"{stripped}:q8", f"{stripped}:latest"):
             if candidate in models:
                 return models[candidate]
-        return None
+        # A GGUF dropped straight into the models directory is a first-class
+        # model: ``_model_path`` names it after the tag, so a tag that matches a
+        # file name needs no Ollama manifest -- and no second copy of 7 GB.
+        return self.bare_model(tag)
+
+    def bare_model(self, tag: str) -> OllamaModelFiles | None:
+        """The GGUF stored under ``tag`` itself in the models directory."""
+        weights = self.models_root / f"{_stem(tag)}.gguf"
+        if not weights.is_file():
+            return None
+        projector = self.models_root / f"{_stem(tag)}-mmproj.gguf"
+        return OllamaModelFiles(
+            tag=tag,
+            weights=weights,
+            projector=projector if projector.is_file() else None,
+        )
 
     def find_executable(self) -> Path:
         """The ``llama-server`` binary, wherever this install keeps it.
@@ -304,7 +372,7 @@ class LlamaServerManager:
         ``sha256-…`` files is impossible to inspect when a start fails.
         """
         self.models_root.mkdir(parents=True, exist_ok=True)
-        stem = files.tag.replace(":", "-").replace("/", "-")
+        stem = _stem(files.tag)
         weights = self.models_root / f"{stem}.gguf"
         self._link(files.weights, weights)
         projector = None
@@ -366,7 +434,7 @@ class LlamaServerManager:
         timeout: float = START_TIMEOUT_S,
     ) -> LlamaSlot:
         """Start (or reuse) the server for ``role`` and wait until it answers."""
-        alias = files.tag.replace(":", "-").replace("/", "-")
+        alias = _stem(files.tag)
         with self._lock:
             existing = self._slots.get(role)
             if existing is not None:
@@ -524,6 +592,44 @@ class LlamaServerManager:
                 f"为避免长驻退化已重启"
             )
         return None
+
+    def register(
+        self, role: str, files: OllamaModelFiles, port: int, context: int
+    ) -> None:
+        """Remember how to start ``role``, without starting it."""
+        with self._lock:
+            self._recipes[role] = (files, port, context)
+
+    def can_relaunch(self, role: str) -> bool:
+        with self._lock:
+            return role in self._recipes
+
+    def relaunch(self, role: str) -> LlamaSlot:
+        """Start ``role`` again from the recipe ``register`` recorded."""
+        with self._lock:
+            recipe = self._recipes.get(role)
+        if recipe is None:
+            raise LlamaServerError(
+                f"{role} 没有可重启的启动参数，无法重新启动它的推理服务"
+            )
+        files, port, context = recipe
+        return self.start(role, files, port=port, context=context)
+
+    def adopt(self, role: str, slot: LlamaSlot) -> LlamaSlot:
+        """Move a slot another role started under ``role``.
+
+        The OCR pass usually starts the multimodal model first and the
+        translation pass adopts it by tag; without re-keying, ``stop("editor")``
+        would find nothing to stop and the VRAM would never come back.
+        """
+        with self._lock:
+            for key, (existing, process) in list(self._slots.items()):
+                if existing is slot and key != role:
+                    del self._slots[key]
+                    renamed = replace(slot, role=role)
+                    self._slots[role] = (renamed, process)
+                    return renamed
+        return slot
 
     def port_notes(self) -> dict[str, str]:
         """Port moves recorded during the last start, one line per role.
@@ -763,12 +869,16 @@ def manager_from_settings(paths, settings) -> LlamaServerManager:
     return manager
 
 
-def open_slots(manager: LlamaServerManager, settings, emit=None) -> dict[str, LlamaSlot]:
+def open_slots(
+    manager: LlamaServerManager, settings, emit=None
+) -> dict[str, LlamaSlot | None]:
     """Start the editor, and in quality mode the review candidate too.
 
     Both are needed before the first translation request, and each one costs a
     model load, so the caller reports progress instead of leaving the UI silent
-    for half a minute.
+    for half a minute.  The one exception is a candidate whose weights cannot
+    share the card with the editor: it is registered but not started, and the
+    ``None`` tells the caller to start it on demand instead.
     """
     editor_tag = (getattr(settings, "llama_model", "") or "").strip()
     if not editor_tag:
@@ -780,23 +890,30 @@ def open_slots(manager: LlamaServerManager, settings, emit=None) -> dict[str, Ll
             f"{manager.ollama_root} 下没有同名 manifest。"
             "请先在模型页下载该模型，或把设置里的模型名改成已下载的模型。"
         )
-    slots: dict[str, LlamaSlot] = {}
+    slots: dict[str, LlamaSlot | None] = {}
+    editor_port = int(
+        getattr(settings, "llama_main_port", DEFAULT_MAIN_PORT) or DEFAULT_MAIN_PORT
+    )
+    editor_context = int(
+        getattr(settings, "llama_context_tokens", 0) or DEFAULT_CONTEXT_TOKENS
+    )
+    # Registered before the start so the recipe exists whether this process
+    # spawned the server or adopted one the OCR pass had already loaded.
+    manager.register("editor", editor_files, editor_port, editor_context)
     existing = manager.reusable_slot(editor_tag)
     if existing is not None:
         # Vision OCR already loaded this very model for the OCR pass.  Starting
         # a second copy would put two 7 GB weights on one GPU for no gain, so
         # the running server is adopted instead.
-        slots["editor"] = existing
+        slots["editor"] = manager.adopt("editor", existing)
     else:
         if emit:
             emit(f"启动 llama.cpp 主模型 {editor_tag}")
         slots["editor"] = manager.start(
             "editor",
             editor_files,
-            port=int(getattr(settings, "llama_main_port", DEFAULT_MAIN_PORT) or DEFAULT_MAIN_PORT),
-            context=int(
-                getattr(settings, "llama_context_tokens", 0) or DEFAULT_CONTEXT_TOKENS
-            ),
+            port=editor_port,
+            context=editor_context,
         )
     if getattr(settings, "quality_profile", "quality") == "quality":
         review_tag = (getattr(settings, "llama_review_model", "") or "").strip()
@@ -807,19 +924,32 @@ def open_slots(manager: LlamaServerManager, settings, emit=None) -> dict[str, Ll
                     f"找不到审校模型 {review_tag} 的 GGUF 文件："
                     f"{manager.ollama_root} 下没有同名 manifest。"
                 )
-            if emit:
-                emit(f"启动 llama.cpp 审校模型 {review_tag}")
-            slots["review"] = manager.start(
-                "review",
-                review_files,
-                port=int(
-                    getattr(settings, "llama_review_port", DEFAULT_REVIEW_PORT)
-                    or DEFAULT_REVIEW_PORT
-                ),
-                # The 1.8B candidate never sees a whole book; a smaller window
-                # keeps its KV cache out of the 9B's way.
-                context=min(8_192, int(getattr(settings, "llama_context_tokens", 0) or 8_192)),
+            # The candidate never sees a whole book; a smaller window keeps its
+            # KV cache out of the editor's way.
+            review_port = int(
+                getattr(settings, "llama_review_port", DEFAULT_REVIEW_PORT)
+                or DEFAULT_REVIEW_PORT
             )
+            review_context = min(
+                8_192, int(getattr(settings, "llama_context_tokens", 0) or 8_192)
+            )
+            manager.register("review", review_files, review_port, review_context)
+            if pair_fits_resident(editor_files, review_files):
+                if emit:
+                    emit(f"启动 llama.cpp 审校模型 {review_tag}")
+                slots["review"] = manager.start(
+                    "review",
+                    review_files,
+                    port=review_port,
+                    context=review_context,
+                )
+            else:
+                if emit:
+                    emit(
+                        f"审校模型 {review_tag} 与主模型无法同时驻留显存，"
+                        "将在候选阶段启动"
+                    )
+                slots["review"] = None
         else:
             # Same tag for both roles: one process serves both passes, which is
             # what the Ollama path does with a single resident model.

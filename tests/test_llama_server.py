@@ -17,6 +17,7 @@ import pytest
 from manga_localizer import llama_server
 from manga_localizer.config import AppPaths, UserSettings
 from manga_localizer.llama_server import (
+    DEFAULT_REVIEW_PORT,
     DEFAULT_VISION_PORT,
     LlamaServerError,
     LlamaServerManager,
@@ -25,6 +26,7 @@ from manga_localizer.llama_server import (
     discover_ollama_models,
     hold_llama_servers,
     manager_for,
+    open_slots,
     open_vision_slot,
     release_llama_servers,
     running_llama_slots,
@@ -457,3 +459,142 @@ def test_a_young_server_is_still_reused(tmp_path, monkeypatch):
     _fake_start(monkeypatch, manager)
     slot = manager.start("editor", _files(tmp_path), port=8080, context=4096)
     assert manager.reusable_slot("DeepSeek-9B:latest") is slot
+
+
+def _bare_files(tmp_path: Path, tag: str) -> OllamaModelFiles:
+    """A GGUF dropped into the models directory under its own name."""
+    weights = tmp_path / f"{tag}.gguf"
+    weights.write_bytes(b"GGUF" + b"0" * 12)
+    return OllamaModelFiles(tag=tag, weights=weights)
+
+
+def test_a_gguf_in_the_models_directory_is_found_by_its_own_name(tmp_path):
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "Local-7B-Q6_K.gguf").write_bytes(b"GGUF" + b"0" * 12)
+    (models / "Local-7B-Q6_K-mmproj.gguf").write_bytes(b"GGUF" + b"1" * 12)
+    manager = LlamaServerManager(models)
+    manager._discovered = {}
+
+    files = manager.resolve("Local-7B-Q6_K")
+
+    # ``_model_path`` derives exactly this path from the tag, so a file the user
+    # dropped in needs no Ollama manifest and no second copy of 6 GB.
+    assert files is not None
+    assert files.weights == models / "Local-7B-Q6_K.gguf"
+    assert files.projector == models / "Local-7B-Q6_K-mmproj.gguf"
+    assert manager.resolve("Local-7B-Q6_K:q8") is None
+
+
+def test_a_pair_of_weight_files_past_the_limit_is_not_resident(tmp_path):
+    small = _files(tmp_path)
+    big = OllamaModelFiles(tag="Local-7B", weights=tmp_path / "big.gguf")
+    big.weights.write_bytes(b"0" * 64)
+
+    assert llama_server.pair_fits_resident(small, small) is True
+
+    monkey = llama_server.PAIR_RESIDENT_LIMIT_BYTES
+    try:
+        llama_server.PAIR_RESIDENT_LIMIT_BYTES = 16
+        assert llama_server.pair_fits_resident(small, big) is False
+    finally:
+        llama_server.PAIR_RESIDENT_LIMIT_BYTES = monkey
+
+
+def _two_tag_manager(tmp_path: Path, monkeypatch) -> LlamaServerManager:
+    """A manager whose editor and candidate resolve, with the pair rule forced."""
+    manager = LlamaServerManager(tmp_path / "models")
+    editor = _vision_files(tmp_path, "DeepSeek-9B:latest")
+    candidate = OllamaModelFiles(
+        tag="Local-7B:latest", weights=editor.weights, projector=None
+    )
+    monkeypatch.setattr(
+        manager,
+        "resolve",
+        lambda tag: editor if tag == editor.tag else candidate,
+    )
+    return manager
+
+
+def test_a_candidate_that_cannot_share_the_card_waits_for_its_pass(
+    tmp_path, monkeypatch
+):
+    manager = _two_tag_manager(tmp_path, monkeypatch)
+    created, _ = _fake_start(monkeypatch, manager)
+    monkeypatch.setattr(llama_server, "pair_fits_resident", lambda a, b: False)
+    messages: list[str] = []
+
+    slots = open_slots(
+        manager,
+        UserSettings(
+            llama_model="DeepSeek-9B:latest",
+            llama_review_model="Local-7B:latest",
+            quality_profile="quality",
+        ),
+        emit=messages.append,
+    )
+
+    # One process only: the candidate is registered and left for the pass that
+    # needs it, so 8,083 MB and 6,503 MB never sit on the card together.
+    assert slots["review"] is None
+    assert manager.can_relaunch("review")
+    assert len(created) == 1
+    assert "无法同时驻留" in messages[-1]
+
+    slot = manager.relaunch("review")
+
+    assert slot.port == DEFAULT_REVIEW_PORT
+    assert len(created) == 2
+
+
+def test_a_candidate_that_fits_is_started_beside_the_editor(tmp_path, monkeypatch):
+    manager = _two_tag_manager(tmp_path, monkeypatch)
+    created, _ = _fake_start(monkeypatch, manager)
+
+    slots = open_slots(
+        manager,
+        UserSettings(
+            llama_model="DeepSeek-9B:latest",
+            llama_review_model="Local-7B:latest",
+            quality_profile="quality",
+        ),
+    )
+
+    # The 1.8B candidate fits, and starting it up front is what keeps the
+    # candidate phase from paying a model load in the middle of a book.
+    assert slots["review"] is not None
+    assert len(created) == 2
+
+
+def test_adopting_a_slot_moves_it_to_the_role_that_will_stop_it(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    _fake_start(monkeypatch, manager)
+    vision = manager.start("vision", _files(tmp_path), port=8082, context=4096)
+
+    adopted = manager.adopt("editor", vision)
+
+    assert adopted.role == "editor"
+    assert [slot.role for slot in manager.running()] == ["editor"]
+    manager.stop("editor")
+    assert manager.running() == []
+
+
+def test_relaunch_starts_the_role_again_from_its_recipe(tmp_path, monkeypatch):
+    manager = LlamaServerManager(tmp_path / "models")
+    created, _ = _fake_start(monkeypatch, manager)
+    manager.register("review", _files(tmp_path), 8081, 4096)
+
+    slot = manager.relaunch("review")
+
+    assert (slot.role, slot.port, slot.context) == ("review", 8081, 4096)
+    assert len(created) == 1
+    assert manager.relaunch("review") is slot
+
+
+def test_relaunch_without_a_recipe_says_so(tmp_path):
+    manager = LlamaServerManager(tmp_path / "models")
+
+    with pytest.raises(LlamaServerError) as excinfo:
+        manager.relaunch("review")
+
+    assert "可重启" in str(excinfo.value)

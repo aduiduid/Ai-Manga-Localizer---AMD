@@ -125,6 +125,11 @@
               <p data-i18n="settings.llama.detail">直接加载 Ollama 已下载的 GGUF，不经过 Ollama 服务：主翻译与审校各起一个 llama-server 进程，占两个端口。模型名是 Ollama 清单标签，仅用于定位文件。</p>
               <label><span data-i18n="settings.llama.model">主翻译模型标签</span><input id="llamaModel" list="inferenceModels" placeholder="DeepSeek-V4-Pro-Qwen3.5-9B-UNCENSORED-heretic.i1-Q6_K:latest"></label>
               <label><span data-i18n="settings.llama.reviewModel">审校模型标签</span><input id="llamaReviewModel" list="inferenceModels" placeholder="hy-mt2-1.8b:q8"></label>
+              <label><span data-i18n="settings.llama.reviewPreset">候选模型预设</span><select id="llamaReviewPreset">
+                <option value="" data-i18n="settings.llama.reviewPreset.custom">自定义（使用上面的标签）</option>
+                <option value="hy-mt2-1.8b:q8" data-i18n="settings.llama.reviewPreset.fast">Hy-MT2 1.8B · 与主模型同时驻留</option>
+                <option value="HY-MT2-7B-Q6_K" data-i18n="settings.llama.reviewPreset.quality">Hy-MT2 7B · 与主模型交替使用显存</option>
+              </select></label>
               <label><span data-i18n="settings.llama.context">上下文 token</span><input id="llamaContextTokens" type="number" min="4096" max="262144" step="1024" value="65536"></label>
               <label><span data-i18n="settings.llama.mainPort">主模型端口</span><input id="llamaMainPort" type="number" min="1024" max="65535" value="8080"></label>
               <label><span data-i18n="settings.llama.reviewPort">审校端口</span><input id="llamaReviewPort" type="number" min="1024" max="65535" value="8081"></label>

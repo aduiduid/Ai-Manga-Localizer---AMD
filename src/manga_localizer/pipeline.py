@@ -698,14 +698,40 @@ class LocalizerPipeline:
             request,
             emit=lambda message: self._emit(emit, "translate", 0, total, message),
         )
+        review_slot = slots.get("review")
+        # A missing candidate slot with a registered recipe means the pair does
+        # not fit on the card: both translators then release their server at the
+        # end of their pass and start it again for the next one, so the editor
+        # and the candidate are never resident together.
+        staged = review_slot is None and manager.can_relaunch("review")
+        names = JapaneseNameDictionary(self.paths.cache)
         editor = LlamaTranslator(
             slots["editor"],
             request.target_language,
-            JapaneseNameDictionary(self.paths.cache),
+            names,
+            manager=manager,
+            role="editor",
+            label=request.llama_model,
+            evict=staged,
         )
         if request.quality_profile != "quality":
             return editor
-        review_slot = slots.get("review")
+        if staged:
+            self._emit(
+                emit, "translate", 0, total, "主模型与审校模型交替使用显存"
+            )
+            return LocalQualityTranslator(
+                editor,
+                LlamaTranslator(
+                    None,
+                    request.target_language,
+                    names,
+                    manager=manager,
+                    role="review",
+                    label=request.llama_review_model,
+                    evict=True,
+                ),
+            )
         if review_slot is None or review_slot is slots["editor"]:
             # Without a separate 1.8B instance the quality passes would all run
             # on the 9B, which is exactly what the Ollama path avoided; the
@@ -718,9 +744,19 @@ class LocalizerPipeline:
         candidate = LlamaTranslator(
             review_slot,
             request.target_language,
-            JapaneseNameDictionary(self.paths.cache),
+            names,
+            manager=manager,
+            role="review",
+            label=request.llama_review_model,
         )
-        self._emit(emit, "translate", 0, total, "启用 9B 分阶段语义审校")
+        # The editor is not always the 9B: the message names what actually runs.
+        self._emit(
+            emit,
+            "translate",
+            0,
+            total,
+            f"启用分阶段语义审校：{request.llama_model} + {request.llama_review_model}",
+        )
         return LocalQualityTranslator(editor, candidate)
 
     def _llama_vision(

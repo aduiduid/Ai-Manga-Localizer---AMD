@@ -626,7 +626,7 @@ wheels = [
 
 [[package]]
 name = "manga-localizer-studio"
-version = "0.10.13"
+version = "0.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
