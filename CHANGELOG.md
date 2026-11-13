@@ -1,3 +1,14 @@
+## 0.12.1 - 2026-11-13
+
+- Every backend option now names its speed and the models it runs, so the
+  dropdown reads like the quality one: `business name (speed · models)`.
+  Values are untouched -- a saved settings file still says `hybrid`.
+- The workspace inspector gets the whole row below 1300px instead of
+  shortening its narrow column, which was already cutting the quality
+  label off at 1280px.
+- Ollama vision OCR is described as `Ollama VLM, whole page`: that path
+  never runs Paddle, unlike the other three.
+
 ## 0.12.0 - 2026-11-13
 
 - One quality choice now answers three separate questions.  A new profile,

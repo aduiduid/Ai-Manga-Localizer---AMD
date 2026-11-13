@@ -764,3 +764,39 @@ def test_the_single_model_backend_has_its_own_option_and_hides_the_candidate_fie
         "settings.llama.singleHint",
     ):
         assert i18n.count(f'"{key}"') == 3, key
+
+def test_every_backend_option_names_its_speed_and_model():
+    """Each backend option says how fast it is and what it actually runs.
+
+    The ``value`` attributes are the wire format and must not move: only the
+    label carries the hint, so a wording change can never alter which backend
+    the settings save.  Every locale gets the same ``speed · model`` shape, and
+    the two pickers (workspace and settings) share one label source.
+    """
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    i18n = (WEB / "i18n.js").read_text(encoding="utf-8")
+    keys = [
+        "translation.ocr.hybrid",
+        "translation.ocr.builtin",
+        "translation.ocr.llama",
+        "translation.ocr.ollama",
+        "translation.inference.ollama",
+        "translation.inference.builtin",
+        "translation.inference.llama",
+        "translation.inference.llama7b",
+        "translation.inference.online",
+    ]
+    for key in keys:
+        values = re.findall(r'"' + re.escape(key) + r'"\s*:\s*"([^"]*)"', i18n)
+        assert len(values) == 3, key
+        for value in values:
+            assert "\u00b7" in value or "·" in value, (key, value)
+            assert value.rstrip().endswith((")", "）")), (key, value)
+        # Both pickers render the same key, so the pages cannot drift apart.
+        assert html.count(f'data-i18n="{key}"') == 2, key
+    assert '<option value="hybrid"' in html
+    assert '<option value="builtin"' in html
+    assert '<option value="llama"' in html
+    assert '<option value="ollama"' in html
+    assert '<option value="llama_7b"' in html
+    assert '<option value="online"' in html
