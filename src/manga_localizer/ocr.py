@@ -1428,6 +1428,25 @@ LATIN_EFFECT_SCORE_FLOOR = 0.58
 #: is read a second time.
 NOISY_READ_SCORE = 0.6
 
+# A flat 650 px^2 floor dropped the small print of a low-resolution scan and
+# kept it on a large one.  The floor is a share of the page instead, so it
+# describes how much of the sheet a box covers rather than how many pixels.
+#
+# It is clamped to the constant it replaces at the top: text height grows with
+# the scan while area grows with its square, so a strict ratio would ask a
+# 1600x1132 page for 1177 px^2 and start dropping boxes the old 650 kept.  This
+# change is allowed to bring lines back, never to take one away.
+# Measured on the sample: page 47 (800x566, 96 lines of 7-11 px type) keeps
+# 40 -> 59 lines, and two 800x1132 pages keep everything they kept before.
+MIN_REGION_AREA = 650
+MIN_REGION_AREA_RATIO = 0.00065
+
+
+def region_area_floor(width: int, height: int) -> int:
+    """Smallest recognised box worth keeping on a page of this size."""
+    scaled = round(width * height * MIN_REGION_AREA_RATIO)
+    return max(MIN_REGION_AREA // 2, min(MIN_REGION_AREA, scaled))
+
 
 class PaddleMangaOCR:
     """Paddle text localization followed by manga-specific Japanese recognition.
@@ -1539,7 +1558,9 @@ class PaddleMangaOCR:
 
     @staticmethod
     def _regions(
-        payload: dict, effect_score: float = EFFECT_SCORE_FLOOR
+        payload: dict,
+        effect_score: float = EFFECT_SCORE_FLOOR,
+        area_floor: int = MIN_REGION_AREA,
     ) -> list[dict]:
         # A recognition payload carries dt_polys *and* rec_texts.  Preferring the
         # detector polys dropped every recognized string, so each region reached
@@ -1561,7 +1582,7 @@ class PaddleMangaOCR:
                 # last lines: the middle was translated and those two stayed
                 # painted in English around the Chinese text.  A confidently
                 # recognized string is real text at any size.
-                if _area(box) < 650 and not (score >= 0.8 and len(text) >= 2):
+                if _area(box) < area_floor and not (score >= 0.8 and len(text) >= 2):
                     continue
                 # One glyph spanning a whole drawing ("X" across 160x137 px of
                 # artwork) is a mis-recognition, not a caption: real text runs
@@ -1600,7 +1621,7 @@ class PaddleMangaOCR:
                 xs = [int(point[0]) for point in polygon]
                 ys = [int(point[1]) for point in polygon]
                 box = [min(xs), min(ys), max(xs), max(ys)]
-                if _area(box) < 650:
+                if _area(box) < area_floor:
                     continue
                 score = float(scores[index]) if index < len(scores) else 0.0
                 selected.append(
@@ -1774,10 +1795,11 @@ class PaddleMangaOCR:
 
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
         image = Image.open(image_path).convert("RGB")
+        floor = region_area_floor(image.width, image.height)
         results = list(self.detector.predict(str(image_path)))
         payload = self._payload(results[0]) if results else {}
         recognition_payload: dict = {}
-        regions = self._regions(payload)
+        regions = self._regions(payload, area_floor=floor)
         if self.recognition_detector is not None:
             recognition_results = list(
                 self.recognition_detector.predict(str(image_path))
@@ -1798,7 +1820,7 @@ class PaddleMangaOCR:
                     recognition_payload, self._read_inverted(image)
                 )
             regions = merge_region_candidates(
-                regions, self._regions(recognition_payload)
+                regions, self._regions(recognition_payload, area_floor=floor)
             )
         for candidate in _light_on_dark_regions(image):
             candidate_box = candidate["box"]
@@ -1828,7 +1850,11 @@ class PaddleMangaOCR:
             # are dropped.
             regions = merge_region_candidates(
                 regions,
-                self._regions(recognition_payload, LATIN_EFFECT_SCORE_FLOOR),
+                self._regions(
+                    recognition_payload,
+                    LATIN_EFFECT_SCORE_FLOOR,
+                    area_floor=floor,
+                ),
             )
             regions = [item for item in regions if str(item.get("text", "")).strip()]
         groups = _groups(regions)

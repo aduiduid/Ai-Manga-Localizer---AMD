@@ -185,6 +185,53 @@ EFFECT_LABEL_RE = re.compile(
 GENERIC_EFFECT = "啪"
 
 
+# A translation that answers 18+ source letters with under 12% of that many
+# Chinese characters is not terseness, it is the model guessing at a line the
+# recogniser mangled.  Measured over 1222 real translations in this sample, no
+# honest line falls under the line; the noise it was built for ("ABSOLTELY
+# NOWAY TO GET MORE" -> "抽送。", 39 letters -> 2 characters) sits far below it.
+# Judging the *source* by shape does not work: vowel runs, multi-scale rereads
+# and word frequency each flagged 97 ordinary lines and still missed the target.
+IMPLAUSIBLE_SOURCE_LETTERS = 18
+IMPLAUSIBLE_TRANSLATION_RATIO = 0.12
+
+
+def translation_is_implausible(source: str, translation: str) -> bool:
+    """Whether an answer is too short to be a rendering of this source."""
+    if not source or not translation:
+        return False
+    if re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", source):
+        return False
+    letters = len(re.findall(r"[A-Za-z]", source))
+    if letters < IMPLAUSIBLE_SOURCE_LETTERS:
+        return False
+    characters = len(re.findall(r"[\u3400-\u9fff]", translation))
+    return characters < letters * IMPLAUSIBLE_TRANSLATION_RATIO
+
+
+def preserve_implausible_translations(pages: Iterable[PageOCR]) -> list[str]:
+    """Keep the artwork's own lettering where the answer cannot be a translation.
+
+    Runs after every translation path, so a resumed draft and a fresh run meet
+    the same rule.  A skipped unit renders nothing, which leaves the source
+    text visible: that is the fallback the user asked for -- English on the page
+    is a known cost, invented plot is not.
+    """
+    preserved: list[str] = []
+    for page in pages:
+        for unit in page.units:
+            if unit.skip or not unit.zh:
+                continue
+            if not translation_is_implausible(unit.ja, unit.zh):
+                continue
+            unit.zh = ""
+            unit.skip = True
+            unit.skip_reason = "implausible_translation"
+            unit.special = "unreadable_source"
+            preserved.append(unit.id)
+    return preserved
+
+
 def strip_instruction_labels(text: str, source: str = "") -> str:
     """Remove the labels a model echoes back instead of naming the sound.
 

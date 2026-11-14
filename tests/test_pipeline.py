@@ -13,6 +13,7 @@ from manga_localizer.pipeline import (
     completion_summary,
     merge_glossaries,
     page_from_dict,
+    preserve_implausible_translations,
     preserve_unresolved_units,
     unsafe_semantic_missing,
 )
@@ -415,7 +416,96 @@ def test_a_draft_from_an_interrupted_run_is_reused(tmp_path):
     assert [unit.zh for unit in page.units] == ["终于", "谢谢"]
 
 
-def test_a_draft_for_another_target_language_is_ignored(tmp_path):
+def test_a_draft_read_differently_is_not_reused(tmp_path):
+    """The ids of a page are renumbered by every OCR run.
+
+    Page 47 of the reported book was written twice by two jobs, the second run
+    read one line more, and every translation after it moved down one unit:
+    "POKE" was given the line belonging to "Ready y-yeAAAH!".  Matching on the
+    unit id alone cannot see that; matching on the source line can.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "translation-draft.json").write_text(
+        json.dumps(
+            {
+                "target_language": "简体中文",
+                "pages": [
+                    {
+                        "page": 1,
+                        "file": "001.jpg",
+                        "units": [
+                            {"id": "p001u01", "ja": "POKE", "zh": "准备好了！"},
+                            # Same id, a different reading of the page.
+                            {"id": "p001u02", "ja": "Ready y-yeAAAH!", "zh": "不行。"},
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [
+                {"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "POKE", "zh": ""},
+                {"id": "p001u02", "bbox": [40, 2, 70, 40], "ja": "NO", "zh": ""},
+            ],
+        }
+    )
+    assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 1
+    assert [unit.zh for unit in page.units] == ["准备好了！", ""]
+
+
+def test_a_translation_far_too_short_for_its_source_is_dropped():
+    """An answer of two characters cannot render a 39-letter line.
+
+    The reported page handed "抽送。" to a line reading
+    "ABSOLTELYNOWATO OET MORE,IMLET WIW NOOOC O AAV".  That answer came from a
+    previous shifted draft, but a model answering a garbled line it cannot read
+    produces the same shape, so the guard has to catch it either way.
+    """
+    page = page_from_dict(
+        {
+            "page": 47,
+            "file": "047.jpg",
+            "width": 800,
+            "height": 566,
+            "units": [
+                {
+                    "id": "p047u16",
+                    "bbox": [1, 2, 300, 40],
+                    "ja": "ABSOLTELYNOWATO OET MORE,IMLET WIW NOOOC O AAV",
+                    "zh": "抽送。",
+                },
+                {
+                    "id": "p047u17",
+                    "bbox": [1, 40, 300, 80],
+                    "ja": "POKE",
+                    "zh": "戳。",
+                },
+                {
+                    "id": "p047u18",
+                    "bbox": [1, 80, 300, 120],
+                    "ja": "C-CAN YOU P-PLEASE STOP TALONS",
+                    "zh": "噗！",
+                },
+            ],
+        }
+    )
+    assert preserve_implausible_translations([page]) == ["p047u16", "p047u18"]
+    assert [unit.skip for unit in page.units] == [True, False, True]
+    assert page.units[0].skip_reason == "implausible_translation"
+    # The short source keeps its short answer: "POKE" is one word.
+    assert page.units[1].zh == "戳。"
+
+
+def test_the_draft_for_another_target_language_is_ignored(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     (work / "translation-draft.json").write_text(

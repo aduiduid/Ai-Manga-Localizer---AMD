@@ -318,6 +318,14 @@ TEXT_PADDING_RATIO_X = 0.06
 TEXT_PADDING_RATIO_Y = 0.04
 TEXT_PADDING_MIN = 2
 
+# A bubble too small for readable type lets its translation spill onto the
+# artwork.  Type on top of a drawing is unreadable, so the spilled glyphs get a
+# translucent card: light enough that the artwork still shows through, opaque
+# enough that the Chinese reads.  Only for that case -- see ``_draw``.
+PLATE_FILL = (255, 255, 255, 150)
+PLATE_PADDING = 3
+PLATE_RADIUS = 6
+
 
 def _text_padding(box: list[int]) -> tuple[int, int]:
     x0, y0, x1, y1 = box
@@ -1068,10 +1076,15 @@ class ArtworkPreservingRenderer:
         # overflow the balloon: grow symmetrically around it, staying on the
         # page, until the floor fits.  Overlapping artwork is a far smaller
         # defect than text nobody can read.
-        return self._overflow_box(rgb, best, largest)
+        return self._overflow_box(rgb, best, largest, avoid=avoid)
 
     def _overflow_box(
-        self, rgb: np.ndarray, box: list[int], largest, limit: float = 2.2
+        self,
+        rgb: np.ndarray,
+        box: list[int],
+        largest,
+        limit: float = 2.2,
+        avoid: list[list[int]] | None = None,
     ) -> list[int]:
         """Widen ``box`` symmetrically until readable CJK fits.
 
@@ -1098,6 +1111,44 @@ class ArtworkPreservingRenderer:
                 min(page_width, x1 + grow),
                 min(page_height, y1 + grow),
             ]
+            # Two bubbles side by side each overflow into the other and the
+            # translations stack on one spot.  A neighbour is a wall, not
+            # something to grow through.
+            for other in avoid or []:
+                if other is box or list(other) == list(box):
+                    continue
+                if not (
+                    candidate[0] < other[2]
+                    and candidate[2] > other[0]
+                    and candidate[1] < other[3]
+                    and candidate[3] > other[1]
+                ):
+                    continue
+                centre_x = (candidate[0] + candidate[2]) / 2
+                centre_y = (candidate[1] + candidate[3]) / 2
+                other_x = (other[0] + other[2]) / 2
+                other_y = (other[1] + other[3]) / 2
+                if abs(centre_y - other_y) >= abs(centre_x - other_x):
+                    if centre_y < other_y:
+                        candidate[3] = min(candidate[3], other[1])
+                    else:
+                        candidate[1] = max(candidate[1], other[3])
+                else:
+                    if centre_x < other_x:
+                        candidate[2] = min(candidate[2], other[0])
+                    else:
+                        candidate[0] = max(candidate[0], other[2])
+            # A neighbour is a wall, so the clip above may cut into this box
+            # itself when the two overlap.  Stopping the growth is the point;
+            # shrinking below the box we started from is not, and an inverted
+            # candidate is no box at all -- ``largest`` clamps a negative width
+            # to 12, so it would win the comparison and then break the crop.
+            candidate = [
+                min(candidate[0], x0),
+                min(candidate[1], y0),
+                max(candidate[2], x1),
+                max(candidate[3], y1),
+            ]
             if candidate == best:
                 # Pinned against the page edge on every side: no more room.
                 break
@@ -1108,8 +1159,76 @@ class ArtworkPreservingRenderer:
             grow += 2
         return best
 
-    def _draw(self, image: Image.Image, text: str, box: list[int], style: TextStyle):
-        draw = ImageDraw.Draw(image)
+    @staticmethod
+    def _slide_off(
+        box: list[int],
+        avoid: list[list[int]],
+        page_width: int,
+        page_height: int,
+    ) -> list[int]:
+        """Move ``box`` off any neighbour it still overlaps.
+
+        Two detector lines of one wrapped balloon can overlap before anything
+        grows, and then clipping during growth cannot separate them: the clamp
+        that keeps a box from collapsing puts the overlap straight back.  Sliding
+        the box to the nearest free side keeps the type at its size, which is
+        the trade this renderer already makes -- an overlapping glyph is
+        legible, but two translations stacked on one spot are not.
+        """
+        x0, y0, x1, y1 = box
+
+        def shared(a: list[int], b: list[int]) -> int:
+            width = min(a[2], b[2]) - max(a[0], b[0])
+            height = min(a[3], b[3]) - max(a[1], b[1])
+            return width * height if width > 0 and height > 0 else 0
+
+        def burden(candidate: list[int]) -> int:
+            return sum(shared(candidate, other) for other in avoid)
+
+        # Climbing out of one neighbour can land on the next, and one neighbour
+        # at a time then bounces between them.  Score every escape from every
+        # covered neighbour and take the one that frees the most area, so a move
+        # that only trades one overlap for a worse one is never accepted.
+        for _ in range(4 * len(avoid) + 1):
+            current = burden([x0, y0, x1, y1])
+            if not current:
+                break
+            best: tuple[int, list[int]] | None = None
+            for other in avoid:
+                if not shared([x0, y0, x1, y1], other):
+                    continue
+                steps = (
+                    (-(x1 - other[0]), 0),
+                    (other[2] - x0, 0),
+                    (0, -(y1 - other[1])),
+                    (0, other[3] - y0),
+                )
+                for dx, dy in steps:
+                    candidate = [x0 + dx, y0 + dy, x1 + dx, y1 + dy]
+                    if (
+                        candidate[0] < 0
+                        or candidate[1] < 0
+                        or candidate[2] > page_width
+                        or candidate[3] > page_height
+                    ):
+                        continue
+                    score = burden(candidate)
+                    if best is None or score < best[0]:
+                        best = (score, candidate)
+            if best is None or best[0] >= current:
+                break
+            x0, y0, x1, y1 = best[1]
+        return [x0, y0, x1, y1]
+
+    def _draw(
+        self,
+        image: Image.Image,
+        text: str,
+        box: list[int],
+        style: TextStyle,
+        plate: bool = False,
+    ):
+        draw = ImageDraw.Draw(image, "RGBA" if plate else None)
         x0, y0, x1, y1 = box
         pad_x, pad_y = _text_padding(box)
         left, top, right, bottom = x0 + pad_x, y0 + pad_y, x1 - pad_x, y1 - pad_y
@@ -1152,19 +1271,37 @@ class ArtworkPreservingRenderer:
             )
             stroke = round(size * style.stroke_ratio)
             y = top + max(0, (height - len(lines) * line_height) / 2)
+            placed = []
             for line in lines:
                 line_width = draw.textbbox(
                     (0, 0), line, font=font, stroke_width=stroke
                 )[2]
+                placed.append((left + max(0, (width - line_width) / 2), y))
+                y += line_height
+            if plate:
+                spans = [
+                    draw.textbbox((x, y), line, font=font, stroke_width=stroke)
+                    for (x, y), line in zip(placed, lines)
+                ]
+                draw.rounded_rectangle(
+                    [
+                        min(span[0] for span in spans) - PLATE_PADDING,
+                        min(span[1] for span in spans) - PLATE_PADDING,
+                        max(span[2] for span in spans) + PLATE_PADDING,
+                        max(span[3] for span in spans) + PLATE_PADDING,
+                    ],
+                    radius=PLATE_RADIUS,
+                    fill=PLATE_FILL,
+                )
+            for (x, y), line in zip(placed, lines):
                 draw.text(
-                    (left + max(0, (width - line_width) / 2), y),
+                    (x, y),
                     line,
                     font=font,
                     fill=style.fill,
                     stroke_width=stroke,
                     stroke_fill=style.stroke_fill,
                 )
-                y += line_height
 
     def render_page(
         self,
@@ -1295,6 +1432,12 @@ class ArtworkPreservingRenderer:
                     # that window and generous enough to hold a whole letter.
                     rgb, _, _ = self._erase(rgb, bounded, area_ratio=0.12)
         rendered = Image.fromarray(rgb)
+        # Boxes decided so far.  Every unit is grown against its neighbours, so
+        # feeding back the boxes already chosen keeps a later unit out of a
+        # space an earlier one had to spill into.  Using only the declared
+        # detector boxes let two neighbours grow into each other: each one
+        # avoided the other's balloon while overlapping the other's grown text.
+        placed: list[list[int]] = []
         for unit in active:
             # The detector box is the default typesetting region; a box too
             # short for readable CJK grows into its balloon instead of dropping
@@ -1307,7 +1450,8 @@ class ArtworkPreservingRenderer:
                 original,
                 unit,
                 styles[unit.id],
-                avoid=[
+                avoid=placed
+                + [
                     other.crop_bbox or other.bbox
                     for other in active
                     if other.id != unit.id
@@ -1317,8 +1461,26 @@ class ArtworkPreservingRenderer:
             # indices: round once here so the crop, the drawing and the paste
             # all speak the same language whatever _typeset_box returns.
             x0, y0, x1, y1 = (int(round(value)) for value in box)
+            # Growth stops at a neighbour's edge, which can leave a sliver of
+            # overlap when the two detector boxes already overlapped.  Slide
+            # rather than shrink: the font size was chosen for this box.
+            x0, y0, x1, y1 = self._slide_off(
+                [x0, y0, x1, y1], placed, rendered.width, rendered.height
+            )
+            placed.append([x0, y0, x1, y1])
             region = rendered.crop((x0, y0, x1, y1))
-            self._draw(region, unit.zh, [0, 0, x1 - x0, y1 - y0], styles[unit.id])
+            # Growth means the balloon was too small for readable type, so the
+            # glyphs sit on artwork that the erase step never cleared.
+            spilled = [x0, y0, x1, y1] != [
+                int(round(value)) for value in (unit.crop_bbox or unit.bbox)
+            ]
+            self._draw(
+                region,
+                unit.zh,
+                [0, 0, x1 - x0, y1 - y0],
+                styles[unit.id],
+                plate=spilled,
+            )
             rendered.paste(region, (x0, y0))
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.suffix.lower() == ".webp":

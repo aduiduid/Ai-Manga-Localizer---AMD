@@ -52,6 +52,7 @@ from .translator import (
     OpenAICompatibleTranslator,
     PromptTranslator,
     clean_translations,
+    preserve_implausible_translations,
     ensure_ollama_model,
 )
 
@@ -76,7 +77,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 14: a noisy Latin page is recognized a second time on the inverted image, so a
 # cached page still cuts the white lettering off a dark panel (the first four
 # lines of page 17 never became a unit).
-OCR_CACHE_VERSION = 14
+OCR_CACHE_VERSION = 15
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same
@@ -207,10 +208,16 @@ class LocalizerPipeline:
         A long book that dies late -- a crashed server, a cancellation --
         leaves its OCR cache and its draft on disk, and the translation it
         already paid for is worth more than the run.  Geometry still comes
-        from this run's OCR pages; only the text is carried over, and only
-        when the draft agrees on the page file and the unit id.  The
-        translator re-translates anything that no longer satisfies its
-        contract, so a stale or partial draft costs a wasted read at most.
+        from this run's OCR pages; only the text is carried over.
+
+        The draft has to agree on the page file, the unit id *and* the source
+        text of that unit.  Matching on the id alone assumes the ids label the
+        same line every run, and they do not: unit ids are numbered per page
+        from this run's OCR, so any change in detection -- one more line found,
+        two lines merged, a different profile -- renumbers the page and shifts
+        every later line by one.  Resuming on the id alone then prints the
+        previous run's translations one bubble off, which is how page 47 of the
+        sample came out with two words about an act it never shows.
         """
         path = work / "translation-draft.json"
         if not path.is_file():
@@ -225,7 +232,7 @@ class LocalizerPipeline:
         rows = payload.get("pages")
         if not isinstance(rows, list):
             return 0
-        saved: dict[str, dict[str, str]] = {}
+        saved: dict[str, dict[str, tuple[str, str]]] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -233,7 +240,10 @@ class LocalizerPipeline:
             if not name:
                 continue
             saved[name] = {
-                str(unit.get("id") or ""): str(unit.get("zh") or "")
+                str(unit.get("id") or ""): (
+                    str(unit.get("ja") or ""),
+                    str(unit.get("zh") or ""),
+                )
                 for unit in row.get("units") or []
                 if isinstance(unit, dict)
             }
@@ -245,8 +255,13 @@ class LocalizerPipeline:
             if not lines:
                 continue
             for unit in page.units:
-                text = lines.get(unit.id) or ""
-                if text and not unit.zh:
+                entry = lines.get(unit.id)
+                if entry is None or unit.zh:
+                    continue
+                source, text = entry
+                # Same id and same source is the same line.  Anything else was
+                # translated against a different reading of the page.
+                if text and source == unit.ja:
                     unit.zh = text
                     reused += 1
         return reused
@@ -603,6 +618,20 @@ class LocalizerPipeline:
         # Every backend, staged role and resumed draft can leave the prompt's
         # ``[拟声词]`` label inside the answer; strip it once here instead of
         # teaching the renderer about translation instructions.
+        # A long source answered with a couple of characters is not a terse
+        # translation, it is the model guessing at a line it could not read.
+        # Page 47 of the sample turned "ABSOLTELY NOWAY TO GET MORE" into
+        # "抽送。" that way.  Keeping the source lettering costs a bubble of
+        # English; inventing plot costs the book.
+        guessed = preserve_implausible_translations(pages)
+        if guessed:
+            self._emit(
+                emit,
+                "translate",
+                total,
+                total,
+                f"{len(guessed)} 处译文与原文长度明显不符，已保留原图文字",
+            )
         relabelled = clean_translations(pages)
         if relabelled:
             self._emit(

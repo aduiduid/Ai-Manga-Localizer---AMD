@@ -69,10 +69,56 @@ class BoundedTestRenderer(ArtworkPreservingRenderer):
     def __init__(self):
         self.font_path = None
 
-    def _draw(self, image, text, box, style):
-        del text, style
+    def _draw(self, image, text, box, style, plate=False):
+        del text, style, plate
         x0, y0, x1, y1 = box
         ImageDraw.Draw(image).rectangle((x0 + 8, y0 + 8, x1 - 8, y1 - 8), fill="black")
+
+
+def test_type_that_spills_gets_a_card_and_type_that_fits_does_not(tmp_path):
+    """Type grown past its bubble lands on artwork the erase step never cleared.
+
+    The reported page had a bubble too small for its line, so the grown box
+    printed Chinese straight onto the drawing, on top of the neighbouring
+    line.  Two bubbles identical apart from their size: only the cramped one
+    may ask ``_draw`` for a card.
+    """
+    source = tmp_path / "page.png"
+    Image.new("RGB", (400, 240), (90, 60, 40)).save(source)
+
+    class RecordingRenderer(ArtworkPreservingRenderer):
+        def __init__(self, inner):
+            self.__dict__.update(inner.__dict__)
+            self.plates = []
+
+        def _draw(self, image, text, box, style, plate=False):
+            self.plates.append(plate)
+            super()._draw(image, text, box, style, plate)
+
+    def rendered(bbox):
+        page = PageOCR(
+            1,
+            source.name,
+            400,
+            240,
+            [
+                TextUnit(
+                    "p001u01",
+                    bbox,
+                    bbox,
+                    "テスト",
+                    0.9,
+                    False,
+                    "这是一句相当长的中文译文用于把气泡彻底撑满",
+                )
+            ],
+        )
+        recorder = RecordingRenderer(_measuring_renderer(tmp_path))
+        recorder.render_page(source, page, tmp_path / f"out-{bbox[2]}.png")
+        return recorder.plates
+
+    assert rendered([20, 20, 380, 220]) == [False]
+    assert rendered([150, 90, 250, 140]) == [True]
 
 
 def test_renderer_preserves_pixels_outside_text_box(tmp_path):
@@ -388,7 +434,7 @@ def test_typesetting_is_clipped_to_declared_box(tmp_path):
         def __init__(self):
             self.font_path = None
 
-        def _draw(self, image, *_args):
+        def _draw(self, image, *_args, **_kwargs):
             ImageDraw.Draw(image).rectangle(
                 (-10, -10, image.width + 10, image.height + 10), fill="black"
             )
@@ -818,6 +864,72 @@ def test_two_boxes_in_one_shared_balloon_do_not_claim_the_same_space():
     )
     assert first[3] <= second[1] or second[3] <= first[1], "the boxes must not overlap"
     assert first[3] > upper[3] and second[1] < lower[1], "both keep room to grow"
+
+def test_a_box_that_cannot_separate_by_clipping_is_moved_instead():
+    # Two detector lines of one wrapped balloon overlap before anything grows,
+    # so shrinking to the neighbour's edge leaves them stacked.  The page 47
+    # report had ``Pump`` printed twice on top of itself.  Sliding keeps the
+    # font size the box was measured for.
+    box = [100, 100, 160, 130]
+    neighbour = [100, 118, 160, 148]
+
+    def clear(candidate, others):
+        return all(
+            other[0] >= candidate[2]
+            or other[2] <= candidate[0]
+            or other[1] >= candidate[3]
+            or other[3] <= candidate[1]
+            for other in others
+        )
+
+    moved = ArtworkPreservingRenderer._slide_off(box, [neighbour], 800, 566)
+    assert clear(moved, [neighbour]), (moved, neighbour)
+    assert moved[2] - moved[0] == box[2] - box[0], "the box must keep its size"
+    assert moved[3] - moved[1] == box[3] - box[1]
+    # A box landing on the second neighbour moves again rather than settling
+    # on it: escaping one neighbour must not trade it for a worse overlap, and
+    # one neighbour at a time bounces between the two forever.
+    second = [100, 90, 160, 120]
+    cleared = ArtworkPreservingRenderer._slide_off(box, [neighbour, second], 800, 566)
+    assert clear(cleared, [neighbour, second]), (cleared, neighbour, second)
+    assert cleared[2] - cleared[0] == box[2] - box[0]
+    # A box nobody touches is returned unchanged, and a box that cannot escape
+    # the page edge stays put instead of being pushed out of the image.
+    assert ArtworkPreservingRenderer._slide_off(box, [], 800, 566) == box
+    pinned = ArtworkPreservingRenderer._slide_off([0, 0, 60, 30], [[0, 0, 60, 30]], 800, 566)
+    assert pinned[0] >= 0 and pinned[1] >= 0
+    assert pinned[2] <= 800 and pinned[3] <= 566
+
+
+def test_a_grown_box_never_inverts_into_a_zero_height_crop(tmp_path):
+    # Clipping to a neighbour that already overlaps can push both edges past
+    # each other, and a 12px-tall inverted box then won the "largest" race and
+    # reached PIL's crop as ``lower < upper``.  Page 47 died that way.
+    image = np.full((566, 800, 3), (232, 130, 180), dtype=np.uint8)
+    cv2.ellipse(image, (400, 283), (380, 260), 0, 0, 360, (255, 255, 255), -1)
+    renderer = _measuring_renderer(tmp_path)
+    unit = TextUnit(
+        "p001u16", [758, 287, 800, 324], [758, 287, 800, 324], "呃", 0.9, False, "呃……啊……"
+    )
+    style = TextStyle(
+        mean=200.0,
+        white_ratio=0.8,
+        fill="black",
+        stroke_fill="white",
+        stroke_ratio=0.1,
+        bold=True,
+        font_size=20,
+        vertical=False,
+        outlined=False,
+        background_std=6.0,
+        display=False,
+    )
+    avoid = [[756, 280, 800, 300], [760, 310, 800, 330]]
+    box = renderer._typeset_box(image, unit, style, avoid=avoid)
+    x0, y0, x1, y1 = (int(round(value)) for value in box)
+    assert x1 > x0 and y1 > y0, box
+    assert x0 >= 0 and y0 >= 0
+
 
 def test_an_artwork_strip_window_still_erases_its_letters():
     # The artwork profile cleans one detector line at a time, so its window is
