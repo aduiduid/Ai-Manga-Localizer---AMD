@@ -14,6 +14,7 @@ from manga_localizer.renderer import (
     TextStyle,
     _fit_readable,
     _font,
+    _line_height,
     _lines_fit,
     _text_padding,
     _tokens,
@@ -856,3 +857,25 @@ def test_the_grown_box_is_always_integral():
         grown = ArtworkPreservingRenderer._uniform_balloon_box(image, box)
         assert all(type(value) is int for value in grown), (box, grown)
 
+
+def test_white_lettering_on_a_dark_panel_keeps_its_colour():
+    # A dark panel with white lettering and a thin dark outline: the halo sits
+    # on the glyphs, so the old halo rule painted the translation black and it
+    # vanished into the artwork (page 17 of the sample: ``YANK`` -> 恶心。).
+    rgb = np.full((200, 200, 3), (60, 45, 85), dtype=np.uint8)
+    for x in range(40, 160, 20):
+        rgb[80:120, x : x + 8] = (245, 245, 245)
+    unit = TextUnit(
+        "p017u18", [40, 80, 160, 120], [40, 80, 160, 120], "dANK", 1.0, False, "恶心。"
+    )
+    style = ArtworkPreservingRenderer._analyze_style(rgb, unit)
+    assert style.fill == "white"
+    assert style.stroke_fill == "black"
+
+
+def test_the_line_pitch_never_squeezes_the_fonts_own_line_box():
+    font_path = _measured_font()
+    for size in (14, 20, 32):
+        font = _font(font_path, size)
+        ascent, descent = font.getmetrics()
+        assert _line_height(font, size) >= ascent + descent

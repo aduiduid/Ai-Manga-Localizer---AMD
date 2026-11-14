@@ -24,6 +24,7 @@ from manga_localizer.ocr import (
     _light_on_dark_regions,
     _outlined_light_text_regions_near,
     _suppress_optional_ccache_warning,
+    better_recognition,
     classify_non_story_text,
     duplicate_tiny_fragment,
     deduplicate_nested_region_groups,
@@ -2312,3 +2313,46 @@ def test_a_declared_japanese_page_does_not_relax_its_floor(tmp_path):
     page = service.analyze(source, 1)
 
     assert [unit.ja for unit in page.units] == ["それなのに"]
+
+
+def test_a_line_read_from_the_inverted_page_replaces_its_noise():
+    # Paddle's recogniser is trained on dark glyphs; white lettering with a dark
+    # outline came back as noise at 0.14 while the inverted page read the same
+    # box at 0.96.  The better reading wins and nothing is deleted.
+    primary = {
+        "rec_boxes": [[10, 10, 90, 26], [10, 30, 90, 46]],
+        "rec_texts": ["ASAAACAEAE", "CELLY WAS HOSTING?"],
+        "rec_scores": [0.1426, 0.9644],
+    }
+    inverted = {
+        "rec_boxes": [[10, 10, 90, 26], [10, 30, 90, 46], [12, 50, 88, 66]],
+        "rec_texts": [
+            "REMEMBER THAT TIME",
+            "CELLY WAS HOSTING?",
+            "SMACK INTO THE MIDDLE",
+        ],
+        "rec_scores": [0.9580, 0.9645, 0.9398],
+    }
+    merged = better_recognition(primary, inverted)
+    assert merged["rec_texts"][0] == "REMEMBER THAT TIME"
+    assert merged["rec_scores"][0] == pytest.approx(0.9580)
+    assert merged["rec_texts"][1] == "CELLY WAS HOSTING?"
+    # A line only the second pass found is appended, never dropped.
+    assert merged["rec_texts"][2] == "SMACK INTO THE MIDDLE"
+    assert len(merged["rec_texts"]) == 3
+
+
+def test_a_confident_reading_is_never_replaced_by_a_worse_one():
+    primary = {
+        "rec_boxes": [[10, 10, 90, 26]],
+        "rec_texts": ["HELLO THERE"],
+        "rec_scores": [0.97],
+    }
+    inverted = {
+        "rec_boxes": [[10, 10, 90, 26]],
+        "rec_texts": ["MELLO THERE"],
+        "rec_scores": [0.62],
+    }
+    merged = better_recognition(primary, inverted)
+    assert merged["rec_texts"] == ["HELLO THERE"]
+    assert merged["rec_scores"] == [0.97]

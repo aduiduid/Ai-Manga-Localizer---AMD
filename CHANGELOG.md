@@ -1,3 +1,9 @@
+## 0.13.1 - 2026-11-14
+
+- **White lettering keeps its colour.** The renderer read an outlined style as "dark core inside a bright halo" and always painted black with a white stroke.  On a dark panel the bright pixels *are* the glyphs, so the translation came out black on black and disappeared into the artwork.  The tone of the artwork just outside the detector box now decides which of the two outline shapes it is, with the surrounding tone as the fallback when the vote is empty.
+- **Lines no longer collide.** `LINE_HEIGHT_RATIO` alone spaced a 14px face every 16px while its own ascent+descent is 19px, so consecutive lines overlapped and the fit tests over-counted the rows they could hold.  The baseline pitch is now at least the font's own line box, at every size.
+- **A noisy reading is retried on the inverted page.** Paddle's recogniser is trained on dark glyphs, so white lettering with a dark outline came back as noise at 0.14 confidence and the whole bubble was dropped - only its last line survived as a separate unit and the rest stayed in English.  When a Latin page yields a low-confidence reading, the page is recognized again on the inverted grey image and every box keeps its higher-scoring text.
+
 ## 0.13.0 - 2026-11-13
 
 - **The repository now carries code only.** `.gitignore` excludes `*.gguf`, `*.pt`, `*.pth`, `*.safetensors`, `*.onnx`, `*.ckpt`, `models/`, `llama-models/`, `ollama-models/`, `data/`, `_home/`, `_cache/` and `*.ocr.json`, so a clone is a few megabytes instead of 27 GB.  Local duplicates (three extra copies of the HuggingFace cache, two of PaddleX, the uv download cache) were removed; finished books and job history were backed up outside the working copy.

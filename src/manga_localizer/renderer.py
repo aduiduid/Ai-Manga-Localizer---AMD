@@ -296,6 +296,18 @@ def _lines_fit(draw: ImageDraw.ImageDraw, lines: list[str], font, width: int) ->
 # size than 1.18 on the tightest bubbles.
 LINE_HEIGHT_RATIO = 1.14
 
+
+def _line_height(font, size: int) -> int:
+    """Baseline pitch, never tighter than the font's own line box.
+
+    ``LINE_HEIGHT_RATIO`` alone put consecutive baselines 16px apart for a 14px
+    face whose ascent+descent is 19px, so descenders and the lower strokes of a
+    line touched the line below it.
+    """
+    ascent, descent = font.getmetrics()
+    return max(round(size * LINE_HEIGHT_RATIO), ascent + descent)
+
+
 # Inset used by both ``_typeset_box`` and ``_draw``: it must be the same number
 # in both places or the box is judged against room the drawing never uses.  A
 # 4px floor stole a quarter of the height from the 15px strips that need the
@@ -315,6 +327,28 @@ def _text_padding(box: list[int]) -> tuple[int, int]:
     )
 
 
+def _surrounding_level(rgb: np.ndarray, box: list[int], pad: int = 6) -> float:
+    """Median luminance of the artwork just outside a detector box.
+
+    Text set on a dark panel is light, and text on a light panel is dark; the
+    box itself is mostly glyphs, so its own median cannot answer that.  A thin
+    ring outside the box is background instead.
+    """
+    height, width = rgb.shape[:2]
+    x0, y0, x1, y1 = (int(value) for value in box)
+    ox0, oy0 = max(0, x0 - pad), max(0, y0 - pad)
+    ox1, oy1 = min(width, x1 + pad), min(height, y1 + pad)
+    outer = rgb[oy0:oy1, ox0:ox1]
+    if not outer.size:
+        return 255.0
+    grey = cv2.cvtColor(outer, cv2.COLOR_RGB2GRAY)
+    ring = np.ones(grey.shape, dtype=bool)
+    ring[y0 - oy0 : y1 - oy0, x0 - ox0 : x1 - ox0] = False
+    if not ring.any():
+        return float(np.median(grey))
+    return float(np.median(grey[ring]))
+
+
 def _fit_horizontal(
     font_path: Path,
     draw,
@@ -327,14 +361,14 @@ def _fit_horizontal(
     for size in range(start, 7, -2):
         font = _font(font_path, size)
         lines = _wrap(draw, text, font, width)
-        line_height = round(size * LINE_HEIGHT_RATIO)
+        line_height = _line_height(font, size)
         if len(lines) * line_height <= height and _lines_fit(draw, lines, font, width):
             return font, size, lines, line_height
     # A long English line translated into Chinese needs far more glyphs than
     # the source occupied, so stopping at 20px spilled the text out of the
     # balloon.  Keep shrinking instead of overflowing the region.
     font = _font(font_path, 8)
-    return font, 8, _wrap(draw, text, font, width), round(8 * LINE_HEIGHT_RATIO)
+    return font, 8, _wrap(draw, text, font, width), _line_height(font, 8)
 
 
 # Below this size a CJK glyph is a grey smear at manga page resolution: the
@@ -358,7 +392,7 @@ def _fit_readable(
     for size in range(start, floor - 1, -1):
         font = _font(font_path, size)
         lines = _wrap(draw, text, font, width)
-        line_height = round(size * LINE_HEIGHT_RATIO)
+        line_height = _line_height(font, size)
         if len(lines) * line_height <= height and _lines_fit(draw, lines, font, width):
             return font, size, lines, line_height
     return None
@@ -500,12 +534,25 @@ class ArtworkPreservingRenderer:
         brighter_ratio = (
             float((gray > background_level + 45).mean()) if gray.size else 0.0
         )
-        if halo_ratio >= 0.38 and float(dark.mean()) >= 0.01:
+        # "Dark core inside a bright halo" describes a title plaque or a
+        # signboard, and it is only one of the two ways an outline shows up.
+        # White lettering with a dark outline puts the halo *on the glyphs*, so
+        # the branch painted black over a white source whenever the artwork
+        # around the text was dark (page 17 rendered ``YANK`` as black text and
+        # the translation disappeared into the panel).  The tone of the artwork
+        # just outside the box tells the two cases apart.
+        surrounding = _surrounding_level(rgb, unit.bbox)
+        if halo_ratio >= 0.38 and float(dark.mean()) >= 0.01 and surrounding >= 120:
             # Outlined lettering is a dark core inside a bright halo, so the
             # halo *is* the stroke.  Counting bright ring pixels against dark
             # cores would flip the polarity on thick outlines.
             fill, stroke_fill = "black", "white"
         elif brighter_ratio > darker_ratio:
+            fill, stroke_fill = "white", "black"
+        elif max(brighter_ratio, darker_ratio) < 0.005 and surrounding < 120:
+            # Nothing in the box separates from its own median, so the vote is
+            # empty.  Fall back to the artwork behind it: on a dark panel light
+            # lettering is the only reading that stays visible.
             fill, stroke_fill = "white", "black"
         else:
             fill, stroke_fill = "black", "white"

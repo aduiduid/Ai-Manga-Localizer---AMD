@@ -789,6 +789,83 @@ def _is_latin_region(text: str, score: float) -> bool:
     return letters > 0 and kana == 0 and latin / letters >= 0.6
 
 
+def _box_iou(first: list[float], second: list[float]) -> float:
+    """Intersection over union of two ``[x0, y0, x1, y1]`` boxes."""
+    x0 = max(first[0], second[0])
+    y0 = max(first[1], second[1])
+    x1 = min(first[2], second[2])
+    y1 = min(first[3], second[3])
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    intersection = (x1 - x0) * (y1 - y0)
+    union = (
+        (first[2] - first[0]) * (first[3] - first[1])
+        + (second[2] - second[0]) * (second[3] - second[1])
+        - intersection
+    )
+    return intersection / union if union > 0 else 0.0
+
+
+def _payload_rows(payload: dict, key: str) -> list:
+    """Rows of a payload field as a list, without testing an array's truth."""
+    values = payload.get(key)
+    if values is None:
+        return []
+    return [value for value in values]
+
+
+def better_recognition(primary: dict, inverted: dict) -> dict:
+    """Keep the more confident reading of every recognised line.
+
+    ``inverted`` comes from the same page turned into an inverted greyscale, so
+    its line boxes sit on top of the primary ones.  Only the strings that read
+    better replace the originals; lines only the second pass found are appended.
+    Nothing is deleted, which keeps the detector the one source of truth for
+    what gets erased.
+    """
+    boxes = [
+        [float(value) for value in row]
+        for row in _payload_rows(primary, "rec_boxes")
+    ]
+    texts = [str(text) for text in _payload_rows(primary, "rec_texts")]
+    scores = [float(score) for score in _payload_rows(primary, "rec_scores")]
+    texts += [""] * (len(boxes) - len(texts))
+    scores += [0.0] * (len(boxes) - len(scores))
+    other_boxes = [
+        [float(value) for value in row]
+        for row in _payload_rows(inverted, "rec_boxes")
+    ]
+    other_texts = [str(text) for text in _payload_rows(inverted, "rec_texts")]
+    other_scores = [float(score) for score in _payload_rows(inverted, "rec_scores")]
+    other_texts += [""] * (len(other_boxes) - len(other_texts))
+    other_scores += [0.0] * (len(other_boxes) - len(other_scores))
+    others = list(zip(other_boxes, other_texts, other_scores))
+    for index, box in enumerate(boxes):
+        best_score, best_at = scores[index], -1
+        for other_index, (candidate, _, score) in enumerate(others):
+            if _box_iou(box, candidate) < 0.5:
+                continue
+            if score > best_score:
+                best_score, best_at = score, other_index
+        if best_at >= 0:
+            boxes[index], texts[index], scores[index] = (
+                others[best_at][0],
+                others[best_at][1],
+                best_score,
+            )
+    for candidate, other_text, other_score in others:
+        if any(_box_iou(candidate, box) >= 0.5 for box in boxes):
+            continue
+        boxes.append(candidate)
+        texts.append(other_text)
+        scores.append(other_score)
+    merged = dict(primary)
+    merged["rec_boxes"] = boxes
+    merged["rec_texts"] = texts
+    merged["rec_scores"] = scores
+    return merged
+
+
 def merge_region_candidates(primary: list[dict], secondary: list[dict]) -> list[dict]:
     """Union detector candidates without letting recognition delete text boxes.
 
@@ -1344,6 +1421,12 @@ EFFECT_SCORE_FLOOR = 0.72
 #: and thrown away by the Japanese floor, and no later stage can recover a box
 #: the detector was never allowed to keep.
 LATIN_EFFECT_SCORE_FLOOR = 0.58
+#: Recognition confidence below which a non-empty string is treated as noise.
+#: White lettering with a dark outline comes back as garbage in this range
+#: ("ASAAACAEAE" at 0.14, "Sn aJOONONHM" at 0.43) while the same lines read at
+#: 0.94-0.99 from an inverted copy of the page, so a page carrying any such line
+#: is read a second time.
+NOISY_READ_SCORE = 0.6
 
 
 class PaddleMangaOCR:
@@ -1440,6 +1523,19 @@ class PaddleMangaOCR:
         if callable(raw):
             raw = raw()
         return raw.get("res", raw)
+
+    def _read_inverted(self, image: Image.Image) -> dict:
+        """Recognise the page again from an inverted greyscale copy.
+
+        Paddle's recogniser is trained on dark glyphs, so white lettering with a
+        dark outline on a dark panel came back as noise while the inverted copy
+        read the same five lines at 0.94-0.99.  The floating point result is
+        inlined here to keep the second pass off the page when it is not needed.
+        """
+        grey = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
+        inverted = cv2.cvtColor(255 - grey, cv2.COLOR_GRAY2RGB)
+        results = list(self.recognition_detector.predict(inverted))
+        return self._payload(results[0]) if results else {}
 
     @staticmethod
     def _regions(
@@ -1689,6 +1785,18 @@ class PaddleMangaOCR:
             recognition_payload = (
                 self._payload(recognition_results[0]) if recognition_results else {}
             )
+            if any(
+                float(score) < NOISY_READ_SCORE and len(str(text).strip()) >= 3
+                for text, score in zip(
+                    recognition_payload.get("rec_texts") or [],
+                    recognition_payload.get("rec_scores") or [],
+                )
+            ):
+                # A page carrying noise is read again from an inverted copy.
+                # Pages whose lines all scored well never pay for that pass.
+                recognition_payload = better_recognition(
+                    recognition_payload, self._read_inverted(image)
+                )
             regions = merge_region_candidates(
                 regions, self._regions(recognition_payload)
             )

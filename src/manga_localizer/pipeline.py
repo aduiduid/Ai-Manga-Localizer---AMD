@@ -73,7 +73,10 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 13: a page read as Latin now keeps recognized strings below the Japanese
 # confidence floor, so a cached page still misses the "'SUP" bubble that Paddle
 # read correctly and the 0.72 floor threw away.
-OCR_CACHE_VERSION = 13
+# 14: a noisy Latin page is recognized a second time on the inverted image, so a
+# cached page still cuts the white lettering off a dark panel (the first four
+# lines of page 17 never became a unit).
+OCR_CACHE_VERSION = 14
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same
