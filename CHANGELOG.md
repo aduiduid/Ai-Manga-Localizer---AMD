@@ -1,3 +1,9 @@
+## 0.13.3 - 2026-11-14
+
+- **A draft from another OCR version is thrown away whole.** The 0.13.2 source check compares a draft line with today's reading, but a pairing that was wrong the moment it was written travels as a matching ``(ja, zh)`` pair and passes that check: the reported page 15 had every line holding the next line's translation, with all sixteen ``translation_attempts`` empty.  ``translation-draft.json`` now records ``ocr_version``; a draft without the current stamp is discarded instead of resumed.
+- **A long, low-confidence line gets one context-free pass.** Scanned lettering that lost its word spaces comes back as one glued string at low confidence; told nothing, the model echoes the mush and the bubble keeps its English.  Lines with 32+ Latin letters under 0.90 confidence now get a pass that names the damage and drops the story context, because the plot is what tempts it to invent the missing words.
+- **English pages can be recovered again.** ``recover_missing`` refused every proposal on a declared ``en`` book, and the hybrid pass skipped asking for them, because the read that confirms a proposal was MangaOCR's kana -- a question an English page cannot answer.  That gate is gone: proposals on a Latin source are confirmed by Paddle's own recogniser on the enlarged crop, and a leftover the exact detector never owned counts as picture text instead of aborting the book.
+
 ## 0.13.2 - 2026-11-14
 
 - **A resumed draft is matched on its source line, not its id.** Unit ids are renumbered by every OCR run, so a book translated twice into the same folder reused a draft whose ids had shifted: on the reported page 47, “POKE” was handed the line belonging to “Ready y-yeAAAH!” and every unit after it moved down one.  A draft entry is now reused only when both the id and the source text match; a page read differently is translated again.

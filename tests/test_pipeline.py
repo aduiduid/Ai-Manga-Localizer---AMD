@@ -384,6 +384,7 @@ def test_a_draft_from_an_interrupted_run_is_reused(tmp_path):
             {
                 "source": "src",
                 "target_language": "简体中文",
+                "ocr_version": OCR_CACHE_VERSION,
                 "pages": [
                     {
                         "page": 1,
@@ -430,6 +431,7 @@ def test_a_draft_read_differently_is_not_reused(tmp_path):
         json.dumps(
             {
                 "target_language": "简体中文",
+                "ocr_version": OCR_CACHE_VERSION,
                 "pages": [
                     {
                         "page": 1,
@@ -512,6 +514,7 @@ def test_the_draft_for_another_target_language_is_ignored(tmp_path):
         json.dumps(
             {
                 "target_language": "繁體中文",
+                "ocr_version": OCR_CACHE_VERSION,
                 "pages": [
                     {
                         "page": 1,
@@ -534,6 +537,46 @@ def test_the_draft_for_another_target_language_is_ignored(tmp_path):
         }
     )
     # Half a book in the wrong language is worse than re-translating it.
+    assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
+    assert page.units[0].zh == ""
+
+
+@pytest.mark.parametrize("stamp", [None, OCR_CACHE_VERSION - 1, "banana"])
+def test_a_draft_from_another_ocr_version_is_thrown_away(tmp_path, stamp):
+    """A draft carries the reading it was paired with, all the way down.
+
+    The reported page 15 was reused from a run whose OCR numbered one more unit
+    at the top: every id stayed the same but moved one line, so the per-line
+    source check compared "NO!" against "WAIT, WHAT'S THAT SMELL?" and saw a
+    mismatch it could not act on -- the old pairing had already been stored as
+    a matching (ja, zh) pair.  A version stamp rejects the whole draft instead.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    payload = {
+        "target_language": "简体中文",
+        "pages": [
+            {
+                "page": 1,
+                "file": "001.jpg",
+                "units": [{"id": "p001u01", "ja": "NO!", "zh": "等等，那是什么味道？"}],
+            }
+        ],
+    }
+    if stamp is not None:
+        payload["ocr_version"] = stamp
+    (work / "translation-draft.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [{"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "NO!", "zh": ""}],
+        }
+    )
     assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
     assert page.units[0].zh == ""
 

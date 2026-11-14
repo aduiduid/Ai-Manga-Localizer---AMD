@@ -104,9 +104,17 @@ def unsafe_semantic_missing(page: PageOCR, preserve_sfx: bool) -> list[dict]:
         short_vocalization = len(japanese_chars) <= 3 and bool(
             re.search(r"[っッゃゅょャュョ♡♥]", text)
         )
+        # A Latin page can be recovered now, so its leftovers reach this check
+        # too.  Those are words the vision pass read but the exact detector did
+        # not own; keeping them as picture text is what a short sound effect
+        # already gets, and the alternative is failing the whole book.
+        latin_effect = bool(
+            re.fullmatch(r"[A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f !?.,'-]{0,23}", text)
+        )
         preservable = (
             single_kana_fragment
             or short_vocalization
+            or latin_effect
             or semantic_sfx_classification(
                 text,
                 float(item.get("score", 0.0)),
@@ -191,6 +199,11 @@ class LocalizerPipeline:
             # wanted: resuming a draft written for another target language
             # would leave half a book in the wrong one.
             "target_language": target_language,
+            # The reader that produced the geometry these lines were paired
+            # with.  A draft from another OCR version cannot be matched to
+            # today's boxes (unit ids are renumbered per page), so it has to
+            # be thrown away instead of being resumed one bubble off.
+            "ocr_version": OCR_CACHE_VERSION,
             "pages": [page.to_dict() for page in pages],
         }
         if glossary:
@@ -218,6 +231,13 @@ class LocalizerPipeline:
         every later line by one.  Resuming on the id alone then prints the
         previous run's translations one bubble off, which is how page 47 of the
         sample came out with two words about an act it never shows.
+
+        The draft also has to carry the OCR version that produced those ids.
+        A draft written by an older reader was already paired line by line
+        against boxes that no longer exist, and a per-unit source check cannot
+        see a pairing that was wrong the moment it was written -- the ``ja``
+        and the ``zh`` travelled together.  An unstamped or stale draft is
+        therefore dropped whole and the book is translated again.
         """
         path = work / "translation-draft.json"
         if not path.is_file():
@@ -225,6 +245,12 @@ class LocalizerPipeline:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            return 0
+        try:
+            declared_version = int(payload.get("ocr_version", -1))
+        except (TypeError, ValueError):
+            return 0
+        if declared_version != OCR_CACHE_VERSION:
             return 0
         declared = str(payload.get("target_language") or "")
         if declared and target_language and declared != target_language:

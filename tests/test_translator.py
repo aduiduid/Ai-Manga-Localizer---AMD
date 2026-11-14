@@ -1949,3 +1949,51 @@ def test_the_cleaning_pass_covers_every_unit_of_a_page():
     assert units["p001u02"] == "拍"
     assert units["p001u03"] == "你好。"
     assert units["p001u04"] == "保留"
+
+
+def test_a_long_glued_line_gets_one_context_free_pass_of_its_own():
+    # A scanned line that lost its word spaces reads as mush to the model, so
+    # every rung of the ladder mirrors the mush back and the bubble keeps its
+    # English.  The extra pass names the damage and drops the story.
+    class CountingTranslator(PromptTranslator):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            self.prompts.append(prompt)
+            return "ガク君"
+
+        def _generate_repair(self, prompt, max_new_tokens):
+            del prompt, max_new_tokens
+            return "ガク君"
+
+    glued = "ABSOLTELYNOWATO OET MORE IMLET WIW NOOOC O AAV"
+    unit = TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], glued, 0.8)
+    service = CountingTranslator()
+    assert service._translate_one(unit, [], "无") == ""
+    assert any("词间空格" in prompt for prompt in service.prompts)
+    # The pass only fires once, not once per rung.
+    assert sum("词间空格" in prompt for prompt in service.prompts) == 1
+
+
+def test_a_confident_short_line_never_pays_for_the_glued_line_pass():
+    class CountingTranslator(PromptTranslator):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+
+        def _generate(self, prompt, max_new_tokens=1600):
+            del max_new_tokens
+            self.prompts.append(prompt)
+            return "ガク君"
+
+        def _generate_repair(self, prompt, max_new_tokens):
+            del prompt, max_new_tokens
+            return "ガク君"
+
+    unit = TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], "HELLO THERE", 0.99)
+    service = CountingTranslator()
+    service._translate_one(unit, [], "无")
+    assert not any("词间空格" in prompt for prompt in service.prompts)

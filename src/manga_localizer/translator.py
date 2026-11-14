@@ -44,6 +44,18 @@ DEGENERATE_SAFE_REPEATS = "。、，．…‥・！？!?~～ー—ｰ♪♡※×
 SPLIT_ID_RE = re.compile(
     r"^\s*(?:\[id\]\s*)?\[?(p\d+u\d+)\]?\s*(.*?)\s*$", re.IGNORECASE
 )
+# A scanned page can hand over one long line the reader was unsure about:
+# every word glued together, no spaces, low confidence.  The normal ladder
+# gives up on those -- the model mirrors the mush -- and the bubble keeps its
+# English.  Those lines get one extra pass of their own.
+RUNON_SOURCE_LETTERS = 32
+RUNON_SCORE_CEILING = 0.9
+
+
+def run_on_source(source: str, score: float) -> bool:
+    """Whether a long, low-confidence line deserves one context-free pass."""
+    letters = len(re.findall(r"[A-Za-z\u00c0-\u024f]", source))
+    return letters >= RUNON_SOURCE_LETTERS and score <= RUNON_SCORE_CEILING
 # Japanese letters and prolonged sound mark, excluding shared punctuation such
 # as the middle dot (・), which is valid in otherwise Chinese typesetting.
 KANA_RE = re.compile(r"[ぁ-ゖァ-ヺーヽヾ]")
@@ -1433,6 +1445,24 @@ class PromptTranslator:
         unit.translation_attempts.append(repaired)
         if self._candidate_is_acceptable(unit, repaired, glossary):
             return repaired
+        if run_on_source(unit.ja, unit.score):
+            # The ladder above keeps failing on these because the source has
+            # lost its word spaces: told nothing, the model echoes the mush back
+            # as the same mush.  Naming the damage and dropping the story
+            # context is the only remaining move -- the plot is what tempts it
+            # to invent the missing words.
+            runon = f"""这段原文来自扫描件：词间空格可能已经丢失（单词粘连成串），个别字母也可能识别错误。请先还原出通顺的原文句子，再翻译为{self.target_language}。
+只输出不超过 {limit} 个字符的一行译文；不得解释，不得补充原文没有的情节、动作或评价，不得含{self._script_rule()}，姓名也译成中文。
+语气约束：{tone_constraint}
+语义约束：{audit_constraint}
+固定译名：{unit_terms}
+【原文】{unit.ja}"""
+            runon_candidate = self._single_line(
+                self._generate(runon, max_new_tokens=max(32, min(128, limit * 3)))
+            )
+            unit.translation_attempts.append(runon_candidate)
+            if self._candidate_is_acceptable(unit, runon_candidate, glossary):
+                return runon_candidate
         fallback = interjection_fallback(unit.ja)
         if fallback:
             unit.translation_attempts.append(fallback)

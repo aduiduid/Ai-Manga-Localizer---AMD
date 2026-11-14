@@ -1556,6 +1556,30 @@ class PaddleMangaOCR:
         results = list(self.recognition_detector.predict(inverted))
         return self._payload(results[0]) if results else {}
 
+    def _independent_reading(self, crop: Image.Image) -> str:
+        """Read one recovered crop without the vision model that proposed it.
+
+        Recovery only trusts a proposal once something other than the proposer
+        can read text inside the geometry the detector just produced.  That
+        used to be MangaOCR's kana, which is the one question a declared English
+        book cannot answer -- so an English page could never be recovered at
+        all, and handwriting Paddle half-remembered stayed English.  Paddle's
+        own recogniser answers it in Latin script instead.
+        """
+        if self._declared_language() == "en":
+            if self.recognition_detector is None:
+                return ""
+            results = list(self.recognition_detector.predict(np.asarray(crop)))
+            payload = self._payload(results[0]) if results else {}
+            return " ".join(
+                text
+                for text in (
+                    str(value).strip() for value in _payload_rows(payload, "rec_texts")
+                )
+                if text
+            )
+        return self.reader(crop).strip()
+
     @staticmethod
     def _regions(
         payload: dict,
@@ -1989,16 +2013,15 @@ class PaddleMangaOCR:
 
         Full-page vision is useful for recall but its coordinates are too coarse
         for destructive editing.  Each proposed region is therefore enlarged,
-        run through the exact Paddle detector again, and accepted only when
-        MangaOCR independently recognizes Japanese in the recovered geometry.
+        run through the exact Paddle detector again, and accepted only when an
+        independent read of that geometry finds text in the declared source
+        language.  A declared English book used to be refused outright, because
+        the confirming reader was MangaOCR and it can only answer in kana; the
+        Paddle recogniser that already reads the rest of the page confirms those
+        crops instead, so handwriting Paddle only half catches still gets a
+        second chance without the vision model ever owning a box.
         """
         if not missing:
-            return page
-        if self._declared_language() == "en":
-            # Recovery is validated by asking MangaOCR for Japanese inside the
-            # enlarged crop; on a declared English book that question is wrong, so
-            # the VLM's own report is all we would have -- and it must not enlarge
-            # an erase mask on its own.
             return page
         image = Image.open(image_path).convert("RGB")
         recovered_regions: list[dict] = []
@@ -2271,13 +2294,15 @@ class PaddleMangaOCR:
                 min(image.width, box[2] + pad_x),
                 min(image.height, box[3] + pad_y),
             ]
-            refined = self.reader(image.crop(tuple(crop_box))).strip()
-            if not JP_RE.search(refined):
+            refined = self._independent_reading(image.crop(tuple(crop_box)))
+            if not is_source_text(refined, self._declared_language()):
                 continue
             semantic_candidates = {
                 str(item.get("semantic_text", "")).strip()
                 for item in group
-                if JP_RE.search(str(item.get("semantic_text", "")))
+                if is_source_text(
+                    str(item.get("semantic_text", "")), self._declared_language()
+                )
             }
             expected_sfx = any(
                 bool(item.get("semantic_is_sfx", False)) for item in group
@@ -3333,17 +3358,10 @@ class HybridMangaOCR:
 
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
         page = self.geometry.analyze(image_path, page_number)
-        # A declared Latin source has no recovery path: ``recover_missing``
-        # returns the page untouched for it, because the write-back reading that
-        # confirms a proposal is Japanese-only.  Recall proposals therefore cost
-        # 13-21% of the page and can never become geometry, so do not ask for
-        # them.  ``auto`` keeps them: a Latin page under ``auto`` still routes
-        # through recovery.
-        recalls_region = getattr(self, "source_language", "auto") != "en"
         if page.units:
             page, first_missing = self.semantics.refine(image_path, page)
             second_missing: list[dict] = []
-            if getattr(self, "profile", "quality") == "quality" and recalls_region:
+            if getattr(self, "profile", "quality") == "quality":
                 if hasattr(self.semantics, "find_missing"):
                     second_missing = self.semantics.find_missing(image_path, page)
                 else:
@@ -3358,11 +3376,7 @@ class HybridMangaOCR:
         pending_missing = self.semantics.filter_covered_missing(
             page, list(self.last_missing)
         )
-        if (
-            page.units
-            and getattr(self, "profile", "quality") == "quality"
-            and recalls_region
-        ):
+        if page.units and getattr(self, "profile", "quality") == "quality":
             # Proposals and confidence are not the same thing.  llama.cpp
             # proposed two regions on a dense page whose three real sound
             # effects it never mentioned, and a decoder that proposes nothing
