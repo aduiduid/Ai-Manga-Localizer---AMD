@@ -15,12 +15,39 @@ class LaMaInpainter:
     an enforceable contract instead of a best-effort promise.
     """
 
-    def __init__(self, model_path: Path, device: str = "auto"):
+    def __init__(
+        self, model_path: Path, device: str = "auto", graph_path: Path | None = None
+    ):
         self.model_path = Path(model_path)
+        # Only a raw checkpoint needs a graph to run in; a scripted `.pt` brings
+        # its own, so this stays None for the pinned Big-LaMa file.
+        self.graph_path = Path(graph_path) if graph_path is not None else None
         self.requested_device = device
         self._torch = None
         self._model = None
         self._device = None
+
+    def _load_weights_into_graph(self, torch):
+        """Run a raw state_dict checkpoint on the scripted graph that shipped.
+
+        The manga checkpoint holds the same 989 tensor names the pinned
+        TorchScript wrapper exposes, so the graph is reused and only the
+        weights are swapped -- no second copy of the network to maintain.
+        """
+        if self.graph_path is None or not self.graph_path.exists():
+            raise FileNotFoundError(
+                f"LaMa graph is missing: {self.graph_path}. Run `manga-localizer models download lama`."
+            )
+        try:
+            from safetensors.torch import load_file
+        except ImportError as exc:
+            raise ModelDependencyError(
+                "lama-manga requires the safetensors package. Install "
+                "manga-localizer-studio[ml]."
+            ) from exc
+        graph = torch.jit.load(str(self.graph_path), map_location=self._device)
+        graph.model.generator.load_state_dict(load_file(str(self.model_path)))
+        return graph
 
     def _load(self) -> None:
         if self._model is not None:
@@ -47,8 +74,14 @@ class LaMaInpainter:
             device = "cpu"
         self._torch = torch
         self._device = torch.device(device)
-        self._model = torch.jit.load(str(self.model_path), map_location=self._device)
-        self._model.eval()
+        # `.pt` here is a TorchScript archive that carries its own graph;
+        # `.safetensors` is a bare state_dict, so it borrows one.
+        if self.model_path.suffix.lower() == ".safetensors":
+            model = self._load_weights_into_graph(torch)
+        else:
+            model = torch.jit.load(str(self.model_path), map_location=self._device)
+        model.eval()
+        self._model = model
 
     def __call__(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
         if rgb.ndim != 3 or rgb.shape[2] != 3:

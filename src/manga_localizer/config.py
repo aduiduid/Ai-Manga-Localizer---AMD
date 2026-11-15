@@ -92,6 +92,13 @@ def cleanup_profile_for(profile: str) -> str:
     return "artwork" if profile == "fast" else "quality"
 
 
+# Which LaMa checkpoint repaints the erased lettering.  ``lama-manga`` is the
+# manga-tuned state_dict that runs on the same TorchScript graph as ``lama``;
+# it has no download source, so it can only be picked once the file is on disk.
+ERASE_MODELS = ("lama", "lama-manga")
+DEFAULT_ERASE_MODEL = "lama"
+
+
 @dataclass(frozen=True)
 class AppPaths:
     root: Path
@@ -199,6 +206,8 @@ class UserSettings:
     # Where the Ollama blobs live.  Empty means "<data root>/../ollama-models",
     # which is where start.bat puts them.
     llama_ollama_root: str = ""
+    # Which LaMa checkpoint repaints erased lettering; see ERASE_MODELS.
+    erase_model: str = DEFAULT_ERASE_MODEL
 
     @classmethod
     def load(cls, path: Path) -> "UserSettings":

@@ -1,3 +1,9 @@
+## 0.13.4 - 2026-11-15
+
+- **A second erase model can be selected.** The manga-tuned ``lama-manga`` checkpoint ships as bare ``.safetensors`` weights with no TorchScript graph of its own, so it is loaded into the graph that already ships with the general checkpoint: every key matches its generator, and only the weights differ.  ``LaMaInpainter`` now takes the graph separately and dispatches on the checkpoint suffix, so a ``.pt`` checkpoint still loads the old way.
+- **The erase model is chosen before a page is read.** ``erase_model`` is a setting with two values, ``lama`` (default) and ``lama-manga``.  The chosen checkpoint is resolved as soon as rendering starts, so a missing file names itself instead of failing on the first bubble; ``lama-manga`` also needs the general checkpoint present, because that file is where its graph comes from.
+- **A twelve-page comparison puts ``lama-manga`` slightly ahead.** Same transcripts, same masks, only the weights swapped: residual ink inside the erased region 33.39 → 32.75, pixels lightened away from the source 11.88 → 11.63, mean deviation from the source 40.43 → 39.57.  The gain is small and consistent rather than dramatic; the general model stays the default because it needs no extra download.
+
 ## 0.13.3 - 2026-11-14
 
 - **A draft from another OCR version is thrown away whole.** The 0.13.2 source check compares a draft line with today's reading, but a pairing that was wrong the moment it was written travels as a matching ``(ja, zh)`` pair and passes that check: the reported page 15 had every line holding the next line's translation, with all sixteen ``translation_attempts`` empty.  ``translation-draft.json`` now records ``ocr_version``; a draft without the current stamp is discarded instead of resumed.

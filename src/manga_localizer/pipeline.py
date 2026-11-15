@@ -10,6 +10,7 @@ from typing import Callable
 from PIL import Image
 
 from .config import (
+    DEFAULT_ERASE_MODEL,
     LLAMA_SINGLE_MODEL,
     DEFAULT_LLAMA_MAIN_PORT,
     DEFAULT_LLAMA_MODEL,
@@ -162,6 +163,8 @@ class PipelineRequest:
     online_model: str = ""
     online_api_key: str = ""
     reviewed_transcript: Path | None = None
+    # Which LaMa checkpoint repaints erased lettering; see config.ERASE_MODELS.
+    erase_model: str = DEFAULT_ERASE_MODEL
     # llama.cpp settings.  The model names are Ollama manifest tags, because the
     # manifest is what maps a readable name to the content-addressed GGUF blob
     # that llama-server loads; nothing here talks to the Ollama daemon.
@@ -693,7 +696,11 @@ class LocalizerPipeline:
 
         if cleanup_profile_for(request.quality_profile) == "quality":
             manager = ModelManager(self.paths)
-            if not manager.lama_weights_path().exists():
+            if request.erase_model == "lama-manga":
+                # No download exists for this checkpoint, so name the missing
+                # file now rather than failing on the first rendered page.
+                manager.erase_model_paths(request.erase_model)
+            elif not manager.lama_weights_path().exists():
                 self._emit(emit, "render", 0, total, "首次使用：下载 LaMa 补画模型")
                 manager.download(
                     "lama",
@@ -708,6 +715,7 @@ class LocalizerPipeline:
             cleanup_profile=cleanup_profile_for(request.quality_profile),
             paths=self.paths,
             device=request.device,
+            erase_model=request.erase_model,
         )
         suffix = ".webp" if request.output_format == "webp" else ".png"
         for index, page in enumerate(pages, start=1):
@@ -931,6 +939,7 @@ def request_from_settings(
         llama_vision_port=settings.llama_vision_port,
         llama_server_path=settings.llama_server_path,
         llama_ollama_root=settings.llama_ollama_root,
+        erase_model=settings.erase_model,
     )
 
 

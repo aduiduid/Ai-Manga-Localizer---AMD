@@ -425,6 +425,7 @@ class ArtworkPreservingRenderer:
         paths: AppPaths | None = None,
         device: str = "auto",
         inpainter=None,
+        erase_model: str = "lama",
     ):
         self.paths = (paths or AppPaths.from_env()).ensure()
         self.font_path = font_path or ensure_font(self.paths)
@@ -434,6 +435,7 @@ class ArtworkPreservingRenderer:
             raise ValueError(f"Unknown cleanup profile: {cleanup_profile}")
         self.cleanup_profile = resolved_profile
         self.device = device
+        self.erase_model = erase_model
         self._inpainter = inpainter
 
     @staticmethod
@@ -582,8 +584,8 @@ class ArtworkPreservingRenderer:
 
     def _get_inpainter(self):
         if self._inpainter is None:
-            weights = ModelManager(self.paths).lama_weights_path()
-            self._inpainter = LaMaInpainter(weights, self.device)
+            weights, graph = ModelManager(self.paths).erase_model_paths(self.erase_model)
+            self._inpainter = LaMaInpainter(weights, self.device, graph_path=graph)
         return self._inpainter
 
     @staticmethod

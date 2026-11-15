@@ -6,10 +6,13 @@ from manga_localizer.config import AppPaths, UserSettings, configure_model_cache
 
 def test_settings_round_trip(tmp_path):
     path = tmp_path / "settings.json"
-    expected = UserSettings(context_pages=5, preserve_sfx=False)
+    expected = UserSettings(context_pages=5, preserve_sfx=False, erase_model="lama-manga")
     expected.save(path)
     assert UserSettings.load(path) == expected
     assert json.loads(path.read_text(encoding="utf-8"))["context_pages"] == 5
+    assert (
+        json.loads(path.read_text(encoding="utf-8"))["erase_model"] == "lama-manga"
+    )
 
 
 def test_model_caches_are_scoped(monkeypatch, tmp_path):

@@ -75,6 +75,7 @@ class SettingsPayload(BaseModel):
     # graph would clip.
     notify_volume: int = Field(70, ge=0, le=100)
     ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
+    erase_model: Literal["lama", "lama-manga"] = "lama"
     inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
@@ -684,6 +685,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             "cpu_threads": active.cpu_threads,
             "inference_backend": active.inference_backend,
             "ocr_backend": active.ocr_backend,
+            "erase_model": active.erase_model,
             "ollama_base_url": active.ollama_base_url,
             "ollama_model": active.ollama_model,
             "ollama_ocr_model": active.ollama_ocr_model,
