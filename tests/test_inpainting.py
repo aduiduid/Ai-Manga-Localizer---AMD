@@ -72,3 +72,43 @@ def test_the_erase_model_falls_back_when_the_manga_weights_are_absent(tmp_path):
     )
     with pytest.raises(ValueError, match="擦除模型"):
         manager.erase_model_paths("nope")
+
+
+def test_the_aot_checkpoint_is_reachable_without_the_lama_graph(tmp_path):
+    """AOT rebuilds its own network, so it never needs the scripted LaMa file."""
+    manager = ModelManager(_paths(tmp_path))
+    effective, reason = manager.resolve_erase_model("aot-manga")
+    assert effective == "lama"
+    assert "model.safetensors" in reason
+    manager.aot_weights_path().parent.mkdir(parents=True, exist_ok=True)
+    manager.aot_weights_path().write_bytes(b"")
+    assert manager.resolve_erase_model("aot-manga") == ("aot-manga", "")
+    assert manager.erase_model_paths("aot-manga") == (
+        manager.aot_weights_path(),
+        None,
+    )
+
+
+def test_the_aot_wrapper_passes_a_whole_page_through_untouched(tmp_path):
+    """No mask means no inference: the page must come back byte-identical."""
+    pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from manga_localizer.inpainting import AOTMangaInpainter
+
+    source = np.arange(24 * 17 * 3, dtype=np.uint8).reshape((24, 17, 3))
+    mask = np.zeros((24, 17), dtype=np.uint8)
+    output = AOTMangaInpainter(tmp_path / "missing.safetensors", "cpu")(source, mask)
+    assert np.array_equal(output, source)
+
+
+def test_the_aot_wrapper_reports_a_missing_checkpoint(tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from manga_localizer.inpainting import AOTMangaInpainter
+
+    source = np.zeros((24, 17, 3), dtype=np.uint8)
+    mask = np.zeros((24, 17), dtype=np.uint8)
+    mask[2:6, 3:9] = 255
+    wrapper = AOTMangaInpainter(tmp_path / "missing.safetensors", "cpu")
+    with pytest.raises(FileNotFoundError, match="AOT"):
+        wrapper(source, mask)

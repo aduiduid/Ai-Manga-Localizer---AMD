@@ -326,27 +326,40 @@ class ModelManager:
         """The manga-tuned checkpoint, which has no download source of its own."""
         return self.model_dir("lama-manga") / "lama-manga.safetensors"
 
+    def aot_weights_path(self) -> Path:
+        """The manga-image-translator AOT generator, also placed by hand."""
+        return self.model_dir("AOT Inpainting for Manga") / "model.safetensors"
+
+    def erase_model_file(self, erase_model: str) -> Path:
+        """The file a given erase model reads, without checking that it exists."""
+        if erase_model == "lama-manga":
+            return self.lama_manga_weights_path()
+        if erase_model == "aot-manga":
+            return self.aot_weights_path()
+        return self.lama_weights_path()
+
     def resolve_erase_model(
         self, erase_model: str = DEFAULT_ERASE_MODEL
     ) -> tuple[str, str]:
         """Which checkpoint actually runs, and why it is not the preferred one.
 
-        The manga checkpoint has no download source, so a book should not fail
-        because a file someone has to place by hand is absent: the general
-        checkpoint is a working substitute and the reason is reported instead.
+        The specialised checkpoints have no download source, so a book must not
+        fail because a file someone has to place by hand is absent: the pinned
+        Big-LaMa is a working substitute and the reason is reported instead.
         """
         if erase_model not in ERASE_MODELS:
             raise ValueError(
                 f"未知的擦除模型：{erase_model}（可选：{', '.join(ERASE_MODELS)}）"
             )
-        if erase_model != "lama-manga":
+        if erase_model == "lama":
             return erase_model, ""
-        weights = self.lama_manga_weights_path()
+        weights = self.erase_model_file(erase_model)
         if weights.exists():
             return erase_model, ""
+        labels = {"lama-manga": "lama-manga（漫画特化）", "aot-manga": "AOT（漫画特化）"}
         return "lama", (
-            f"未找到 lama-manga 权重（{weights}），本次改用 Big-LaMa（通用）擦除。"
-            "把 lama-manga.safetensors 放进该目录即可启用漫画特化模型。"
+            f"未找到 {labels[erase_model]} 权重（{weights}），"
+            "本次改用 Big-LaMa（通用）擦除。把权重文件放进该目录即可启用。"
         )
 
     def erase_model_paths(
@@ -356,17 +369,21 @@ class ModelManager:
 
         Returns ``(weights, graph)``.  ``lama-manga`` is a bare state_dict, so it
         also returns the scripted graph it runs on; the pinned Big-LaMa file is
-        already TorchScript and brings its own.  Both are checked here so a
-        missing file fails the job instead of the first page.
+        already TorchScript and brings its own, and AOT rebuilds its network from
+        the state_dict alone.  Everything is checked here so a missing file fails
+        the job instead of the first page.
         """
         effective, _ = self.resolve_erase_model(erase_model)
+        if effective == "aot-manga":
+            return self.aot_weights_path(), None
         graph = self.lama_weights_path()
-        weights = self.lama_manga_weights_path() if effective == "lama-manga" else graph
         if not graph.exists():
             raise FileNotFoundError(
                 f"未找到 LaMa 权重：{graph}。请先下载 LaMa 补画模型。"
             )
-        return weights, (graph if effective == "lama-manga" else None)
+        if effective == "lama-manga":
+            return self.lama_manga_weights_path(), graph
+        return graph, None
 
     def mark_ready(self, model_id: str, metadata: dict | None = None) -> None:
         directory = self.model_dir(model_id)

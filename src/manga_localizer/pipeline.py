@@ -703,7 +703,9 @@ class LocalizerPipeline:
             erase_model, fallback = manager.resolve_erase_model(request.erase_model)
             if fallback:
                 self._emit(emit, "render", 0, total, fallback)
-            if not manager.lama_weights_path().exists():
+            # AOT rebuilds its own network, so it never reads the scripted
+            # LaMa graph and must not trigger a download for it.
+            if erase_model != "aot-manga" and not manager.lama_weights_path().exists():
                 self._emit(emit, "render", 0, total, "首次使用：下载 LaMa 补画模型")
                 manager.download(
                     "lama",

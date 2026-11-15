@@ -92,10 +92,12 @@ def cleanup_profile_for(profile: str) -> str:
     return "artwork" if profile == "fast" else "quality"
 
 
-# Which LaMa checkpoint repaints the erased lettering.  ``lama-manga`` is the
+# Which checkpoint repaints the erased lettering.  ``lama-manga`` is the
 # manga-tuned state_dict that runs on the same TorchScript graph as ``lama``;
-# it has no download source, so it can only be picked once the file is on disk.
-ERASE_MODELS = ("lama", "lama-manga")
+# ``aot-manga`` is manga-image-translator's AOT generator, a much smaller
+# network that only earns its place through whole-page speed.  Neither has a
+# download source, so each can only be picked once the file is on disk.
+ERASE_MODELS = ("lama", "lama-manga", "aot-manga")
 DEFAULT_ERASE_MODEL = "lama-manga"
 
 

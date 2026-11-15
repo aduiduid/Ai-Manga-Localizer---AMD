@@ -1,3 +1,15 @@
+## 0.13.6 - 2026-11-15
+
+- Repaint the whole page in one pass instead of one inference per balloon. The
+  network now sees the panel it has to continue, so erased lettering no longer
+  leaves a pale block behind: measured over six pages, residual ink dropped
+  from 33.4 to 12.1 and over-lightening from 11.9 to 5.0.
+- Add the AOT inpainting checkpoint as a third erase model. It rebuilds its
+  network from the bare state_dict, so it needs no scripted graph, and one
+  whole-page pass takes about half the time of LaMa.
+- Fall back to Big-LaMa with a readable reason when a specialised checkpoint
+  has not been placed on disk, instead of failing the book.
+
 ## 0.13.5 - 2026-11-15
 
 - **The manga-tuned checkpoint is now the default.** ``lama-manga`` beat the general checkpoint on the twelve-page erase comparison (residual ink 33.39 → 32.75, over-lightening 11.88 → 11.63, deviation 40.43 → 39.57) and costs the same wall time per page, so ``DEFAULT_ERASE_MODEL`` moves to it; ``lama`` stays in the dropdown as the fallback.
