@@ -1,3 +1,8 @@
+## 0.13.5 - 2026-11-15
+
+- **The manga-tuned checkpoint is now the default.** ``lama-manga`` beat the general checkpoint on the twelve-page erase comparison (residual ink 33.39 → 32.75, over-lightening 11.88 → 11.63, deviation 40.43 → 39.57) and costs the same wall time per page, so ``DEFAULT_ERASE_MODEL`` moves to it; ``lama`` stays in the dropdown as the fallback.
+- **A missing manga checkpoint degrades instead of failing.** The file has no download source of its own, so a book would previously stop before the first page with a ``FileNotFoundError``.  ``ModelManager.resolve_erase_model`` now answers with the checkpoint that will actually run plus the reason, and the render pass reports "未找到 lama-manga 权重… 本次改用 Big-LaMa（通用）擦除" while the book finishes.  Only a missing ``big-lama.pt`` remains a hard error, because it carries the TorchScript graph both checkpoints run on.
+
 ## 0.13.4 - 2026-11-15
 
 - **A second erase model can be selected.** The manga-tuned ``lama-manga`` checkpoint ships as bare ``.safetensors`` weights with no TorchScript graph of its own, so it is loaded into the graph that already ships with the general checkpoint: every key matches its generator, and only the weights differ.  ``LaMaInpainter`` now takes the graph separately and dispatches on the checkpoint suffix, so a ``.pt`` checkpoint still loads the old way.

@@ -694,13 +694,16 @@ class LocalizerPipeline:
             else glossary,
         )
 
+        erase_model = request.erase_model
         if cleanup_profile_for(request.quality_profile) == "quality":
             manager = ModelManager(self.paths)
-            if request.erase_model == "lama-manga":
-                # No download exists for this checkpoint, so name the missing
-                # file now rather than failing on the first rendered page.
-                manager.erase_model_paths(request.erase_model)
-            elif not manager.lama_weights_path().exists():
+            # The manga checkpoint has no download source of its own, so a
+            # missing file is covered by the general one and reported, instead
+            # of failing a whole book on the first rendered page.
+            erase_model, fallback = manager.resolve_erase_model(request.erase_model)
+            if fallback:
+                self._emit(emit, "render", 0, total, fallback)
+            if not manager.lama_weights_path().exists():
                 self._emit(emit, "render", 0, total, "首次使用：下载 LaMa 补画模型")
                 manager.download(
                     "lama",
@@ -715,7 +718,7 @@ class LocalizerPipeline:
             cleanup_profile=cleanup_profile_for(request.quality_profile),
             paths=self.paths,
             device=request.device,
-            erase_model=request.erase_model,
+            erase_model=erase_model,
         )
         suffix = ".webp" if request.output_format == "webp" else ".png"
         for index, page in enumerate(pages, start=1):

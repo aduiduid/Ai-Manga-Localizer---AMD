@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .config import AppPaths
+from .config import AppPaths, DEFAULT_ERASE_MODEL
 from .inpainting import LaMaInpainter
 from .model_manager import ModelManager
 from .ocr import (
@@ -425,7 +425,7 @@ class ArtworkPreservingRenderer:
         paths: AppPaths | None = None,
         device: str = "auto",
         inpainter=None,
-        erase_model: str = "lama",
+        erase_model: str = DEFAULT_ERASE_MODEL,
     ):
         self.paths = (paths or AppPaths.from_env()).ensure()
         self.font_path = font_path or ensure_font(self.paths)

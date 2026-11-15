@@ -50,7 +50,8 @@ def _paths(tmp_path):
     )
 
 
-def test_the_erase_model_is_resolved_before_a_page_is_touched(tmp_path):
+def test_the_erase_model_falls_back_when_the_manga_weights_are_absent(tmp_path):
+    """A hand-placed checkpoint must not fail a book; the general one takes over."""
     manager = ModelManager(_paths(tmp_path))
     graph = manager.lama_weights_path()
     with pytest.raises(FileNotFoundError, match="LaMa"):
@@ -58,10 +59,13 @@ def test_the_erase_model_is_resolved_before_a_page_is_touched(tmp_path):
     graph.parent.mkdir(parents=True, exist_ok=True)
     graph.write_bytes(b"")
     assert manager.erase_model_paths("lama") == (graph, None)
-    with pytest.raises(FileNotFoundError, match="lama-manga"):
-        manager.erase_model_paths("lama-manga")
+    effective, reason = manager.resolve_erase_model("lama-manga")
+    assert effective == "lama"
+    assert "lama-manga.safetensors" in reason
+    assert manager.erase_model_paths("lama-manga") == (graph, None)
     manager.lama_manga_weights_path().parent.mkdir(parents=True, exist_ok=True)
     manager.lama_manga_weights_path().write_bytes(b"")
+    assert manager.resolve_erase_model("lama-manga") == ("lama-manga", "")
     assert manager.erase_model_paths("lama-manga") == (
         manager.lama_manga_weights_path(),
         graph,

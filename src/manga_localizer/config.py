@@ -96,7 +96,7 @@ def cleanup_profile_for(profile: str) -> str:
 # manga-tuned state_dict that runs on the same TorchScript graph as ``lama``;
 # it has no download source, so it can only be picked once the file is on disk.
 ERASE_MODELS = ("lama", "lama-manga")
-DEFAULT_ERASE_MODEL = "lama"
+DEFAULT_ERASE_MODEL = "lama-manga"
 
 
 @dataclass(frozen=True)

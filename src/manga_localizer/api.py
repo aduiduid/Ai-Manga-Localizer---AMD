@@ -27,6 +27,7 @@ from .config import (
     DEFAULT_LLAMA_VISION_PORT,
     LLAMA_CONTEXT_TOKENS,
     AppPaths,
+    DEFAULT_ERASE_MODEL,
     UserSettings,
     translate_quality,
 )
@@ -75,7 +76,7 @@ class SettingsPayload(BaseModel):
     # graph would clip.
     notify_volume: int = Field(70, ge=0, le=100)
     ocr_backend: Literal["builtin", "hybrid", "ollama", "llama"] = "hybrid"
-    erase_model: Literal["lama", "lama-manga"] = "lama"
+    erase_model: Literal["lama", "lama-manga"] = DEFAULT_ERASE_MODEL
     inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = DEFAULT_LOCAL_TRANSLATION_MODEL
