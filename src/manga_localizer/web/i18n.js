@@ -6,7 +6,7 @@
   const messages = {
     "zh-CN": {
       "models.devices.title": "运行设备",
-      "models.devices.detail": "本机 PyTorch 是 CPU 版构建，因此 Big-LaMa、lama-manga、PaddleOCR 与 MangaOCR 都在 CPU 上；llama.cpp 走 Vulkan，AOT 走 DirectML。",
+      "models.devices.detail": "本机 PyTorch 是 CPU 版构建，因此 Big-LaMa、lama-manga、PaddleOCR 与 MangaOCR 都在 CPU 上；llama.cpp 走 Vulkan，AOT 走 DirectML。Hy-MT2 1.8B 只有在内置后端下才跑 CPU，选中 llama.cpp 后端时它随主模型一起走 Vulkan。",
       "pipeline.time": "耗时 {seconds}s",
       "app.title": "漫画本地化工作台",
       "app.subtitle": "导入图片，自动识别并生成连贯的本地化版本",
@@ -273,7 +273,7 @@
     },
     "ja-JP": {
       "models.devices.title": "実行デバイス",
-      "models.devices.detail": "この PyTorch は CPU 版ビルドのため、Big-LaMa・lama-manga・PaddleOCR・MangaOCR は CPU で動作します。llama.cpp は Vulkan、AOT は DirectML を使用します。",
+      "models.devices.detail": "この PyTorch は CPU 版ビルドのため、Big-LaMa・lama-manga・PaddleOCR・MangaOCR は CPU で動作します。llama.cpp は Vulkan、AOT は DirectML を使用します。Hy-MT2 1.8B は内蔵バックエンドのときだけ CPU で動き、llama.cpp バックエンドではメインモデルと一緒に Vulkan を使います。",
       "pipeline.time": "所要 {seconds}秒",
       "app.title": "マンガローカライズ作業台", "app.subtitle": "画像を読み込み、文字を認識して一貫したローカライズ版を生成します", "app.github": "GitHub を開く", "language.label": "表示言語",
       "nav.main": "メインナビゲーション", "nav.workspace": "新規プロジェクト", "nav.history": "ジョブ履歴", "nav.models": "モデル管理", "nav.settings": "設定",
@@ -300,7 +300,7 @@
     },
     "en-US": {
       "models.devices.title": "Compute devices",
-      "models.devices.detail": "This PyTorch build is CPU-only, so Big-LaMa, lama-manga, PaddleOCR and MangaOCR all run on the CPU; llama.cpp uses Vulkan and AOT uses DirectML.",
+      "models.devices.detail": "This PyTorch build is CPU-only, so Big-LaMa, lama-manga, PaddleOCR and MangaOCR all run on the CPU; llama.cpp uses Vulkan and AOT uses DirectML. Hy-MT2 1.8B only stays on the CPU with the built-in backend — under llama.cpp it gets its own Vulkan slot beside the main model.",
       "pipeline.time": "{seconds}s",
       "app.title": "Manga Localization Workspace", "app.subtitle": "Import images, recognize text, and produce a coherent localized edition", "app.github": "Open GitHub", "language.label": "Interface language",
       "nav.main": "Main navigation", "nav.workspace": "New project", "nav.history": "Job history", "nav.models": "Model manager", "nav.settings": "Settings",

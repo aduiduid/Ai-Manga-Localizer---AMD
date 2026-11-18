@@ -1855,13 +1855,26 @@ class PaddleMangaOCR:
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
         image = load_rgb(image_path)
         floor = region_area_floor(image.width, image.height)
-        # The detector locates boxes; everything after it reads them.  Timing
-        # the two apart is what lets the UI say which half a slow page spent
-        # its seconds on.
-        detect_started = time.perf_counter()
-        results = list(self.detector.predict(str(image_path)))
-        self._note_detect_seconds(time.perf_counter() - detect_started)
-        payload = self._payload(results[0]) if results else {}
+        # The standalone detector scales the page down to 960 px before it looks
+        # for lines.  On a declared English book that pass is dead work: the
+        # recogniser below runs its own detector at nearly full resolution, and
+        # the Latin branch then keeps only the boxes that carry a string, which
+        # is all a text-less standalone box could ever contribute.  Twelve
+        # English pages read identically without it, and one stopped repeating
+        # its own first line.  Japanese pages keep it: there the two passes
+        # disagree on small vertical lines and dropping one loses text.
+        skip_standalone = (
+            self._declared_language() == "en" and self.recognition_detector is not None
+        )
+        payload: dict = {}
+        if not skip_standalone:
+            # The detector locates boxes; everything after it reads them.  Timing
+            # the two apart is what lets the UI say which half a slow page spent
+            # its seconds on.
+            detect_started = time.perf_counter()
+            results = list(self.detector.predict(str(image_path)))
+            self._note_detect_seconds(time.perf_counter() - detect_started)
+            payload = self._payload(results[0]) if results else {}
         recognition_payload: dict = {}
         regions = self._regions(payload, area_floor=floor)
         if self.recognition_detector is not None:
