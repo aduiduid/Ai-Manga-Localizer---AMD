@@ -78,7 +78,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 14: a noisy Latin page is recognized a second time on the inverted image, so a
 # cached page still cuts the white lettering off a dark panel (the first four
 # lines of page 17 never became a unit).
-OCR_CACHE_VERSION = 16
+OCR_CACHE_VERSION = 17
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same

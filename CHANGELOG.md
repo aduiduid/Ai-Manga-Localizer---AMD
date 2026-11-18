@@ -1,6 +1,6 @@
 ## 0.13.9 - 2026-11-19
 
-- The standalone detector scales the page down to 960 px before it looks for lines; on a declared English book that pass is dead weight, because the recogniser runs its own detector at nearly full resolution and the Latin branch keeps only the boxes that carry a string. Twelve English pages read identically without it and one stopped repeating its own first line, for about 0.7 s per page. Japanese pages keep the pass: there the two passes disagree on small vertical lines.
+- The standalone detector scales the page down to 960 px before it looks for lines; on a declared English book that pass is dead weight, because the recogniser runs its own detector at nearly full resolution and the Latin branch keeps only the boxes that carry a string. Twelve English pages read identically without it and one stopped repeating its own first line, for about 0.7 s per page. Japanese pages keep the pass: there the two passes disagree on small vertical lines. The OCR cache version moves to 17 so books read before this change redo their pages instead of keeping the doubled line.
 - The compute-device panel no longer claims Hy-MT2 1.8B always runs on the CPU. It shows GPU (Vulkan) when the llama.cpp backend owns it as the review candidate and CPU (torch) under the built-in backend, and it drops the row for backends that never touch it.
 
 ## 0.13.8 - 2026-11-18
