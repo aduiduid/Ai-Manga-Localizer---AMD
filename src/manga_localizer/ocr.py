@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
 
+from .image_io import load_gray, load_rgb, open_image
 from .config import (
     DEFAULT_OLLAMA_MODEL,
     OLLAMA_CONTEXT_TOKENS,
@@ -37,6 +38,14 @@ def manga_force_cpu(device: str, cuda_available: bool) -> bool:
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 JP_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+# Ink area a real string may cover, per character and per glyph height squared.
+# A caption letter fills well under half its box; a mis-recognised drawing fills
+# it.  See ``_regions`` for the two cases that pin this number.
+MAX_GLYPH_COVERAGE = 1.2
+# ...and a lone character filling a detector box the size of a drawing is
+# the same mis-read seen from the other side: its own glyph height is tiny
+# next to the box, so the ratio alone can land just under the ceiling.
+MAX_SPREAD_GLYPH_AREA = 5_000
 # The user can declare what the book is written in.  "auto" keeps the detector's
 # own Latin/Japanese arbitration, which is right for mixed books; declaring the
 # script makes the recognizer choice deterministic and stops MangaOCR from
@@ -1485,6 +1494,9 @@ class PaddleMangaOCR:
             raise ValueError(f"Unknown source language: {source_language}")
         self.profile = profile
         self.source_language = source_language
+        # Seconds spent inside the raw detector, accumulated across pages so
+        # the pipeline can report detection apart from recognition.
+        self.stage_seconds: dict[str, float] = {"detect": 0.0}
         with _suppress_optional_ccache_warning():
             # Recognition-independent detection is the source of truth.  A
             # Chinese recognizer can score valid Japanese too low, so its
@@ -1609,11 +1621,27 @@ class PaddleMangaOCR:
                 if _area(box) < area_floor and not (score >= 0.8 and len(text) >= 2):
                     continue
                 # One glyph spanning a whole drawing ("X" across 160x137 px of
-                # artwork) is a mis-recognition, not a caption: real text runs
-                # 50-200 px^2 per character.  Strip the text so the box is
-                # treated as a text-less detector region instead of a bubble.
+                # artwork) is a mis-recognition, not a caption.  A flat
+                # px^2-per-character ceiling assumed a normal reading size, and
+                # a big slanted caption on an 800x1169 page ("Moxxie, were you
+                # watching me") sits at 2700-3100 px^2 per character while still
+                # being three perfectly good lines -- it got erased there and
+                # only the box survived, so 77 pages of that book came back with
+                # no text at all.  Dividing by the glyph height squared measures
+                # ink coverage instead: those lines score 0.18-0.22, a single
+                # letter sprayed across a 160x137 region scores above 1.
                 compact = re.sub(r"\s+", "", text)
-                if compact and _area(box) / len(compact) > 2_000:
+                height = max(1, box[3] - box[1])
+                area = _area(box)
+                coverage = area / (len(compact) * height * height) if compact else 0.0
+                if compact and (
+                    coverage > MAX_GLYPH_COVERAGE
+                    or (
+                        coverage > 0.8
+                        and len(compact) <= 2
+                        and area >= MAX_SPREAD_GLYPH_AREA
+                    )
+                ):
                     text = ""
                 has_japanese = bool(JP_RE.search(text))
                 kana_count = len(re.findall(r"[\u3040-\u30ff]", text))
@@ -1671,7 +1699,7 @@ class PaddleMangaOCR:
         candidates = _cover_title_units(page.units, page.width, page.height)
         if not candidates:
             return page
-        image = Image.open(image_path).convert("RGB")
+        image = load_rgb(image_path)
         box = [
             min(unit.bbox[0] for unit in candidates),
             min(unit.bbox[1] for unit in candidates),
@@ -1817,10 +1845,22 @@ class PaddleMangaOCR:
             return False
         return _is_latin_region(text, score)
 
+    def _note_detect_seconds(self, seconds: float) -> None:
+        """Accumulate detector time, even on instances built without __init__."""
+        totals = getattr(self, "stage_seconds", None)
+        if totals is None:
+            totals = self.stage_seconds = {"detect": 0.0}
+        totals["detect"] += seconds
+
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
-        image = Image.open(image_path).convert("RGB")
+        image = load_rgb(image_path)
         floor = region_area_floor(image.width, image.height)
+        # The detector locates boxes; everything after it reads them.  Timing
+        # the two apart is what lets the UI say which half a slow page spent
+        # its seconds on.
+        detect_started = time.perf_counter()
         results = list(self.detector.predict(str(image_path)))
+        self._note_detect_seconds(time.perf_counter() - detect_started)
         payload = self._payload(results[0]) if results else {}
         recognition_payload: dict = {}
         regions = self._regions(payload, area_floor=floor)
@@ -2023,7 +2063,7 @@ class PaddleMangaOCR:
         """
         if not missing:
             return page
-        image = Image.open(image_path).convert("RGB")
+        image = load_rgb(image_path)
         recovered_regions: list[dict] = []
         existing_boxes = [unit.bbox for unit in page.units] + [
             erase_box for unit in page.units for erase_box in unit.erase_boxes
@@ -2480,7 +2520,7 @@ class OllamaVisionOCR:
             return json.loads(content[start : end + 1])
 
     def analyze(self, image_path: Path, page_number: int) -> PageOCR:
-        with Image.open(image_path) as image:
+        with open_image(image_path) as image:
             width, height = image.size
         prompt = (
             f"Detect every {language_label(self.source_language) if self.source_language != 'auto' else 'Japanese'} "
@@ -2609,7 +2649,7 @@ class OllamaVisionOCR:
         """
         if not page.units:
             return page, []
-        with Image.open(image_path) as source:
+        with open_image(image_path) as source:
             image = source.convert("RGB")
         ids = [unit.id for unit in page.units]
         candidates = "\n".join(
@@ -2763,7 +2803,7 @@ role 必须区分 dialogue（对白）、narration（旁白）、sfx（拟声/�
         """Run a recall-only visual pass, isolated from per-id OCR correction."""
         if not page.units:
             return []
-        with Image.open(image_path) as source:
+        with open_image(image_path) as source:
             image = source.convert("RGB")
         missing_schema = {
             "type": "object",
@@ -2875,7 +2915,7 @@ missing.text 必须逐字抄写完整{language_label_zh(self.source_language)}�
         """
         if not page.units:
             return page
-        with Image.open(image_path) as source:
+        with open_image(image_path) as source:
             image = source.convert("RGB")
         # Normalize legacy/reviewed detector groups before producing audit
         # crops. Otherwise one broad horizontal shirt/logo box can dominate a
@@ -3384,7 +3424,7 @@ class HybridMangaOCR:
             # tiles as well: recovery still demands detector geometry plus an
             # independent MangaOCR read, so a tile is a proposal, never a unit.
             pending_missing = pending_missing + ink_tile_hints(
-                page, np.asarray(Image.open(image_path).convert("L"))
+                page, np.asarray(load_gray(image_path))
             )
         if pending_missing:
             # Remove exact textual/geometry coverage before invoking expensive

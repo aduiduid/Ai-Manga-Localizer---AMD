@@ -991,3 +991,24 @@ def test_the_line_pitch_never_squeezes_the_fonts_own_line_box():
         font = _font(font_path, size)
         ascent, descent = font.getmetrics()
         assert _line_height(font, size) >= ascent + descent
+
+
+def test_a_page_that_cannot_be_written_as_webp_lands_as_png(tmp_path):
+    """One unwritable suffix must not fail the whole book.
+
+    ``rendered.save`` raises on a WebP encoder that refuses the frame; the page
+    is still good, so it is written next to it as PNG and the caller is told
+    which file actually exists.
+    """
+    class Refusing:
+        """Stands in for a rendered page whose WebP encoder says no."""
+
+        def save(self, path, fmt, **_kwargs):
+            if fmt == "WEBP":
+                raise OSError("encoder refused")
+            Image.new("RGB", (40, 30), (200, 120, 60)).save(path, fmt)
+
+    target = tmp_path / "00000001.webp"
+    written = ArtworkPreservingRenderer._save_page(Refusing(), target)
+    assert written.name == "00000001.png"
+    assert written.exists()

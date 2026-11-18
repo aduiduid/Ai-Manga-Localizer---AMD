@@ -2347,3 +2347,35 @@ def test_a_confident_reading_is_never_replaced_by_a_worse_one():
     merged = better_recognition(primary, inverted)
     assert merged["rec_texts"] == ["HELLO THERE"]
     assert merged["rec_scores"] == [0.97]
+
+
+def test_a_large_italic_headline_keeps_its_text():
+    """A wide detector box around a slanted caption is not a mis-read.
+
+    Page 1 of the reported book carried "Moxxie, were you watching me while I
+    was taking off my clothes?" as three slanted lines with no bubble.  Each
+    box held ~2800 px2 per character, which the old flat ceiling treated as a
+    drawing and blanked, so the line never reached the translator -- 77 pages
+    of that book produced no units at all.  Normalising by the glyph height
+    squared separates a wide-but-legible line from a single glyph spread over
+    artwork.
+    """
+    payload = {
+        "rec_boxes": [
+            [411, 19, 750, 131],
+            [338, 57, 800, 186],
+            [353, 107, 780, 233],
+        ],
+        "rec_texts": [
+            "Moxxie,were you",
+            "watching me while I was",
+            "taking off my clothes?",
+        ],
+        "rec_scores": [0.949, 0.936, 0.901],
+    }
+    regions = PaddleMangaOCR._regions(payload)
+    assert [item["text"] for item in regions] == [
+        "Moxxie,were you",
+        "watching me while I was",
+        "taking off my clothes?",
+    ]

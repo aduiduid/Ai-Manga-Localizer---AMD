@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from PIL import Image
-
+from .image_io import open_image
 from .config import (
     DEFAULT_ERASE_MODEL,
     LLAMA_SINGLE_MODEL,
@@ -78,7 +78,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 14: a noisy Latin page is recognized a second time on the inverted image, so a
 # cached page still cuts the white lettering off a dark panel (the first four
 # lines of page 17 never became a unit).
-OCR_CACHE_VERSION = 15
+OCR_CACHE_VERSION = 16
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same
@@ -311,7 +311,7 @@ class LocalizerPipeline:
         try:
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
             page = page_from_dict(payload)
-            with Image.open(image_path) as image:
+            with open_image(image_path) as image:
                 expected_size = image.size
             source_stat = image_path.stat()
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -377,6 +377,13 @@ class LocalizerPipeline:
         pages: list[PageOCR] = []
         glossary = dict(request.glossary or {})
         total = len(files)
+        # Wall-clock cost of each stage, kept in the job record so a finished
+        # book can still answer "where did the ten minutes go?".
+        timings: dict[str, float] = {}
+        # Bound before the branches below so the stage split can read it when
+        # a reviewed transcript skips the OCR backends entirely.
+        ocr = None
+        stage_started = time.perf_counter()
         if request.reviewed_transcript:
             transcript_path = request.reviewed_transcript.expanduser().resolve()
             payload = json.loads(transcript_path.read_text(encoding="utf-8"))
@@ -507,6 +514,14 @@ class LocalizerPipeline:
                     )
                 self._emit(emit, "ocr", index, total, f"已识别 {image_path.name}")
 
+        ocr_seconds = time.perf_counter() - stage_started
+        # Backends that run their own detector report how much of the stage
+        # was pure detection; the rest is reading.
+        detector = getattr(ocr, "stage_seconds", None) if not request.reviewed_transcript else None
+        detect_seconds = float(detector.get("detect", 0.0)) if detector else 0.0
+        timings["detect"] = round(detect_seconds, 1)
+        timings["ocr"] = round(ocr_seconds - detect_seconds, 1)
+        stage_started = time.perf_counter()
         resumed = self._resume_translations(work, pages, request.target_language)
         if resumed:
             # The draft of an interrupted run is worth more than the run.
@@ -684,6 +699,8 @@ class LocalizerPipeline:
             quality = completion_summary(pages, request.preserve_sfx)
             quality["fallback_preserved_units"] = len(fallback_ids)
             quality["fallback_preserved_ids"] = fallback_ids
+        timings["translate"] = round(time.perf_counter() - stage_started, 1)
+        stage_started = time.perf_counter()
         self._emit(emit, "translate", total, total, "连贯翻译完成")
         self._write_transcript(
             work / "transcript.json",
@@ -734,6 +751,7 @@ class LocalizerPipeline:
             )
             self._emit(emit, "render", index, total, f"已生成 {output_path.name}")
 
+        timings["render"] = round(time.perf_counter() - stage_started, 1)
         result = {
             "source": str(source),
             "output": str(output),
@@ -741,6 +759,7 @@ class LocalizerPipeline:
             "images": manifest,
             "transcript": str(work / "transcript.json"),
             "quality": quality,
+            "timings": timings,
         }
         (output / "translation_manifest.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -894,7 +913,7 @@ class LocalizerPipeline:
                 raise ValueError(
                     f"Reviewed transcript page {index} expects {page.file}, got {source.name}"
                 )
-            with Image.open(source) as image:
+            with open_image(source) as image:
                 if image.size != (page.width, page.height):
                     raise ValueError(
                         f"Reviewed transcript page {index} dimensions do not match source"

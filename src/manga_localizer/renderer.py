@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from .config import AppPaths, DEFAULT_ERASE_MODEL
+from .image_io import load_rgb
 from .inpainting import AOTMangaInpainter, LaMaInpainter
 from .model_manager import ModelManager
 from .ocr import (
@@ -1334,6 +1335,28 @@ class ArtworkPreservingRenderer:
                     stroke_fill=style.stroke_fill,
                 )
 
+    @staticmethod
+    def _save_page(rendered: Image.Image, output_path: Path) -> Path:
+        """Write the finished page, falling back to PNG if WebP refuses.
+
+        One page the encoder chokes on used to end the whole book, long after
+        every expensive stage had already run.  A PNG beside it is still a
+        usable page, so the run continues and the caller records the switch.
+        """
+        if output_path.suffix.lower() == ".webp":
+            # libwebp's exhaustive method 6 is several times slower on full
+            # manga pages without improving decoded pixels.  Method 2 remains
+            # lossless and keeps first-run batch rendering practical.
+            try:
+                rendered.save(output_path, "WEBP", lossless=True, quality=100, method=2)
+                return output_path
+            except (OSError, ValueError):
+                fallback = output_path.with_suffix(".png")
+                rendered.save(fallback, "PNG", compress_level=7)
+                return fallback
+        rendered.save(output_path, "PNG", compress_level=7)
+        return output_path
+
     def render_page(
         self,
         source_path: Path,
@@ -1341,7 +1364,7 @@ class ArtworkPreservingRenderer:
         output_path: Path,
         preserve_sfx: bool = True,
     ) -> dict:
-        original = np.array(Image.open(source_path).convert("RGB"))
+        original = np.array(load_rgb(source_path))
         rgb = original.copy()
         styles: dict[str, TextStyle] = {}
         active = []
@@ -1517,13 +1540,7 @@ class ArtworkPreservingRenderer:
             )
             rendered.paste(region, (x0, y0))
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        if output_path.suffix.lower() == ".webp":
-            # libwebp's exhaustive method 6 is several times slower on full
-            # manga pages without improving decoded pixels.  Method 2 remains
-            # lossless and keeps first-run batch rendering practical.
-            rendered.save(output_path, "WEBP", lossless=True, quality=100, method=2)
-        else:
-            rendered.save(output_path, "PNG", compress_level=7)
+        output_path = self._save_page(rendered, output_path)
         return {
             "source": source_path.name,
             "output": output_path.name,

@@ -5,6 +5,9 @@
 
   const messages = {
     "zh-CN": {
+      "models.devices.title": "运行设备",
+      "models.devices.detail": "本机 PyTorch 是 CPU 版构建，因此 Big-LaMa、lama-manga、PaddleOCR 与 MangaOCR 都在 CPU 上；llama.cpp 走 Vulkan，AOT 走 DirectML。",
+      "pipeline.time": "耗时 {seconds}s",
       "app.title": "漫画本地化工作台",
       "app.subtitle": "导入图片，自动识别并生成连贯的本地化版本",
       "app.github": "打开 GitHub",
@@ -269,6 +272,9 @@
       "batch.task.dropped": "已取消排队"
     },
     "ja-JP": {
+      "models.devices.title": "実行デバイス",
+      "models.devices.detail": "この PyTorch は CPU 版ビルドのため、Big-LaMa・lama-manga・PaddleOCR・MangaOCR は CPU で動作します。llama.cpp は Vulkan、AOT は DirectML を使用します。",
+      "pipeline.time": "所要 {seconds}秒",
       "app.title": "マンガローカライズ作業台", "app.subtitle": "画像を読み込み、文字を認識して一貫したローカライズ版を生成します", "app.github": "GitHub を開く", "language.label": "表示言語",
       "nav.main": "メインナビゲーション", "nav.workspace": "新規プロジェクト", "nav.history": "ジョブ履歴", "nav.models": "モデル管理", "nav.settings": "設定",
       "privacy.local.title": "ローカル推論", "privacy.local.detail": "画像とテキストは端末外へ送信されません", "privacy.local.notice": "すべて端末上で処理され、画像はアップロードされません", "privacy.online.title": "オンライン翻訳", "privacy.online.detail": "認識済みテキストのみ送信", "privacy.online.notice": "画像と組版は端末内に保持し、OCR テキストのみ翻訳 API に送信します",
@@ -293,6 +299,9 @@
       "batch.task.drop": "待機を取り消す", "batch.task.dropConfirm": "{name} の待機をキャンセルしますか？", "batch.task.dropped": "待機をキャンセルしました"
     },
     "en-US": {
+      "models.devices.title": "Compute devices",
+      "models.devices.detail": "This PyTorch build is CPU-only, so Big-LaMa, lama-manga, PaddleOCR and MangaOCR all run on the CPU; llama.cpp uses Vulkan and AOT uses DirectML.",
+      "pipeline.time": "{seconds}s",
       "app.title": "Manga Localization Workspace", "app.subtitle": "Import images, recognize text, and produce a coherent localized edition", "app.github": "Open GitHub", "language.label": "Interface language",
       "nav.main": "Main navigation", "nav.workspace": "New project", "nav.history": "Job history", "nav.models": "Model manager", "nav.settings": "Settings",
       "privacy.local.title": "Local inference", "privacy.local.detail": "Images and text stay on this device", "privacy.local.notice": "All processing runs locally. Images are never uploaded.", "privacy.online.title": "Online translation", "privacy.online.detail": "Only recognized text is sent", "privacy.online.notice": "Images and layout stay local; only OCR text is sent to the selected translation API.",

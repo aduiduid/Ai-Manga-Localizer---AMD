@@ -345,6 +345,7 @@ class BatchService:
             ):
                 if field in job:
                     task[field] = job[field]
+            task["timings"] = (job.get("result") or {}).get("timings") or {}
         summarize(merged)
         merged["total"] = len(tasks)
         merged["effective_total"] = len(queued_tasks(merged))

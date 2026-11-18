@@ -325,9 +325,10 @@ def png_bytes(image_path) -> bytes:
     """
     from io import BytesIO
 
-    from PIL import Image
 
-    with Image.open(image_path) as image:
+    from .image_io import open_image
+
+    with open_image(image_path) as image:
         if image.format in {"PNG", "JPEG"}:
             return image_path.read_bytes()
         buffer = BytesIO()

@@ -1,3 +1,11 @@
+## 0.13.8 - 2026-11-18
+
+- A truncated source page is zero-filled back to the length its own RIFF header declares and decoded again, so one half-written WebP stops failing a whole book (page 34 of 255 reported `could not create decoder object`). An unreadable page now names itself in Chinese instead of raising a bare OSError.
+- A page that cannot be written as WebP falls back to PNG next to it; the job reports the file that actually exists.
+- The detector's region filter normalises by glyph height instead of a flat pixel area: a wide slanted caption is no longer mistaken for artwork (three lines of page 1 were blanked, leaving 77 pages of that book with no units at all).
+- Each pipeline stage records its wall-clock seconds in the job result, the UI prints them under the four steps, and the batch view carries them per folder.
+- The models panel lists which pieces run on the GPU (llama.cpp on Vulkan, AOT on DirectML) and which stay on the CPU (PaddleOCR, MangaOCR, LaMa, Hy-MT2 1.8B).
+
 ## 0.13.7 - 2026-11-18
 
 - Run the AOT eraser on the GPU through ONNX Runtime's DirectML provider.
