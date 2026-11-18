@@ -1,3 +1,19 @@
+## 0.13.7 - 2026-11-18
+
+- Run the AOT eraser on the GPU through ONNX Runtime's DirectML provider.
+  torch here is a CPU-only build and torch-directml pins torch below 2.5, so
+  ONNX Runtime is the only GPU path this project can take; the exported graph
+  matches the torch module to within 2e-06 and one 800x1132 page now takes
+  about 0.12 s instead of 3.4 s.  Big-LaMa cannot follow: its FFC blocks need
+  aten::fft_rfftn, which no ONNX opset supports.
+- Degrade instead of failing when the accelerator is unavailable: DirectML,
+  then the ONNX CPU provider, then the torch module.  A missing .onnx export is
+  not an error, it just means the slower path.
+- Ship scripts/export_aot_onnx.py, which writes the graph with dynamic
+  height/width and verifies it against torch.
+- Default the erase model to aot-manga, now that it is both the quickest and
+  the one that reaches the GPU.
+
 ## 0.13.6 - 2026-11-15
 
 - Repaint the whole page in one pass instead of one inference per balloon. The

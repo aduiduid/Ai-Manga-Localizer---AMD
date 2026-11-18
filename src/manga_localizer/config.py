@@ -98,7 +98,7 @@ def cleanup_profile_for(profile: str) -> str:
 # network that only earns its place through whole-page speed.  Neither has a
 # download source, so each can only be picked once the file is on disk.
 ERASE_MODELS = ("lama", "lama-manga", "aot-manga")
-DEFAULT_ERASE_MODEL = "lama-manga"
+DEFAULT_ERASE_MODEL = "aot-manga"
 
 
 @dataclass(frozen=True)

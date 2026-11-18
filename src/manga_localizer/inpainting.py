@@ -367,16 +367,56 @@ class AOTMangaInpainter:
         model_path: Path,
         device: str = "auto",
         max_side: int = ERASE_MAX_SIDE,
+        onnx_path: Path | None = None,
     ):
         self.model_path = Path(model_path)
+        self.onnx_path = Path(onnx_path) if onnx_path is not None else None
         self.requested_device = device
         self.max_side = max_side
         self._torch = None
         self._model = None
         self._device = None
+        self._session = None
+        self._provider = ""
+
+    def _load_onnx(self) -> bool:
+        """Open the exported graph, preferring the DirectML provider.
+
+        DirectML is the only GPU path available to this project: torch is a
+        CPU-only build and torch-directml pins torch below 2.5.  The exported
+        graph is numerically equivalent to the torch module (max |diff| ~1e-5),
+        so this swap is about speed alone.  Any failure here is not fatal --
+        the caller still has the torch module as a last resort.
+        """
+        if self.onnx_path is None or not self.onnx_path.exists():
+            return False
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            return False
+        available = ort.get_available_providers()
+        options = ort.SessionOptions()
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        wanted: list[list[str]] = []
+        if self.requested_device != "cpu" and "DmlExecutionProvider" in available:
+            wanted.append(["DmlExecutionProvider", "CPUExecutionProvider"])
+        wanted.append(["CPUExecutionProvider"])
+        for providers in wanted:
+            try:
+                session = ort.InferenceSession(
+                    str(self.onnx_path), sess_options=options, providers=providers
+                )
+            except Exception:  # ponytail: any provider failure just falls through
+                continue
+            self._session = session
+            self._provider = session.get_providers()[0]
+            return True
+        return False
 
     def _load(self) -> None:
-        if self._model is not None:
+        if self._session is not None or self._model is not None:
+            return
+        if self._load_onnx():
             return
         if not self.model_path.exists():
             raise FileNotFoundError(
@@ -419,9 +459,44 @@ class AOTMangaInpainter:
         if not binary.any():
             return rgb.copy()
         self._load()
-        torch = self._torch
         height, width = rgb.shape[:2]
         fitted, fitted_mask, scale = _fit_for_inference(rgb, binary, self.max_side)
+        if self._session is not None:
+            painted = self._paint_onnx(fitted, fitted_mask)
+        else:
+            painted = self._paint_torch(fitted, fitted_mask)
+        painted = _restore_size(painted, (width, height), scale)
+        result = rgb.copy()
+        result[binary] = painted[binary]
+        return result
+
+    @staticmethod
+    def _pad_to_multiple(
+        image: np.ndarray, binary: np.ndarray, mode: str
+    ) -> tuple[np.ndarray, np.ndarray]:
+        height, width = image.shape[:2]
+        pad_height = (-height) % 8
+        pad_width = (-width) % 8
+        if not pad_height and not pad_width:
+            return image, binary
+        return (
+            np.pad(image, ((0, pad_height), (0, pad_width), (0, 0)), mode=mode),
+            np.pad(binary, ((0, pad_height), (0, pad_width)), mode=mode),
+        )
+
+    def _paint_onnx(self, fitted: np.ndarray, fitted_mask: np.ndarray) -> np.ndarray:
+        image, mask = self._pad_to_multiple(fitted, fitted_mask, "edge")
+        feed = {
+            "image": (image.astype(np.float32) / 127.5 - 1.0)
+            .transpose(2, 0, 1)[None],
+            "mask": mask.astype(np.float32)[None, None],
+        }
+        predicted = self._session.run(None, feed)[0]
+        cropped = predicted[0].transpose(1, 2, 0)[: fitted.shape[0], : fitted.shape[1]]
+        return np.clip((cropped + 1.0) * 127.5, 0, 255).round().astype(np.uint8)
+
+    def _paint_torch(self, fitted: np.ndarray, fitted_mask: np.ndarray) -> np.ndarray:
+        torch = self._torch
         pad_height = (-fitted.shape[0]) % 8
         pad_width = (-fitted.shape[1]) % 8
         image_tensor = torch.from_numpy(
@@ -442,10 +517,6 @@ class AOTMangaInpainter:
             # original glyphs in place makes the generator treat them as
             # content and paint them back.
             predicted = self._model(image_tensor * (1 - mask_tensor), mask_tensor)
-        predicted = predicted[0].permute(1, 2, 0)[: fitted.shape[0], : fitted.shape[1]]
-        painted = np.clip((predicted.cpu().numpy() + 1.0) * 127.5, 0, 255)
-        painted = painted.round().astype(np.uint8)
-        painted = _restore_size(painted, (width, height), scale)
-        result = rgb.copy()
-        result[binary] = painted[binary]
-        return result
+        cropped = predicted[0].permute(1, 2, 0)[: fitted.shape[0], : fitted.shape[1]]
+        painted = np.clip((cropped.cpu().numpy() + 1.0) * 127.5, 0, 255)
+        return painted.round().astype(np.uint8)

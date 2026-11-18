@@ -106,6 +106,8 @@ start.bat models status
 | PaddleOCR（PP-OCRv5 det/rec） | `data\models\paddlex\` | ~130 MB | 首次运行自动拉，源固定为 ModelScope |
 | Manga OCR | `data\models\huggingface\` | ~850 MB | `kha-white/manga-ocr-base`（HuggingFace，走 `HF_ENDPOINT` 镜像） |
 | Big-LaMa | `data\models\lama\big-lama.pt` | 196 MB | [simple-lama-inpainting v0.1.0](https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt)，SHA-256 `7ba7aa7a…9e6b4c` |
+| lama-manga（漫画特化） | `data\models\lama-manga\lama-manga.safetensors` | 195 MB | 手动放置；缺文件时自动回退 Big-LaMa |
+| AOT（漫画特化） | `data\models\AOT Inpainting for Manga\model.safetensors` | 22 MB | 手动放置；缺文件时自动回退 Big-LaMa |
 | Hy-MT2 1.8B（CPU torch 后端用） | `data\models\hy-mt2\` | 3.9 GB | ModelScope `Tencent-Hunyuan/Hy-MT2-1.8B` |
 | **GGUF 主模型 / 候选模型** | `data\llama-models\<名字>.gguf` 或 Ollama 的 blob 存储 | 见下 | 自行下载，或用 <https://ollama.com> |
 
@@ -206,6 +208,31 @@ llama.cpp 在密集竖排页上会把三处手写小字整段漏掉。逐阶段�
 | 0.10.6 | 密集批次不再丢尾：预算按源字符三倍动态放大到 4096、一批最多 40 个单元；`[拟声词]` 标签不再计入长度；短促拟声允许共用译文；候选模型回显长上下文时改用无上下文重试 | 翻译层模型调用 **265 到 61 次**、回退 9 到 1（9B 首译）与 128 到 33（候选）、291.3 到 230.3 s；129 个单元、`unresolved 0` 不变 |
 
 `auto` 源语言仍保留召回提案（拉丁页在 `auto` 下会走召回）。被否决的优化：`refine_local_crops` 四张裁剪一包能把这阶段从 328 s 压到 84 s（3.9 倍），但**模型对同一张裁剪图的 `role` 判定会变**（`RISE`／`PUMP` 单张答 `artwork`、四张一包答 `sfx`），两个美术字因此被擦掉重排 —— 模型改口不是阈值能救的，因此审计保持一张一请求。完整数据见 [`docs/performance-audit-2026-11-09.md`](docs/performance-audit-2026-11-09.md)。
+
+## 擦除模型的 GPU 加速（0.13.7）
+
+擦除与补画一直跑在 CPU 上：这里是 **torch 2.8.0+cpu** 构建，AMD 卡上没有 CUDA，`LaMaInpainter`
+里 `torch.cuda.is_available()` 判假就静默回落到 `cpu`。`torch-directml` 不可行 —— 它把 torch 钉在
+2.5 以下，换了会连带弄坏 Paddle 与 llama.cpp。
+
+走 ONNX Runtime 则可行，而且只有 AOT 走得通：
+
+| 模型 | 导出 | 800×1120 整页 |
+|---|---|---|
+| AOT（`aot-manga`） | 成功，可见 `scripts/export_aot_onnx.py` | torch CPU 3.82 s → **DirectML 0.09–0.13 s** |
+| Big-LaMa / lama-manga | 失败：FFC 需要 `aten::fft_rfftn`，opset 17 不支持，dynamo 导出器也报 `Failed to export` | 保持 CPU，约 6.2–6.7 s/页 |
+
+所以 `device="auto"` 在 AOT 上会优先取 `DmlExecutionProvider`，取不到再退 `CPUExecutionProvider`，
+最后才退 torch。三条路都只在掩膜内接受网络输出、掩膜外逐字节拷回原图，画质契约不变。
+
+**一次性导出**（放置好 `model.safetensors` 后跑一次即可，产物 `aot-manga.onnx` 约 22 MB）：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_aot_onnx.py
+```
+
+脚本会顺带用 ONNX Runtime 复算一遍并与 torch 对拍（实测 `max|diff| ≈ 2e-06`）。没导出也没关系 ——
+缺少 `.onnx` 时包装器自动退回 torch CPU，只是慢一些。
 
 ## 工作原理
 

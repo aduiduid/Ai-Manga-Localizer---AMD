@@ -588,7 +588,9 @@ class ArtworkPreservingRenderer:
             effective, _ = manager.resolve_erase_model(self.erase_model)
             weights, graph = manager.erase_model_paths(effective)
             if effective == "aot-manga":
-                self._inpainter = AOTMangaInpainter(weights, self.device)
+                self._inpainter = AOTMangaInpainter(
+                    weights, self.device, onnx_path=manager.aot_onnx_path()
+                )
             else:
                 self._inpainter = LaMaInpainter(weights, self.device, graph_path=graph)
         return self._inpainter

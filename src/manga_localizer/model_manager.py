@@ -330,6 +330,15 @@ class ModelManager:
         """The manga-image-translator AOT generator, also placed by hand."""
         return self.model_dir("AOT Inpainting for Manga") / "model.safetensors"
 
+    def aot_onnx_path(self) -> Path:
+        """Optional DirectML-ready export of the AOT generator.
+
+        Written by ``scripts/export_aot_onnx.py``.  When it is absent the
+        wrapper falls back to the state_dict on torch's CPU, so this stays an
+        optional accelerator rather than a requirement.
+        """
+        return self.model_dir("AOT Inpainting for Manga") / "aot-manga.onnx"
+
     def erase_model_file(self, erase_model: str) -> Path:
         """The file a given erase model reads, without checking that it exists."""
         if erase_model == "lama-manga":
