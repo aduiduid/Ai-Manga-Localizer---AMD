@@ -78,7 +78,7 @@ ProgressCallback = Callable[[str, int, int, str], None]
 # 14: a noisy Latin page is recognized a second time on the inverted image, so a
 # cached page still cuts the white lettering off a dark panel (the first four
 # lines of page 17 never became a unit).
-OCR_CACHE_VERSION = 17
+OCR_CACHE_VERSION = 18
 
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same
@@ -149,6 +149,7 @@ class PipelineRequest:
     story_context: bool = True
     context_pages: int = 6
     preserve_sfx: bool = False
+    preserve_text_color: bool = True
     quality_profile: str = "quality"
     output_format: str = "webp"
     device: str = "auto"
@@ -738,6 +739,7 @@ class LocalizerPipeline:
             paths=self.paths,
             device=request.device,
             erase_model=erase_model,
+            preserve_text_color=request.preserve_text_color,
         )
         suffix = ".webp" if request.output_format == "webp" else ".png"
         for index, page in enumerate(pages, start=1):
@@ -944,6 +946,7 @@ def request_from_settings(
         story_context=settings.story_context,
         context_pages=settings.context_pages,
         preserve_sfx=settings.preserve_sfx,
+        preserve_text_color=settings.preserve_text_color,
         quality_profile=settings.quality_profile,
         output_format=settings.output_format,
         device=settings.device,

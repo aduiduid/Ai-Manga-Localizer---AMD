@@ -60,6 +60,7 @@ class SettingsPayload(BaseModel):
     story_context: bool = True
     context_pages: int = Field(6, ge=0, le=12)
     preserve_sfx: bool = False
+    preserve_text_color: bool = True
     quality_profile: Literal[
         "quality", "fast", "fast_translate_quality_render"
     ] = "quality"
@@ -680,6 +681,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             "story_context": payload.story_context,
             "context_pages": payload.context_pages,
             "preserve_sfx": payload.preserve_sfx,
+            "preserve_text_color": payload.preserve_text_color,
             "quality_profile": payload.quality_profile,
             "output_format": payload.output_format,
             "device": payload.device,

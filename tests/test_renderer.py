@@ -10,6 +10,8 @@ from manga_localizer.ocr import PageOCR, TextUnit
 from manga_localizer.renderer import (
     CLOSING_PUNCTUATION,
     MIN_READABLE_FONT,
+    INK_DARK,
+    INK_SATURATION,
     ArtworkPreservingRenderer,
     TextStyle,
     _fit_readable,
@@ -1012,3 +1014,73 @@ def test_a_page_that_cannot_be_written_as_webp_lands_as_png(tmp_path):
     written = ArtworkPreservingRenderer._save_page(Refusing(), target)
     assert written.name == "00000001.png"
     assert written.exists()
+
+
+def _ink_unit(box: str, text: str) -> TextUnit:
+    """A unit whose box is written the way the detector reports it."""
+    values = [int(part) for part in box.strip("[]").split(",")]
+    unit = TextUnit("p001u01", values, list(values), text, 0.99)
+    unit.zh = "中文"
+    return unit
+
+
+def _striped(colour: tuple[int, int, int]) -> np.ndarray:
+    """A balloon with lettering strokes across it, as a crop really looks."""
+    page = np.full((260, 420, 3), (188, 102, 142), dtype=np.uint8)
+    for top in (10, 150):
+        # 13 px wide, 3 px apart: the crop is resampled to 140 px before it is
+        # clustered, and thinner strokes vanish in that resample.
+        for offset in range(24, 380, 26):
+            page[top + 14 : top + 86, offset : offset + 13] = colour
+    return page
+
+
+def test_a_red_line_keeps_its_colour_and_a_black_one_stays_black():
+    """Grey-scale placed the red glyphs two levels from their balloon.
+
+    The red core sits at luminance 135 against a balloon at 133, so the
+    polarity vote only saw the white outline and painted both captions on
+    page 1 white.  The stored ink settles it, and a neutral black stays on
+    the existing luminance path.
+    """
+    black_page = _striped((25, 23, 25))
+    red_page = _striped((228, 108, 110))
+
+    black = _ink_unit("[20,10,400,110]", '"one"')
+    red = _ink_unit("[20,150,400,250]", '"two"')
+
+    black_style = ArtworkPreservingRenderer._analyze_style(black_page, black)
+    red_style = ArtworkPreservingRenderer._analyze_style(red_page, red)
+
+    assert black_style.fill == "black"
+    assert black_style.ink is None
+    assert red_style.ink is not None
+    red_fill = red_style.ink
+    assert red_fill[0] - red_fill[1] >= INK_SATURATION
+    assert red_fill[0] - red_fill[2] >= INK_SATURATION
+
+
+def test_the_colour_switch_puts_every_line_back_on_one_colour():
+    """Turning the setting off must reproduce the pre-0.13.10 output."""
+    page = _striped((228, 108, 110))
+
+    red = _ink_unit("[20,150,400,250]", '"two"')
+    kept = ArtworkPreservingRenderer._analyze_style(page, red, True)
+    plain = ArtworkPreservingRenderer._analyze_style(page, red, False)
+
+    assert kept.ink is not None
+    assert plain.ink is None
+    assert plain.fill in {"black", "white"}
+
+
+def test_a_dark_neutral_glyph_is_not_painted_white_over_its_own_halo():
+    """Black lettering with a white outline: the halo is not the glyph."""
+    page = np.full((120, 320, 3), (150, 150, 150), dtype=np.uint8)
+    page[20:100, 20:300] = (250, 250, 250)
+    page[40:80, 40:280] = (10, 10, 10)
+
+    unit = _ink_unit("[20,20,300,100]", '"black on white"')
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    assert style.fill == "black"
+    assert style.stroke_fill == "white"
+    assert INK_DARK < 150

@@ -166,6 +166,9 @@ class UserSettings:
     story_context: bool = True
     context_pages: int = 6
     preserve_sfx: bool = False
+    # Keep the source lettering's own colour on the translation.  Off
+    # restores the black/white polarity vote for every page.
+    preserve_text_color: bool = True
     quality_profile: str = "quality"
     output_format: str = "webp"
     prefer_modelscope: bool = True

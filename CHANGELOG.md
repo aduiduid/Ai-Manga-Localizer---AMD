@@ -1,3 +1,10 @@
+## 0.13.10 - 2026-11-19
+
+- **Source text colour is kept** (new setting, on by default). Red and coloured source lettering is now typeset in its own colour instead of one flat black or white, and the setting page has a switch to turn that off again.
+- **Colour decides where one speech unit ends.** Two captions in the same balloon used to be joined whenever the gap between them fit the line-height allowance, so a black line and the red line under it became one unit that could only carry one colour and could only be erased with one mask. Each detected box now gets an ink reading first (k-means after discarding pixels close to the crop median, which is the balloon fill), and boxes whose ink differs by more than a fixed distance never join.
+- **The erase mask seeds on the ink colour.** The red core sat at luminance 135 against a balloon at 133, so the grey threshold selected neither the red strokes nor the black ones and left smears behind. Glyphs with a definite colour are now seeded by RGB distance 40; neutral glyphs keep the existing luminance path.
+- The OCR cache version moves from 17 to 18, because the join rule changes how units are split and every cached page must be read again.
+
 ## 0.13.9 - 2026-11-19
 
 - The standalone detector scales the page down to 960 px before it looks for lines; on a declared English book that pass is dead weight, because the recogniser runs its own detector at nearly full resolution and the Latin branch keeps only the boxes that carry a string. Twelve English pages read identically without it and one stopped repeating its own first line, for about 0.7 s per page. Japanese pages keep the pass: there the two passes disagree on small vertical lines. The OCR cache version moves to 17 so books read before this change redo their pages instead of keeping the doubled line.

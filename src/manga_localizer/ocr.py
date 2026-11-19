@@ -1113,7 +1113,95 @@ def _axis_overlap(a0: int, a1: int, b0: int, b1: int) -> int:
     return max(0, min(a1, b1) - max(a0, b0))
 
 
+# Text colour is a property of the glyphs, and grey-scale cannot see it: the
+# red lettering on page 1 of one book sits at luminance 135 while the pink
+# balloon behind it sits at 133.  Two levels apart.  Clustering the crop in
+# colour does separate them, and the same reading decides whether two lines
+# belong to one unit -- a black caption one line above a red one is two units,
+# not one paragraph.
+INK_SHARE_MIN = 0.04
+INK_DISTANCE = 60.0
+INK_VIVID = 90.0
+#: A pixel this far from the crop's own median colour is not the balloon.
+INK_BACKGROUND_DISTANCE = 45.0
+
+
+def glyph_ink(rgb: np.ndarray, box: list[int]) -> list[int] | None:
+    """Return the colour of the lettering inside ``box``, or ``None``.
+
+    Only pixels that differ from the crop's median colour are clustered.  Doing
+    it the other way round -- clustering the whole crop and calling the biggest
+    cluster background -- failed on the second red line of page 1: half that
+    crop is the character's own hair, so the balloon stopped being the biggest
+    cluster and a strand of violet hair won the vote.  Difference from the
+    median is what separates ink from paper regardless of what fills the box.
+
+    A clearly saturated cluster wins; otherwise the darkest.  Neutral ink is
+    returned too -- it groups a black caption with the black line under it
+    while the red one below stays a separate unit.
+    """
+    x0, y0, x1, y1 = box
+    crop = rgb[max(0, y0) : max(0, y1), max(0, x0) : max(0, x1)]
+    if crop.size == 0 or min(crop.shape[:2]) < 6:
+        return None
+    height, width = crop.shape[:2]
+    scale = min(1.0, 140.0 / max(height, width))
+    if scale < 1.0:
+        crop = cv2.resize(
+            crop,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    pixels = np.ascontiguousarray(crop.reshape(-1, 3), dtype=np.float32)
+    median = np.median(pixels, axis=0)
+    offsets = pixels - median
+    keep = pixels[np.linalg.norm(offsets, axis=1) >= INK_BACKGROUND_DISTANCE]
+    if keep.shape[0] < 120:
+        return None
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 0.5)
+    _, labels, centres = cv2.kmeans(
+        np.ascontiguousarray(keep), 3, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+    )
+    counts = np.bincount(labels.ravel(), minlength=len(centres))
+    shares = counts / max(1, int(counts.sum()))
+    vivid: np.ndarray | None = None
+    vivid_saturation = 0.0
+    darkest: np.ndarray | None = None
+    darkest_level = 1e9
+    for index, centre in enumerate(centres):
+        share = float(shares[index])
+        if share < INK_SHARE_MIN:
+            continue
+        red, green, blue = (float(value) for value in centre)
+        saturation = max(red, green, blue) - min(red, green, blue)
+        level = 0.299 * red + 0.587 * green + 0.114 * blue
+        if saturation >= INK_VIVID:
+            if saturation > vivid_saturation:
+                vivid, vivid_saturation = centre, saturation
+            continue
+        if level < darkest_level:
+            darkest, darkest_level = centre, level
+    best = vivid if vivid is not None else darkest
+    if best is None:
+        return None
+    return [int(round(float(value))) for value in best]
+
+
+def _same_ink(a: dict, b: dict) -> bool:
+    """Whether two regions can still belong to the same unit by colour."""
+    first, second = a.get("ink"), b.get("ink")
+    if not first or not second:
+        return True
+    total = sum((float(x) - float(y)) ** 2 for x, y in zip(first, second))
+    return total**0.5 <= INK_DISTANCE
+
+
 def _connects(a: dict, b: dict) -> bool:
+    # Colour first: geometry alone joined a black caption to the red
+    # one a line below it, and the union erased one colour and
+    # printed the other over both.
+    if not _same_ink(a, b):
+        return False
     abox, bbox = a["box"], b["box"]
     aw, ah = abox[2] - abox[0], abox[3] - abox[1]
     bw, bh = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -1934,6 +2022,11 @@ class PaddleMangaOCR:
                 ),
             )
             regions = [item for item in regions if str(item.get("text", "")).strip()]
+        # Colour decides which lines belong together, so each region has
+        # to carry its own before the union-find runs.
+        page_rgb = np.asarray(image)
+        for region in regions:
+            region["ink"] = glyph_ink(page_rgb, region["box"])
         groups = _groups(regions)
         groups.sort(
             key=lambda group: (_union_box(group)[1] // 180, -_union_box(group)[0])

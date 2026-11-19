@@ -20,6 +20,7 @@ from manga_localizer.ocr import (
     TextUnit,
     _best_recognized_text,
     _connects,
+    glyph_ink,
     _is_latin_region,
     _light_on_dark_regions,
     _outlined_light_text_regions_near,
@@ -2379,3 +2380,44 @@ def test_a_large_italic_headline_keeps_its_text():
         "watching me while I was",
         "taking off my clothes?",
     ]
+
+
+def test_a_red_line_is_not_joined_to_the_black_one_above_it():
+    """Colour separates two captions that geometry alone would merge.
+
+    Page 1 of one book stacks three black lines directly above two red ones
+    with 46 px between them, well inside the line-height gap the geometric
+    rule allows, so the whole page became one unit and every line below was
+    erased by a mask seeded from the wrong colour.
+    """
+    black = {"box": [353, 107, 780, 233], "ink": [10, 9, 11]}
+    red = {"box": [456, 279, 775, 413], "ink": [228, 112, 114]}
+    assert _connects(black, red) is False
+
+    same_black = {"box": [411, 19, 750, 131], "ink": [12, 10, 13]}
+    assert _connects(black, same_black) is True
+
+
+def test_a_region_without_a_colour_reading_is_never_split_off():
+    """Recall-only proposals carry no ink, so they must not veto a union."""
+    known = {"box": [353, 107, 780, 233], "ink": [10, 9, 11]}
+    unknown = {"box": [456, 279, 775, 413]}
+    assert _connects(known, unknown) is True
+
+
+def test_the_ink_of_a_crop_is_read_from_the_glyphs_not_from_the_balloon():
+    """Half the crop can be hair; the median still names the balloon.
+
+    The second red line on page 1 sits partly over the character's own
+    violet hair, so clustering the whole crop made the hair the biggest
+    cluster and the ink came back violet -- which both painted the
+    translation violet and split the line off its own balloon.
+    """
+    page = np.full((120, 240, 3), (188, 102, 142), dtype=np.uint8)
+    page[0:60, 0:70] = (78, 67, 111)
+    for offset in range(30, 200, 6):
+        page[30:90, offset : offset + 3] = (228, 108, 110)
+    ink = glyph_ink(page, [0, 0, 240, 120])
+    assert ink is not None
+    red, green, blue = ink
+    assert red - green >= 90 and red - blue >= 90

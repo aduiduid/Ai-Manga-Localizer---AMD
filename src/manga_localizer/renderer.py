@@ -20,6 +20,7 @@ from .ocr import (
     JP_RE,
     PageOCR,
     TextUnit,
+    glyph_ink,
     prune_detached_orthogonal_outliers,
 )
 
@@ -64,6 +65,30 @@ class TextStyle:
     outlined: bool
     background_std: float
     display: bool
+    # The glyph colour itself, when grey-scale cannot name it.  Only a
+    # saturated reading is stored: a plain dark or bright glyph keeps
+    # its existing polarity path, so nothing that already worked moves.
+    ink: tuple[int, int, int] | None = None
+
+
+INK_TOLERANCE = 40.0
+# Below this channel spread a glyph is effectively neutral and the
+# luminance path already handles it; above it, grey-scale cannot.
+INK_SATURATION = 40
+# A neutral core darker than this is black lettering, not the halo.
+INK_DARK = 90.0
+
+
+def _level(rgb: tuple[int, int, int]) -> float:
+    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+
+
+def _ink_colour(rgb: np.ndarray, box: list[int]) -> tuple[int, int, int] | None:
+    """The colour the glyphs are drawn in, whatever that colour is."""
+    ink = glyph_ink(rgb, box)
+    if ink is None:
+        return None
+    return (int(ink[0]), int(ink[1]), int(ink[2]))
 
 
 def managed_font_path(paths: AppPaths | None = None) -> Path:
@@ -427,6 +452,7 @@ class ArtworkPreservingRenderer:
         device: str = "auto",
         inpainter=None,
         erase_model: str = DEFAULT_ERASE_MODEL,
+        preserve_text_color: bool = True,
     ):
         self.paths = (paths or AppPaths.from_env()).ensure()
         self.font_path = font_path or ensure_font(self.paths)
@@ -437,6 +463,7 @@ class ArtworkPreservingRenderer:
         self.cleanup_profile = resolved_profile
         self.device = device
         self.erase_model = erase_model
+        self.preserve_text_color = bool(preserve_text_color)
         self._inpainter = inpainter
 
     @staticmethod
@@ -449,7 +476,11 @@ class ArtworkPreservingRenderer:
         return float(gray.mean()), float((gray > 225).mean())
 
     @staticmethod
-    def _analyze_style(rgb: np.ndarray, unit: TextUnit) -> TextStyle:
+    def _analyze_style(
+        rgb: np.ndarray,
+        unit: TextUnit,
+        preserve_text_color: bool = True,
+    ) -> TextStyle:
         x0, y0, x1, y1 = unit.bbox
         crop = rgb[y0:y1, x0:x1]
         gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
@@ -567,6 +598,21 @@ class ArtworkPreservingRenderer:
             fill, stroke_fill = "white", "black"
         else:
             fill, stroke_fill = "black", "white"
+        ink = _ink_colour(rgb, unit.bbox) if preserve_text_color else None
+        saturated = ink is not None and max(ink) - min(ink) >= INK_SATURATION
+        if saturated:
+            # The glyph colour outranks the polarity vote: a saturated
+            # reading is unambiguous, and the vote is what painted a red
+            # line white in the first place.  A dark ink keeps the light
+            # outline it had, a bright one keeps the dark outline.
+            stroke_fill = "white" if _level(ink) < 150 else "black"
+        elif ink is not None and _level(ink) < INK_DARK:
+            # A neutral but clearly dark core is still the glyph.  The vote
+            # loses here because the bright halo fills the box: page 1's
+            # black lettering with a white outline was painted white.
+            fill, stroke_fill = "black", "white"
+        if not saturated:
+            ink = None
         bold = outlined or (float(dark.mean()) >= 0.025 and font_size >= 32)
         stroke_ratio = 0.066 if outlined else (0.045 if fill == "white" else 0.0)
         return TextStyle(
@@ -581,6 +627,7 @@ class ArtworkPreservingRenderer:
             outlined=outlined,
             background_std=background_std,
             display=display,
+            ink=ink,
         )
 
     def _get_inpainter(self):
@@ -605,7 +652,15 @@ class ArtworkPreservingRenderer:
         # as edge-connected, leaving the source text in place.  Anchor the
         # cutoff to the local median instead.
         level = float(np.median(gray)) if gray.size else 255.0
-        if style.fill == "white":
+        ink = style.ink
+        if ink is not None:
+            # Colour distance, not luminance: red glyphs on a pink balloon
+            # are two grey levels from the paper, so no grey cutoff can
+            # find them, and none of the grey ones can leave them behind.
+            reference = np.array(ink, dtype=np.int16)
+            distance = np.linalg.norm(crop.astype(np.int16) - reference, axis=2)
+            seed = (distance <= INK_TOLERANCE).astype(np.uint8)
+        elif style.fill == "white":
             seed = (gray > min(215, level + 55)).astype(np.uint8)
         else:
             seed = (gray < max(15, min(150, level - 45))).astype(np.uint8)
@@ -661,7 +716,12 @@ class ArtworkPreservingRenderer:
     @staticmethod
     def _needs_neural_erase(style: TextStyle) -> bool:
         """Whether plain flood-fill is too crude for this lettering."""
-        return style.outlined or style.background_std >= 10 or style.fill == "white"
+        return (
+            style.outlined
+            or style.background_std >= 10
+            or style.fill == "white"
+            or style.ink is not None
+        )
 
     def _page_mask(
         self, rgb: np.ndarray, unit: TextUnit, style: TextStyle
@@ -1261,6 +1321,7 @@ class ArtworkPreservingRenderer:
         plate: bool = False,
     ):
         draw = ImageDraw.Draw(image, "RGBA" if plate else None)
+        fill = style.ink if style.ink is not None else style.fill
         x0, y0, x1, y1 = box
         pad_x, pad_y = _text_padding(box)
         left, top, right, bottom = x0 + pad_x, y0 + pad_y, x1 - pad_x, y1 - pad_y
@@ -1293,7 +1354,7 @@ class ArtworkPreservingRenderer:
                         (start_x - column * step_x, y + row * step_y),
                         char,
                         font=font,
-                        fill=style.fill,
+                        fill=fill,
                         stroke_width=stroke,
                         stroke_fill=style.stroke_fill,
                     )
@@ -1330,7 +1391,7 @@ class ArtworkPreservingRenderer:
                     (x, y),
                     line,
                     font=font,
-                    fill=style.fill,
+                    fill=fill,
                     stroke_width=stroke,
                     stroke_fill=style.stroke_fill,
                 )
@@ -1416,8 +1477,9 @@ class ArtworkPreservingRenderer:
         # Neural repainting runs as one pass after the cheap passes, so the
         # network sees the whole page instead of a handful of balloon crops.
         neural: list[TextUnit] = []
+        preserve_colour = getattr(self, "preserve_text_color", True)
         for unit in active:
-            style = self._analyze_style(original, unit)
+            style = self._analyze_style(original, unit, preserve_colour)
             styles[unit.id] = style
             if profile == "quality" and self._needs_neural_erase(style):
                 neural.append(unit)
