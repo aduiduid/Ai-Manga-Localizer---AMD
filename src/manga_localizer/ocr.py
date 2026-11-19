@@ -1124,6 +1124,8 @@ INK_DISTANCE = 60.0
 INK_VIVID = 90.0
 #: A pixel this far from the crop's own median colour is not the balloon.
 INK_BACKGROUND_DISTANCE = 45.0
+#: Fixed k-means seed so the ink of a crop is the same on every run.
+INK_RNG_SEED = 20240917
 
 
 def glyph_ink(rgb: np.ndarray, box: list[int]) -> list[int] | None:
@@ -1158,9 +1160,18 @@ def glyph_ink(rgb: np.ndarray, box: list[int]) -> list[int] | None:
     keep = pixels[np.linalg.norm(offsets, axis=1) >= INK_BACKGROUND_DISTANCE]
     if keep.shape[0] < 120:
         return None
+    # k-means seeds itself from OpenCV's global RNG, so without a fixed seed the
+    # same crop sometimes returned the red line and sometimes a strand of the
+    # character's hair across it -- the unit split and its colour changed
+    # between two runs of the same page.  One attempt from a known seed is
+    # reproducible and three times cheaper than three attempts from nowhere.
+    # Four clusters, not three: on a two-line balloon three are spent on the
+    # paper, the hair over it, and their blend, leaving the red letters
+    # unsplit from the blend and losing to the much larger hair.
+    cv2.setRNGSeed(INK_RNG_SEED)
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 0.5)
     _, labels, centres = cv2.kmeans(
-        np.ascontiguousarray(keep), 3, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+        np.ascontiguousarray(keep), 4, None, criteria, 1, cv2.KMEANS_PP_CENTERS
     )
     counts = np.bincount(labels.ravel(), minlength=len(centres))
     shares = counts / max(1, int(counts.sum()))

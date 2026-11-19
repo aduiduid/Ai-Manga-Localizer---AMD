@@ -2421,3 +2421,17 @@ def test_the_ink_of_a_crop_is_read_from_the_glyphs_not_from_the_balloon():
     assert ink is not None
     red, green, blue = ink
     assert red - green >= 90 and red - blue >= 90
+
+def test_the_ink_of_one_crop_does_not_change_between_readings():
+    """Two reads of the same box must name the same colour.
+
+    k-means seeds itself from OpenCV's global random number generator,
+    so the red balloon on page 1 came back red on one run and violet on
+    the next, and the unit split moved with it.
+    """
+    page = np.full((120, 240, 3), (188, 102, 142), dtype=np.uint8)
+    page[0:60, 0:70] = (78, 67, 111)
+    for offset in range(30, 200, 6):
+        page[64:110, offset : offset + 3] = (228, 108, 110)
+    readings = {tuple(glyph_ink(page, [0, 0, 240, 120]) or ()) for _ in range(5)}
+    assert len(readings) == 1

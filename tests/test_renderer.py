@@ -1,6 +1,7 @@
 import io
 
 import cv2
+import cv2
 import numpy as np
 import pytest
 from PIL import Image, ImageDraw
@@ -11,6 +12,7 @@ from manga_localizer.renderer import (
     CLOSING_PUNCTUATION,
     MIN_READABLE_FONT,
     INK_DARK,
+    _absorb_outline,
     INK_SATURATION,
     ArtworkPreservingRenderer,
     TextStyle,
@@ -1084,3 +1086,32 @@ def test_a_dark_neutral_glyph_is_not_painted_white_over_its_own_halo():
     assert style.fill == "black"
     assert style.stroke_fill == "white"
     assert INK_DARK < 150
+
+def test_the_outline_around_a_dark_glyph_is_erased_with_it():
+    """The grey cutoff finds the core, not the bright rim around it.
+
+    Repainting half of every stroke left a pale smear of the old rim
+    under the new line, so the rim has to join the mask.
+    """
+    crop = np.full((80, 200, 3), (40, 40, 40), dtype=np.uint8)
+    crop[20:60, 30:170] = (10, 10, 10)
+    crop[16:20, 26:174] = (250, 250, 250)
+    crop[60:64, 26:174] = (250, 250, 250)
+    selected = np.zeros((80, 200), dtype=np.uint8)
+    selected[20:60, 30:170] = 255
+    grown = _absorb_outline(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY), 40.0, selected)
+    assert int((grown > 0).sum()) > int((selected > 0).sum())
+    assert grown[17, 100] == 255
+
+def test_a_white_balloon_never_grows_its_mask():
+    """Paper that bright has no rim to find, only background.
+
+    A white balloon lights up the whole crop, so growing onto bright
+    pixels there would repaint the balloon instead of the lettering.
+    """
+    crop = np.full((80, 200, 3), (252, 252, 252), dtype=np.uint8)
+    crop[20:60, 30:170] = (10, 10, 10)
+    selected = np.zeros((80, 200), dtype=np.uint8)
+    selected[20:60, 30:170] = 255
+    grown = _absorb_outline(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY), 252.0, selected)
+    assert np.array_equal(grown, selected)

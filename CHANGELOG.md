@@ -1,3 +1,29 @@
+## 0.13.11 - 2026-11-19
+
+- The ink probe now seeds k-means and asks for four clusters instead of
+
+  three. Three clusters on a two-line balloon merged the red letters into
+
+  the paper/hair blend whose saturation stayed just under the vivid cutoff,
+
+  so the ink fell back to the darkest cluster -- the character's hair -- and
+
+  the same crop read red on one run and violet on the next.
+
+- A dark glyph's white outline now joins its erase mask. The grey cutoff
+
+  only found the core, so the network repainted half of every stroke and the
+
+  leftover rim showed through as a pale smear under the new text. Growth is
+
+  anchored to already-chosen glyph pixels within a five pixel reach, capped
+
+  at half again the glyph mask, and refused outright on white paper.
+
+- `OCR_CACHE_VERSION` 18 -> 19, since the ink reading decides how lines are
+
+  grouped and a cached page would keep the old grouping.
+
 ## 0.13.10 - 2026-11-19
 
 - **Source text colour is kept** (new setting, on by default). Red and coloured source lettering is now typeset in its own colour instead of one flat black or white, and the setting page has a switch to turn that off again.

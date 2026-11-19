@@ -52,6 +52,34 @@ SYSTEM_BOLD_FONT_CANDIDATES = (
 )
 
 
+def _absorb_outline(gray: np.ndarray, level: float, selected: np.ndarray) -> np.ndarray:
+    """Extend a glyph mask onto the outline drawn around those same glyphs.
+
+    The grey cutoff finds the dark glyph core but not the light outline drawn
+    around it, so the network was asked to repaint half of each stroke and the
+    leftover rim showed through as a pale smear beneath the new text.
+
+    Only pixels within ``OUTLINE_REACH`` of an already chosen glyph may join,
+    and only on paper dark enough that a bright pixel there has to be ink.
+    Growing from the selection, instead of searching the crop for anything
+    bright, is what keeps hair and panel art out of the mask.
+    """
+    chosen = int((selected > 0).sum())
+    if chosen < OUTLINE_MIN_GLYPHS or level >= OUTLINE_PAPER_LEVEL:
+        return selected
+    bright = gray >= min(215, level + 45)
+    near = cv2.dilate(
+        (selected > 0).astype(np.uint8),
+        np.ones((OUTLINE_REACH * 2 + 1,) * 2, np.uint8),
+    )
+    outline = bright & (near > 0)
+    added = int(outline.sum())
+    if added == 0 or added > chosen * OUTLINE_GROWTH_LIMIT:
+        return selected
+    merged = np.maximum(selected, outline.astype(np.uint8) * 255)
+    return cv2.dilate(merged, np.ones((3, 3), np.uint8), iterations=1)
+
+
 @dataclass(frozen=True)
 class TextStyle:
     mean: float
@@ -77,6 +105,16 @@ INK_TOLERANCE = 40.0
 INK_SATURATION = 40
 # A neutral core darker than this is black lettering, not the halo.
 INK_DARK = 90.0
+# A glyph's outline sits within this many pixels of the glyph itself.
+OUTLINE_REACH = 5
+# Below this many glyph pixels the crop is noise, not lettering.
+OUTLINE_MIN_GLYPHS = 200
+# The outline may add up to half again the glyph mask.  A tighter cap refuses
+# the growth wherever the rim is thick in proportion to thin lettering, which
+# left every stroke halo'd; the corpus cost stays under a fifth of the mask.
+OUTLINE_GROWTH_LIMIT = 1.5
+# Paper this bright is a white balloon: nothing there may be grown.
+OUTLINE_PAPER_LEVEL = 170
 
 
 def _level(rgb: tuple[int, int, int]) -> float:
@@ -693,6 +731,12 @@ class ArtworkPreservingRenderer:
             if area > max_area or aspect > 12:
                 continue
             selected[labels == label] = 255
+        # White lettering is selected by brightness, so its mask already is the
+        # bright band and growing it would only eat the balloon.  Coloured ink
+        # is selected by colour, and its outline is a separate bright rim that
+        # still has to go.
+        if selected.any() and not (ink is None and style.fill == "white"):
+            selected = _absorb_outline(gray, level, selected)
         if dilation > 1 and selected.any():
             selected = cv2.dilate(
                 selected,
