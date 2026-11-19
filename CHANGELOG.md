@@ -1,3 +1,15 @@
+## 0.13.12 - 2026-11-19
+
+- Hand PaddleX the decoded pixels instead of the page path. Its reader reopened
+  the file with OpenCV, so a WebP this project had already repaired by padding
+  came back as `Image read Error` and failed the whole book at page 34 of 255.
+- Skip a page no decoder can rescue and finish the book. The failure is named in
+  the progress feed and reported in `result["skipped"]` instead of raised.
+- Publish the stage clocks while the run is in flight, so the four steps count up
+  instead of appearing only after the last page.
+- Mark a stage where the standalone detector is folded into the read on a declared
+  English page, instead of reporting a permanent 0.0 s.
+
 ## 0.13.11 - 2026-11-19
 
 - The ink probe now seeds k-means and asks for four clusters instead of

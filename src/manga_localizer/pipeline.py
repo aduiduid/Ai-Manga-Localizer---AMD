@@ -182,6 +182,9 @@ class PipelineRequest:
 class LocalizerPipeline:
     def __init__(self, paths: AppPaths):
         self.paths = paths.ensure()
+        # Stage clocks of the run in flight.  The job service reads it on every
+        # progress tick so the UI can count up instead of waiting for the end.
+        self.live_timings: dict[str, float] = {}
 
     @staticmethod
     def _emit(
@@ -376,11 +379,17 @@ class LocalizerPipeline:
         work.mkdir(parents=True, exist_ok=True)
 
         pages: list[PageOCR] = []
+        # Pages no decoder could read.  They are reported at the end rather
+        # than raised: one corrupt file must not discard a whole book.
+        skipped: list[dict] = []
         glossary = dict(request.glossary or {})
         total = len(files)
         # Wall-clock cost of each stage, kept in the job record so a finished
         # book can still answer "where did the ten minutes go?".
         timings: dict[str, float] = {}
+        # The job service reads this while the run is in flight, so the UI can
+        # tick the stage clocks instead of waiting for the final result.
+        self.live_timings = timings
         # Bound before the branches below so the stage split can read it when
         # a reviewed transcript skips the OCR backends entirely.
         ocr = None
@@ -478,7 +487,21 @@ class LocalizerPipeline:
                     )
                 else:
                     self._emit(emit, "ocr", index - 1, total, f"识别 {image_path.name}")
-                    page = ocr.analyze(image_path, index)
+                    try:
+                        page = ocr.analyze(image_path, index)
+                    except Exception as error:  # noqa: BLE001 - one page, not the book
+                        # A page nobody can decode is not a reason to throw away
+                        # the five hundred already read.  The repair in image_io
+                        # covers truncation; this covers everything else.
+                        skipped.append({"file": image_path.name, "error": str(error)})
+                        self._emit(
+                            emit,
+                            "ocr",
+                            index,
+                            total,
+                            f"跳过无法读取的第 {index} 页：{image_path.name}",
+                        )
+                        continue
                 # Every OCR backend shares the same non-story contract.  This
                 # also upgrades reusable OCR caches without rerunning models.
                 page = classify_non_story_text(page)
@@ -513,6 +536,7 @@ class LocalizerPipeline:
                         json.dumps(page_payload, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
+                timings["ocr"] = round(time.perf_counter() - stage_started, 1)
                 self._emit(emit, "ocr", index, total, f"已识别 {image_path.name}")
 
         ocr_seconds = time.perf_counter() - stage_started
@@ -521,6 +545,10 @@ class LocalizerPipeline:
         detector = getattr(ocr, "stage_seconds", None) if not request.reviewed_transcript else None
         detect_seconds = float(detector.get("detect", 0.0)) if detector else 0.0
         timings["detect"] = round(detect_seconds, 1)
+        # An English page reads through one combined pass, so there is no
+        # standalone detection to report.  Saying "0.0s" made that look broken;
+        # the renderer labels this stage as folded into the read instead.
+        timings["detect_folded"] = 0.0 if detect_seconds > 0.0 else 1.0
         timings["ocr"] = round(ocr_seconds - detect_seconds, 1)
         stage_started = time.perf_counter()
         resumed = self._resume_translations(work, pages, request.target_language)
@@ -746,11 +774,19 @@ class LocalizerPipeline:
             self._emit(emit, "render", index - 1, total, f"替换第 {index} 页文字")
             source_path = source / page.file
             output_path = output / f"{source_path.stem}{suffix}"
-            manifest.append(
-                renderer.render_page(
-                    source_path, page, output_path, request.preserve_sfx
+            try:
+                manifest.append(
+                    renderer.render_page(
+                        source_path, page, output_path, request.preserve_sfx
+                    )
                 )
-            )
+            except Exception as error:  # noqa: BLE001 - one page, not the book
+                skipped.append({"file": page.file, "error": str(error)})
+                self._emit(
+                    emit, "render", index, total, f"跳过无法生成的第 {index} 页"
+                )
+                continue
+            timings["render"] = round(time.perf_counter() - stage_started, 1)
             self._emit(emit, "render", index, total, f"已生成 {output_path.name}")
 
         timings["render"] = round(time.perf_counter() - stage_started, 1)
@@ -762,6 +798,7 @@ class LocalizerPipeline:
             "transcript": str(work / "transcript.json"),
             "quality": quality,
             "timings": timings,
+            "skipped": skipped,
         }
         (output / "translation_manifest.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"

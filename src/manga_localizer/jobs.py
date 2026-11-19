@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -322,6 +323,8 @@ class JobService:
             job.update(status="paused", message="已暂停")
             self.store.save(job)
 
+        pipeline = self.pipeline_factory(self.paths)
+
         def progress(phase: str, current: int, total: int, message: str) -> None:
             # Blocking here is the pause: it is the narrowest point between
             # resumable units, so nothing half-rendered is left behind.
@@ -337,18 +340,26 @@ class JobService:
                 value = base + round((current / total if total else 0) * span)
             elif phase == "complete":
                 value = 100
-            active.update(
-                status="running" if phase != "complete" else "complete",
-                phase=phase,
-                progress=value,
-                current=current,
-                total=total,
-                message=message,
-            )
+            update = {
+                "status": "running" if phase != "complete" else "complete",
+                "phase": phase,
+                "progress": value,
+                "current": current,
+                "total": total,
+                "message": message,
+            }
+            # Wall clock of each finished stage plus the moment it was written,
+            # so the page can count the stage in flight up from the last tick
+            # instead of sitting on a frozen number until the next page lands.
+            live = getattr(pipeline, "live_timings", None)
+            if live:
+                update["timings"] = dict(live)
+                update["timings_at"] = time.time()
+            active.update(**update)
             self.store.save(active)
 
         try:
-            result = self.pipeline_factory(self.paths).run(request, progress)
+            result = pipeline.run(request, progress)
             job = self.store.get(job_id) or job
             job.update(
                 status="complete",

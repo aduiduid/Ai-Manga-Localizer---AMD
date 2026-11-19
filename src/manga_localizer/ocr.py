@@ -1654,6 +1654,18 @@ class PaddleMangaOCR:
             raw = raw()
         return raw.get("res", raw)
 
+    @staticmethod
+    def _bgr(image: Image.Image) -> np.ndarray:
+        """PaddleX pixels for a page we already decoded.
+
+        Handing PaddleX a path makes it open the file a second time with
+        OpenCV, so a truncated WebP that this project repaired by padding came
+        straight back as ``Image read Error`` and failed the whole book.  The
+        array overload never touches the disk.  Its reader converts BGR to RGB
+        itself, so the bytes handed over must be BGR.
+        """
+        return cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+
     def _read_inverted(self, image: Image.Image) -> dict:
         """Recognise the page again from an inverted greyscale copy.
 
@@ -1680,7 +1692,7 @@ class PaddleMangaOCR:
         if self._declared_language() == "en":
             if self.recognition_detector is None:
                 return ""
-            results = list(self.recognition_detector.predict(np.asarray(crop)))
+            results = list(self.recognition_detector.predict(self._bgr(crop)))
             payload = self._payload(results[0]) if results else {}
             return " ".join(
                 text
@@ -1971,14 +1983,14 @@ class PaddleMangaOCR:
             # the two apart is what lets the UI say which half a slow page spent
             # its seconds on.
             detect_started = time.perf_counter()
-            results = list(self.detector.predict(str(image_path)))
+            results = list(self.detector.predict(self._bgr(image)))
             self._note_detect_seconds(time.perf_counter() - detect_started)
             payload = self._payload(results[0]) if results else {}
         recognition_payload: dict = {}
         regions = self._regions(payload, area_floor=floor)
         if self.recognition_detector is not None:
             recognition_results = list(
-                self.recognition_detector.predict(str(image_path))
+                self.recognition_detector.predict(self._bgr(image))
             )
             recognition_payload = (
                 self._payload(recognition_results[0]) if recognition_results else {}
@@ -2390,7 +2402,7 @@ class PaddleMangaOCR:
                     repaired.special = ""
                 continue
             item_regions: list[dict] = []
-            results = list(self.detector.predict(np.asarray(enlarged)))
+            results = list(self.detector.predict(self._bgr(enlarged)))
             payload = self._payload(results[0]) if results else {}
             for region in self._regions(payload):
                 local = region["box"]
