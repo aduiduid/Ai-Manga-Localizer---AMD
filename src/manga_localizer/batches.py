@@ -606,7 +606,7 @@ class BatchService:
             # a second reader on the same folder.
             if not started.acquire(blocking=False):
                 return
-            self._note_prefetch(batch_id, index, ahead, "预读中")
+            self._note_prefetch(batch_id, index, ahead, "reading")
             runner = (
                 self._prefetch_in_process
                 if self._factory_is_importable()
@@ -707,7 +707,7 @@ class BatchService:
         except Exception as exc:  # noqa: BLE001 - the folder still runs normally
             reason = str(exc)
         self._note_prefetch(
-            batch_id, index, ahead, "预读完成" if not reason else "预读失败，稍后重读"
+            batch_id, index, ahead, "done" if not reason else "failed"
         )
 
     def _prefetch_here(
@@ -720,7 +720,7 @@ class BatchService:
         except Exception as exc:  # noqa: BLE001 - the folder still runs normally
             reason = str(exc)
         self._note_prefetch(
-            batch_id, index, ahead, "预读完成" if not reason else "预读失败，稍后重读"
+            batch_id, index, ahead, "done" if not reason else "failed"
         )
 
     def _note_prefetch(
@@ -737,9 +737,11 @@ class BatchService:
                 if (task.get("status") or "queued") != "queued":
                     return
                 task["prefetch"] = state
-                # A separate field, not the headline: the reader still needs to
-                # know which folder is running now.
-                batch["prefetch"] = f"{task['name']}（{state}）"
+                # The name and the state travel apart: the label is
+                # translated in the browser, and the headline keeps naming
+                # the folder that is actually running now.
+                batch["prefetch"] = task["name"]
+                batch["prefetch_state"] = state
                 self.store.save(batch)
                 return
 
@@ -796,6 +798,9 @@ class BatchService:
                 if dropped:
                     batch["message"] += f" / 已取消 {dropped} 个"
             batch["current_index"] = None
+            # Nothing is reading ahead of a finished queue.
+            batch["prefetch"] = ""
+            batch["prefetch_state"] = ""
         settings = (template or {}).get("settings")
         batch["released"] = release_runtime(settings)
         self.store.save(batch)
@@ -810,6 +815,9 @@ class BatchService:
         pending = self._prefetches.pop(int(task.get("index", -1)), None)
         if pending is not None:
             pending.join()
+        if batch.get("prefetch") == task.get("name"):
+            batch["prefetch"] = ""
+            batch["prefetch_state"] = ""
         options = dict(template.get("options") or {})
         request = PipelineRequest(
             source=Path(task["source"]),

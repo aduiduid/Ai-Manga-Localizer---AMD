@@ -270,7 +270,7 @@
       "batch.task.headline": "正在处理 {index}/{total}：{name}",
       "batch.task.ocr": "正在识别第 {current}/{total} 页（OCR）",
       "batch.task.translate": "正在翻译第 {current}/{total} 页",
-      "batch.task.render": "正在渲染第 {current}/{total} 页", "batch.task.prefetch": "预读中：{name}",
+      "batch.task.render": "正在渲染第 {current}/{total} 页", "batch.task.prefetched": "已预读：{name}", "batch.task.prefetchFailed": "预读失败，稍后重读：{name}", "batch.task.prefetch": "预读中：{name}",
       "batch.task.failure": "处理失败：{message}",
       "batch.task.drop": "取消排队",
       "batch.task.dropConfirm": "确定要取消排队中的任务 {name} 吗？",
@@ -300,7 +300,7 @@
       "batch.status.queued": "開始待ち", "batch.status.running": "処理中", "batch.status.completed": "完了", "batch.status.failed": "失敗", "batch.status.cancelled": "中止",
       "batch.task.queued": "開始待ち", "batch.task.running": "処理中", "batch.task.paused": "一時停止中", "batch.task.complete": "完了", "batch.task.failed": "失敗", "batch.task.cancelled": "中止",
       "batch.pickChildren.title": "子フォルダーを選択", "batch.pickChildren.detail": "キューに追加する子フォルダーにチェックを入れてください。画像のないフォルダーは選べません。", "batch.pickChildren.empty": "このフォルダーには子フォルダーがありません", "batch.pickChildren.images": "{count} 枚", "batch.pickChildren.none": "対応画像なし", "batch.pickChildren.confirm": "キューに追加", "batch.pickChildren.cancel": "キャンセル",
-      "batch.task.headline": "{index}/{total} 件目を処理中：{name}", "batch.task.ocr": "{current}/{total} ページを OCR で認識中", "batch.task.translate": "{current}/{total} ページを翻訳中", "batch.task.render": "{current}/{total} ページを描画中", "batch.task.prefetch": "先読み中：{name}", "batch.task.failure": "処理に失敗しました：{message}",
+      "batch.task.headline": "{index}/{total} 件目を処理中：{name}", "batch.task.ocr": "{current}/{total} ページを OCR で認識中", "batch.task.translate": "{current}/{total} ページを翻訳中", "batch.task.render": "{current}/{total} ページを描画中", "batch.task.prefetched": "先読み完了：{name}", "batch.task.prefetchFailed": "先読み失敗，後で再読み：{name}", "batch.task.prefetch": "先読み中：{name}", "batch.task.failure": "処理に失敗しました：{message}",
       "batch.task.drop": "待機を取り消す", "batch.task.dropConfirm": "{name} の待機をキャンセルしますか？", "batch.task.dropped": "待機をキャンセルしました"
     },
     "en-US": {
@@ -327,7 +327,7 @@
       "batch.status.queued": "Queued", "batch.status.running": "Running", "batch.status.completed": "Completed", "batch.status.failed": "Failed", "batch.status.cancelled": "Cancelled",
       "batch.task.queued": "Queued", "batch.task.running": "Running", "batch.task.paused": "Paused", "batch.task.complete": "Complete", "batch.task.failed": "Failed", "batch.task.cancelled": "Cancelled",
       "batch.pickChildren.title": "Choose subfolders", "batch.pickChildren.detail": "Tick the subfolders to enqueue; folders without images cannot be selected.", "batch.pickChildren.empty": "No subfolders in this folder", "batch.pickChildren.images": "{count} image(s)", "batch.pickChildren.none": "No supported images", "batch.pickChildren.confirm": "Add to queue", "batch.pickChildren.cancel": "Cancel",
-      "batch.task.headline": "Processing {index}/{total}: {name}", "batch.task.ocr": "Recognising page {current}/{total} (OCR)", "batch.task.translate": "Translating page {current}/{total}", "batch.task.render": "Rendering page {current}/{total}", "batch.task.prefetch": "reading ahead: {name}", "batch.task.failure": "Processing failed: {message}",
+      "batch.task.headline": "Processing {index}/{total}: {name}", "batch.task.ocr": "Recognising page {current}/{total} (OCR)", "batch.task.translate": "Translating page {current}/{total}", "batch.task.render": "Rendering page {current}/{total}", "batch.task.prefetched": "read ahead: {name}", "batch.task.prefetchFailed": "read-ahead failed, will retry: {name}", "batch.task.prefetch": "reading ahead: {name}", "batch.task.failure": "Processing failed: {message}",
       "batch.task.drop": "Cancel waiting", "batch.task.dropConfirm": "Cancel the queued folder {name}?", "batch.task.dropped": "Removed from the queue"
     }
   };
