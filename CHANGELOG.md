@@ -1,3 +1,12 @@
+## 0.13.14 - 2026-11-21
+
+- A spawned child no longer builds a second application. multiprocessing
+  re-imports __main__ on Windows, which is manga_localizer.cli, which
+  imports this API module -- and a module-level create_app() gave every
+  prefetch child its own JobService and BatchService on the same data folder,
+  whose _adopt_orphans then cancelled the batch the real server was running.
+  Nothing referenced that instance, so it is gone.
+
 ## 0.13.13 - 2026-11-20
 
 - A folder that is already drawing leaves its cores to the queue: the next folder's

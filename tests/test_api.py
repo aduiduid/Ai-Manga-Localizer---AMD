@@ -540,3 +540,42 @@ def test_the_server_quiets_connection_resets_from_closed_browser_tabs(tmp_path):
 
     asyncio.run(serve())
     assert forwarded == ["callback failed"]
+
+
+
+def test_a_spawned_child_reimport_builds_no_application(monkeypatch):
+    """Importing this module must never build an application.
+
+    ``multiprocessing`` uses ``spawn`` on Windows, and a spawned child
+    re-imports ``__main__`` -- which is ``manga_localizer.cli``, and therefore
+    this module.  A module-level ``create_app()`` would give every child its
+    own JobService and BatchService on the same data folder, and their
+    ``_adopt_orphans`` would cancel the batches the real server is still
+    working on.
+    """
+    import importlib.util
+    import sys
+
+    import manga_localizer.api
+    import manga_localizer.jobs as jobs_module
+
+    built: list[object] = []
+
+    class Recorder:
+        def __init__(self, paths, *args, **kwargs):
+            built.append(paths)
+
+    monkeypatch.setattr(jobs_module, "JobService", Recorder)
+    spec = importlib.util.spec_from_file_location(
+        "manga_localizer.api_probe", manga_localizer.api.__file__
+    )
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "manga_localizer"
+    sys.modules["manga_localizer.api_probe"] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop("manga_localizer.api_probe", None)
+
+    assert built == []
+    assert not hasattr(module, "app")

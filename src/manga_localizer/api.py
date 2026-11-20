@@ -912,5 +912,8 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
     app.state.batches = batches
     return app
 
-
-app = create_app()
+# Nothing may build an application at import time.  ``multiprocessing`` uses
+# ``spawn`` on Windows, and every child re-imports this module: a module-level
+# ``create_app()`` would give each child its own JobService and BatchService on
+# the same data folder, and their ``_adopt_orphans`` would then cancel the
+# batches the real server is still working on.
