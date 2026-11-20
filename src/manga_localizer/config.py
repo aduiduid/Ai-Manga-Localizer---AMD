@@ -169,6 +169,12 @@ class UserSettings:
     # Keep the source lettering's own colour on the translation.  Off
     # restores the black/white polarity vote for every page.
     preserve_text_color: bool = True
+    # Read the next folder's pages while this one sits on the GPU.  Only a
+    # batch can use it, and only when the GPU stages really run off-process,
+    # so the decision lives in ``pipeline_parallel_ready``: with a CPU
+    # translator both stages want the same cores and overlapping them would
+    # only make each one slower.
+    enable_pipeline_parallel: bool = False
     quality_profile: str = "quality"
     output_format: str = "webp"
     prefer_modelscope: bool = True

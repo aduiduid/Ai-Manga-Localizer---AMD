@@ -83,6 +83,28 @@ OCR_CACHE_VERSION = 19
 # Backends whose result depends on a vision model, so a cached page is only
 # reusable when the model name matches.  ``llama`` belongs here for the same
 # reason as ``ollama``: a different 9B build reads the same page differently.
+# Backends whose heavy stages leave the CPU alone: the llama.cpp servers and
+# any remote API both run outside this process, and the AOT eraser is the only
+# one that repaints on the GPU through DirectML.  Everything else keeps a torch
+# translator or a LaMa eraser busy during translate/render, which is exactly
+# the window a prefetch would try to steal.
+GPU_TRANSLATION_BACKENDS = frozenset({"llama", "llama_7b", "online"})
+GPU_ERASE_MODELS = frozenset({"aot-manga"})
+
+
+def pipeline_parallel_ready(
+    enabled: bool,
+    inference_backend: str,
+    erase_model: str,
+) -> bool:
+    """Whether reading the next folder now would overlap instead of contend."""
+    return (
+        bool(enabled)
+        and inference_backend in GPU_TRANSLATION_BACKENDS
+        and erase_model in GPU_ERASE_MODELS
+    )
+
+
 VISION_OCR_BACKENDS = frozenset({"hybrid", "ollama", "llama"})
 
 
@@ -150,6 +172,10 @@ class PipelineRequest:
     context_pages: int = 6
     preserve_sfx: bool = False
     preserve_text_color: bool = True
+    # Batch-only prefetch: read the next folder's pages while this one is on
+    # the GPU.  Ignored for a single folder, and refused when the GPU stages
+    # are not actually going to the GPU.
+    enable_pipeline_parallel: bool = False
     quality_profile: str = "quality"
     output_format: str = "webp"
     device: str = "auto"
@@ -360,6 +386,202 @@ class LocalizerPipeline:
             )
         return page
 
+    def _read_pages(
+        self,
+        request: PipelineRequest,
+        files: list[Path],
+        work: Path,
+        emit: ProgressCallback,
+        timings: dict[str, float],
+    ) -> tuple[list[PageOCR], list[dict], float, float]:
+        """Read one folder and write one OCR cache per page.
+
+        This is the OCR half of ``run``, kept as one method because the
+        batch prefetch needs exactly this half and must leave the page
+        caches in a shape ``run`` will accept -- a second copy of this
+        loop would drift from the cache contract.  It stops before any
+        translator, renderer or llama-server slot.
+        """
+        pages: list[PageOCR] = []
+        # Pages no decoder could read.  They are reported at the end rather
+        # than raised: one corrupt file must not discard a whole book.
+        skipped: list[dict] = []
+        total = len(files)
+        stage_started = time.perf_counter()
+        if request.reviewed_transcript:
+            transcript_path = request.reviewed_transcript.expanduser().resolve()
+            payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+            # The transcript is the portable source of truth for a reviewed
+            # book. Explicit request terms still win when callers intentionally
+            # override one spelling for a new render.
+            glossary = merge_glossaries(payload.get("glossary"), dict(request.glossary or {}))
+            pages = [page_from_dict(item) for item in payload["pages"]]
+            self._validate_reviewed_pages(files, pages)
+            self._emit(
+                emit, "ocr", total, total, f"已导入审校稿 {transcript_path.name}"
+            )
+            return pages, skipped, 0.0, 0.0
+        cached_pages = [
+            self._load_cached_ocr(
+                work,
+                image_path,
+                index,
+                request.ocr_backend,
+                ocr_profile_for(request.quality_profile),
+                (
+                    request.ollama_ocr_model
+                    if request.ocr_backend in VISION_OCR_BACKENDS
+                    else ""
+                ),
+                request.source_language,
+            )
+            for index, image_path in enumerate(files, start=1)
+        ]
+        title_refinements = [
+            bool(
+                request.ocr_backend in {"builtin", "hybrid", "llama"}
+                and page is not None
+                and PaddleMangaOCR.is_cover_title_candidate(page)
+            )
+            for page in cached_pages
+        ]
+        ocr = None
+        if any(page is None for page in cached_pages) or any(title_refinements):
+            if request.ocr_backend == "builtin":
+                ocr = PaddleMangaOCR(
+                    self.paths,
+                    request.device,
+                    ocr_profile_for(request.quality_profile),
+                    request.source_language,
+                )
+            elif request.ocr_backend == "hybrid":
+                self._emit(emit, "ocr", 0, total, "检查本地视觉语义模型")
+                ensure_ollama_model(
+                    request.ollama_base_url, request.ollama_ocr_model
+                )
+                ocr = HybridMangaOCR(
+                    self.paths,
+                    request.ollama_base_url,
+                    request.ollama_ocr_model,
+                    request.device,
+                    ocr_profile_for(request.quality_profile),
+                    request.source_language,
+                )
+            elif request.ocr_backend == "llama":
+                # Same geometry+semantics split as hybrid; only the vision
+                # transport changes, so an A/B against hybrid differs in
+                # exactly one variable.
+                ocr = HybridMangaOCR(
+                    self.paths,
+                    "",
+                    source_language=request.source_language,
+                    device=request.device,
+                    profile=ocr_profile_for(request.quality_profile),
+                    semantics=self._llama_vision(request, emit),
+                )
+            elif request.ocr_backend == "ollama":
+                ocr = OllamaVisionOCR(
+                    request.ollama_base_url,
+                    request.ollama_ocr_model,
+                    source_language=request.source_language,
+                )
+            else:
+                raise ValueError(f"Unknown OCR backend: {request.ocr_backend}")
+        for index, (image_path, cached_page) in enumerate(
+            zip(files, cached_pages), start=1
+        ):
+            cache_updated = False
+            if cached_page is not None:
+                page = cached_page
+                if title_refinements[index - 1]:
+                    page = ocr.refine_cover_title(image_path, page)
+                    cache_updated = page is not cached_page
+                self._emit(
+                    emit, "ocr", index - 1, total, f"复用 OCR {image_path.name}"
+                )
+            else:
+                self._emit(emit, "ocr", index - 1, total, f"识别 {image_path.name}")
+                try:
+                    page = ocr.analyze(image_path, index)
+                except Exception as error:  # noqa: BLE001 - one page, not the book
+                    # A page nobody can decode is not a reason to throw away
+                    # the five hundred already read.  The repair in image_io
+                    # covers truncation; this covers everything else.
+                    skipped.append({"file": image_path.name, "error": str(error)})
+                    self._emit(
+                        emit,
+                        "ocr",
+                        index,
+                        total,
+                        f"跳过无法读取的第 {index} 页：{image_path.name}",
+                    )
+                    continue
+            # Every OCR backend shares the same non-story contract.  This
+            # also upgrades reusable OCR caches without rerunning models.
+            page = classify_non_story_text(page)
+            unsafe_missing = unsafe_semantic_missing(page, request.preserve_sfx)
+            if unsafe_missing:
+                texts = " / ".join(
+                    str(item.get("text", "")).strip() or "未识别文字"
+                    for item in unsafe_missing[:4]
+                )
+                raise RuntimeError(
+                    f"第 {index} 页发现未被精确检测框覆盖的文字：{texts}。"
+                    "质量模式拒绝猜测擦除区域，请更换 OCR 模型或重试。"
+                )
+            pages.append(page)
+            if cached_page is None or cache_updated:
+                page_payload = page.to_dict()
+                source_stat = image_path.stat()
+                page_payload["_cache"] = {
+                    "version": OCR_CACHE_VERSION,
+                    "ocr_backend": request.ocr_backend,
+                    "quality_profile": ocr_profile_for(request.quality_profile),
+                    "ocr_model": (
+                        request.ollama_ocr_model
+                        if request.ocr_backend in VISION_OCR_BACKENDS
+                        else ""
+                    ),
+                    "source_size": source_stat.st_size,
+                    "source_mtime_ns": source_stat.st_mtime_ns,
+                    "source_language": request.source_language,
+                }
+                (work / f"{image_path.stem}.ocr.json").write_text(
+                    json.dumps(page_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            timings["ocr"] = round(time.perf_counter() - stage_started, 1)
+            self._emit(emit, "ocr", index, total, f"已识别 {image_path.name}")
+        ocr_seconds = time.perf_counter() - stage_started
+        # Backends that run their own detector report how much of the stage
+        # was pure detection; the rest is reading.
+        detector = getattr(ocr, "stage_seconds", None)
+        detect_seconds = float(detector.get("detect", 0.0)) if detector else 0.0
+        return pages, skipped, ocr_seconds, detect_seconds
+
+    def prefetch(
+        self, request: PipelineRequest, callback: ProgressCallback | None = None
+    ) -> int:
+        """Read a folder into its OCR cache without touching the translator.
+
+        A batch runs this on a worker thread while the previous folder sits on
+        the GPU.  Only `.ocr.json` files are written: no draft, no render and
+        no llama slot, so the two folders can never fight over a model.
+        """
+        emit = callback or (lambda _phase, _current, _total, _message: None)
+        source = request.source.expanduser().resolve()
+        output = request.output.expanduser().resolve()
+        if source == output:
+            return 0
+        files = list_images(source)
+        if not files:
+            return 0
+        output.mkdir(parents=True, exist_ok=True)
+        work = output / ".manga-localizer-work"
+        work.mkdir(parents=True, exist_ok=True)
+        pages, _skipped, _ocr, _detect = self._read_pages(request, files, work, emit, {})
+        return len(pages)
+
     def run(
         self, request: PipelineRequest, callback: ProgressCallback | None = None
     ) -> dict:
@@ -378,10 +600,6 @@ class LocalizerPipeline:
         work = output / ".manga-localizer-work"
         work.mkdir(parents=True, exist_ok=True)
 
-        pages: list[PageOCR] = []
-        # Pages no decoder could read.  They are reported at the end rather
-        # than raised: one corrupt file must not discard a whole book.
-        skipped: list[dict] = []
         glossary = dict(request.glossary or {})
         total = len(files)
         # Wall-clock cost of each stage, kept in the job record so a finished
@@ -390,166 +608,26 @@ class LocalizerPipeline:
         # The job service reads this while the run is in flight, so the UI can
         # tick the stage clocks instead of waiting for the final result.
         self.live_timings = timings
-        # Bound before the branches below so the stage split can read it when
-        # a reviewed transcript skips the OCR backends entirely.
-        ocr = None
-        stage_started = time.perf_counter()
-        if request.reviewed_transcript:
-            transcript_path = request.reviewed_transcript.expanduser().resolve()
-            payload = json.loads(transcript_path.read_text(encoding="utf-8"))
-            # The transcript is the portable source of truth for a reviewed
-            # book. Explicit request terms still win when callers intentionally
-            # override one spelling for a new render.
-            glossary = merge_glossaries(payload.get("glossary"), glossary)
-            pages = [page_from_dict(item) for item in payload["pages"]]
-            self._validate_reviewed_pages(files, pages)
-            self._emit(
-                emit, "ocr", total, total, f"已导入审校稿 {transcript_path.name}"
-            )
-        else:
-            cached_pages = [
-                self._load_cached_ocr(
-                    work,
-                    image_path,
-                    index,
-                    request.ocr_backend,
-                    ocr_profile_for(request.quality_profile),
-                    (
-                        request.ollama_ocr_model
-                        if request.ocr_backend in VISION_OCR_BACKENDS
-                        else ""
-                    ),
-                    request.source_language,
-                )
-                for index, image_path in enumerate(files, start=1)
-            ]
-            title_refinements = [
-                bool(
-                    request.ocr_backend in {"builtin", "hybrid", "llama"}
-                    and page is not None
-                    and PaddleMangaOCR.is_cover_title_candidate(page)
-                )
-                for page in cached_pages
-            ]
-            ocr = None
-            if any(page is None for page in cached_pages) or any(title_refinements):
-                if request.ocr_backend == "builtin":
-                    ocr = PaddleMangaOCR(
-                        self.paths,
-                        request.device,
-                        ocr_profile_for(request.quality_profile),
-                        request.source_language,
-                    )
-                elif request.ocr_backend == "hybrid":
-                    self._emit(emit, "ocr", 0, total, "检查本地视觉语义模型")
-                    ensure_ollama_model(
-                        request.ollama_base_url, request.ollama_ocr_model
-                    )
-                    ocr = HybridMangaOCR(
-                        self.paths,
-                        request.ollama_base_url,
-                        request.ollama_ocr_model,
-                        request.device,
-                        ocr_profile_for(request.quality_profile),
-                        request.source_language,
-                    )
-                elif request.ocr_backend == "llama":
-                    # Same geometry+semantics split as hybrid; only the vision
-                    # transport changes, so an A/B against hybrid differs in
-                    # exactly one variable.
-                    ocr = HybridMangaOCR(
-                        self.paths,
-                        "",
-                        source_language=request.source_language,
-                        device=request.device,
-                        profile=ocr_profile_for(request.quality_profile),
-                        semantics=self._llama_vision(request, emit),
-                    )
-                elif request.ocr_backend == "ollama":
-                    ocr = OllamaVisionOCR(
-                        request.ollama_base_url,
-                        request.ollama_ocr_model,
-                        source_language=request.source_language,
-                    )
-                else:
-                    raise ValueError(f"Unknown OCR backend: {request.ocr_backend}")
-            for index, (image_path, cached_page) in enumerate(
-                zip(files, cached_pages), start=1
-            ):
-                cache_updated = False
-                if cached_page is not None:
-                    page = cached_page
-                    if title_refinements[index - 1]:
-                        page = ocr.refine_cover_title(image_path, page)
-                        cache_updated = page is not cached_page
-                    self._emit(
-                        emit, "ocr", index - 1, total, f"复用 OCR {image_path.name}"
-                    )
-                else:
-                    self._emit(emit, "ocr", index - 1, total, f"识别 {image_path.name}")
-                    try:
-                        page = ocr.analyze(image_path, index)
-                    except Exception as error:  # noqa: BLE001 - one page, not the book
-                        # A page nobody can decode is not a reason to throw away
-                        # the five hundred already read.  The repair in image_io
-                        # covers truncation; this covers everything else.
-                        skipped.append({"file": image_path.name, "error": str(error)})
-                        self._emit(
-                            emit,
-                            "ocr",
-                            index,
-                            total,
-                            f"跳过无法读取的第 {index} 页：{image_path.name}",
-                        )
-                        continue
-                # Every OCR backend shares the same non-story contract.  This
-                # also upgrades reusable OCR caches without rerunning models.
-                page = classify_non_story_text(page)
-                unsafe_missing = unsafe_semantic_missing(page, request.preserve_sfx)
-                if unsafe_missing:
-                    texts = " / ".join(
-                        str(item.get("text", "")).strip() or "未识别文字"
-                        for item in unsafe_missing[:4]
-                    )
-                    raise RuntimeError(
-                        f"第 {index} 页发现未被精确检测框覆盖的文字：{texts}。"
-                        "质量模式拒绝猜测擦除区域，请更换 OCR 模型或重试。"
-                    )
-                pages.append(page)
-                if cached_page is None or cache_updated:
-                    page_payload = page.to_dict()
-                    source_stat = image_path.stat()
-                    page_payload["_cache"] = {
-                        "version": OCR_CACHE_VERSION,
-                        "ocr_backend": request.ocr_backend,
-                        "quality_profile": ocr_profile_for(request.quality_profile),
-                        "ocr_model": (
-                            request.ollama_ocr_model
-                            if request.ocr_backend in VISION_OCR_BACKENDS
-                            else ""
-                        ),
-                        "source_size": source_stat.st_size,
-                        "source_mtime_ns": source_stat.st_mtime_ns,
-                        "source_language": request.source_language,
-                    }
-                    (work / f"{image_path.stem}.ocr.json").write_text(
-                        json.dumps(page_payload, ensure_ascii=False, indent=2),
-                        encoding="utf-8",
-                    )
-                timings["ocr"] = round(time.perf_counter() - stage_started, 1)
-                self._emit(emit, "ocr", index, total, f"已识别 {image_path.name}")
-
-        ocr_seconds = time.perf_counter() - stage_started
-        # Backends that run their own detector report how much of the stage
-        # was pure detection; the rest is reading.
-        detector = getattr(ocr, "stage_seconds", None) if not request.reviewed_transcript else None
-        detect_seconds = float(detector.get("detect", 0.0)) if detector else 0.0
+        pages, skipped, ocr_seconds, detect_seconds = self._read_pages(
+            request, files, work, emit, timings
+        )
         timings["detect"] = round(detect_seconds, 1)
         # An English page reads through one combined pass, so there is no
         # standalone detection to report.  Saying "0.0s" made that look broken;
         # the renderer labels this stage as folded into the read instead.
         timings["detect_folded"] = 0.0 if detect_seconds > 0.0 else 1.0
         timings["ocr"] = round(ocr_seconds - detect_seconds, 1)
+        # The CPU is about to go idle: everything from here to the end of the
+        # render runs on a GPU backend.  A batch installs ``prefetch_next``
+        # here so it can start reading the *next* folder in its own thread
+        # while this one translates; the callback owns its own pages and its
+        # failure can never fail this book.
+        prefetch = getattr(self, "prefetch_next", None)
+        if prefetch is not None:
+            try:
+                prefetch()
+            except Exception:  # noqa: BLE001 - a prefetch is never required
+                pass
         stage_started = time.perf_counter()
         resumed = self._resume_translations(work, pages, request.target_language)
         if resumed:
@@ -984,6 +1062,7 @@ def request_from_settings(
         context_pages=settings.context_pages,
         preserve_sfx=settings.preserve_sfx,
         preserve_text_color=settings.preserve_text_color,
+        enable_pipeline_parallel=settings.enable_pipeline_parallel,
         quality_profile=settings.quality_profile,
         output_format=settings.output_format,
         device=settings.device,

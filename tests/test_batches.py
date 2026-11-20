@@ -10,6 +10,22 @@ from manga_localizer.api import create_app
 from manga_localizer.batches import BatchStore, make_task
 from manga_localizer.config import AppPaths
 
+import pytest
+from manga_localizer import llama_server
+
+
+@pytest.fixture(autouse=True)
+def _no_server_hold_survives_a_test():
+    """A cancelled batch can leave its worker inside ``hold_llama_servers``.
+
+    That counter is process wide, so a folder still unwinding here would keep
+    the next module's servers alive and its assertions would see slots nobody
+    asked for.  Resetting it makes the late decrement harmless.
+    """
+    yield
+    llama_server.stop_llama_servers()
+    llama_server._HOLD_COUNT = 0
+
 
 class FakePipeline:
     def __init__(self, paths):
@@ -34,6 +50,20 @@ class FlakyPipeline(FakePipeline):
         if request.source.name == self.failing:
             callback("ocr", 1, 1, request.source.name)
             raise RuntimeError("OCR exploded")
+        return super().run(request, callback)
+
+
+class ClocksPipeline(FakePipeline):
+    """Reports a running clock and then waits, so a snapshot can catch it."""
+
+    def __init__(self, paths):
+        super().__init__(paths)
+        self.live_timings = {"ocr": 1.5}
+
+    def run(self, request, callback):
+        self.live_timings["ocr"] = 2.5
+        callback("ocr", 1, 2, request.source.name)
+        time.sleep(0.3)
         return super().run(request, callback)
 
 
@@ -92,6 +122,91 @@ def wait_for_running_task(client, batch_id, index=0, timeout=5.0):
             return batch
         time.sleep(0.01)
     raise AssertionError(f"folder never started: {batch}")
+
+
+def test_a_queued_folder_shows_the_clock_of_the_job_that_is_running(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=ClocksPipeline))
+    folders = [make_folder(tmp_path, name) for name in ("chapter-01", "chapter-02")]
+
+    response = start_batch(client, folders, tmp_path / "out")
+    assert response.status_code == 200
+    batch_id = response.json()["id"]
+    # Read while the folder is mid-run: the clock is on its own row, straight
+    # from the job record, long before a finished result could carry it.
+    deadline = time.time() + 5.0
+    running = None
+    while time.time() < deadline:
+        batch = client.get(f"/api/jobs/{batch_id}").json()
+        running = next(
+            (task for task in batch["tasks"] if task["status"] == "running"), None
+        )
+        if running and running.get("timings"):
+            break
+        time.sleep(0.01)
+    assert running is not None
+    assert running["timings"] == {"ocr": 2.5}
+    assert isinstance(running["timings_at"], float)
+    wait_for_batch(client, batch_id)
+
+
+def test_the_read_ahead_only_fires_for_a_gpu_backend_and_the_manga_eraser():
+    from manga_localizer.pipeline import pipeline_parallel_ready
+
+    assert pipeline_parallel_ready(True, "llama", "aot-manga") is True
+    assert pipeline_parallel_ready(True, "llama_7b", "aot-manga") is True
+    assert pipeline_parallel_ready(True, "online", "aot-manga") is True
+    # A CPU translator would fight the reader for the same cores.
+    assert pipeline_parallel_ready(True, "builtin", "aot-manga") is False
+    assert pipeline_parallel_ready(True, "ollama", "aot-manga") is False
+    # A CPU eraser keeps the CPU busy through the render stage.
+    assert pipeline_parallel_ready(True, "llama", "lama-manga") is False
+    assert pipeline_parallel_ready(False, "llama", "aot-manga") is False
+
+
+def test_the_next_folder_is_read_while_this_one_translates(tmp_path):
+    """The swap is real: the second folder's pages are read during the first."""
+
+    class OverlapPipeline(FakePipeline):
+        shared: list = []
+
+        def prefetch(self, request, callback=None):
+            OverlapPipeline.shared.append(("prefetch", request.source.name))
+            request.output.mkdir(parents=True, exist_ok=True)
+            (request.output / ".manga-localizer-work").mkdir(parents=True, exist_ok=True)
+            return 1
+
+        def run(self, request, callback):
+            OverlapPipeline.shared.append(("run", request.source.name))
+            hook = getattr(self, "prefetch_next", None)
+            if hook is not None:
+                hook()
+            return super().run(request, callback)
+
+    OverlapPipeline.shared = []
+    client = TestClient(
+        create_app(make_paths(tmp_path), pipeline_factory=OverlapPipeline)
+    )
+    folders = [make_folder(tmp_path, name) for name in ("chapter-01", "chapter-02")]
+    app_client = client.post(
+        "/api/batches",
+        json={
+            "source": [str(path) for path in folders],
+            "output": str(tmp_path / "out"),
+            "inference_backend": "llama",
+            "erase_model": "aot-manga",
+            "enable_pipeline_parallel": True,
+        },
+    )
+    assert app_client.status_code == 200
+    wait_for_batch(client, app_client.json()["id"])
+
+    kinds = [kind for kind, _name in OverlapPipeline.shared]
+    # The second folder is read before it is run, i.e. while the first one is
+    # still translating, which is the whole point of the switch.
+    assert kinds.count("prefetch") >= 1
+    assert OverlapPipeline.shared.index(("prefetch", "chapter-02")) < (
+        OverlapPipeline.shared.index(("run", "chapter-02"))
+    )
 
 
 def test_a_failing_folder_is_recorded_and_the_rest_still_run(tmp_path):

@@ -61,6 +61,7 @@ class SettingsPayload(BaseModel):
     context_pages: int = Field(6, ge=0, le=12)
     preserve_sfx: bool = False
     preserve_text_color: bool = True
+    enable_pipeline_parallel: bool = False
     quality_profile: Literal[
         "quality", "fast", "fast_translate_quality_render"
     ] = "quality"
@@ -682,6 +683,7 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
             "context_pages": payload.context_pages,
             "preserve_sfx": payload.preserve_sfx,
             "preserve_text_color": payload.preserve_text_color,
+            "enable_pipeline_parallel": payload.enable_pipeline_parallel,
             "quality_profile": payload.quality_profile,
             "output_format": payload.output_format,
             "device": payload.device,

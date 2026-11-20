@@ -1,3 +1,15 @@
+## 0.13.13 - 2026-11-20
+
+- A folder that is already drawing leaves its cores to the queue: the next folder's
+  pages are read ahead in a separate process, which shares no interpreter lock with
+  the translation and rendering that own the GPU.
+- The read-ahead is opt-in and only arms itself when the translator runs off-process
+  (llama.cpp or a hosted API) and the eraser is the AOT model; on a CPU translator the
+  two stages want the same cores, so the switch stays sequential and the settings page
+  says so.
+- A running folder's stage clocks now reach the queue as well as the single-job view, so
+  the four steps no longer sit empty while a batch works through its folders.
+
 ## 0.13.12 - 2026-11-19
 
 - Hand PaddleX the decoded pixels instead of the page path. Its reader reopened

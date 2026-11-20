@@ -7,6 +7,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from .config import AppPaths
 from .llama_server import release_llama_servers
@@ -234,9 +235,18 @@ class JobService:
             self._gates[job["id"]] = _JobGate()
         return job
 
-    def start(self, job_id: str, request: PipelineRequest):
-        """Hand an already-created record to the single worker thread."""
-        return self.executor.submit(self._run, job_id, request)
+    def start(
+        self,
+        job_id: str,
+        request: PipelineRequest,
+        prepare: Callable[[object], None] | None = None,
+    ):
+        """Hand an already-created record to the single worker thread.
+
+        `prepare` receives the pipeline instance just before it starts, which
+        is where a batch hooks the read-ahead of the folder behind this one.
+        """
+        return self.executor.submit(self._run, job_id, request, prepare)
 
     def discard(self, job_id: str) -> None:
         """Forget the gate of a record that will never be started.
@@ -301,7 +311,12 @@ class JobService:
         self.store.save(job)
         return job
 
-    def _run(self, job_id: str, request: PipelineRequest) -> None:
+    def _run(
+        self,
+        job_id: str,
+        request: PipelineRequest,
+        prepare: Callable[[object], None] | None = None,
+    ) -> None:
         job = self.store.get(job_id)
         if job is None:
             return
@@ -324,6 +339,12 @@ class JobService:
             self.store.save(job)
 
         pipeline = self.pipeline_factory(self.paths)
+        if prepare is not None:
+            # A read-ahead is an optimisation; the book must run without one.
+            try:
+                prepare(pipeline)
+            except Exception:  # noqa: BLE001
+                pass
 
         def progress(phase: str, current: int, total: int, message: str) -> None:
             # Blocking here is the pause: it is the narrowest point between

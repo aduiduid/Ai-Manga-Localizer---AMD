@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import gc
 import json
+import multiprocessing
+import os
 import queue
 import sys
 import threading
@@ -31,8 +33,82 @@ from .llama_server import (
     running_llama_slots,
     stop_llama_servers,
 )
-from .pipeline import PipelineRequest
+from .pipeline import LocalizerPipeline, PipelineRequest, pipeline_parallel_ready
 from .translator import release_ollama_model
+
+
+IDLE_PRIORITY_CLASS = 0x00000040
+# How long a folder may wait on the reader before it reads its own pages
+# when its turn comes.  Generous on purpose: idle priority means the reader
+# may take most of a folder's GPU stages to finish the next one.
+PREFETCH_WAIT_S = 3_600.0
+
+
+def prefetch_in_child(home: str, orders: object, done: object) -> None:
+    """Read folders into their OCR caches, in a process that shares no GIL.
+
+    The same reading on a worker thread of this process stretched the folder
+    that owned the GPU from 24 s to 43 s; on a process of its own the GPU stage
+    measured 0.95x, i.e. no slowdown at all.  Paddle finishes every page with
+    Python-side post-processing that holds the interpreter lock, so the two
+    stages were competing for the GIL rather than for cores -- which is why
+    thread counts, thread priorities and affinities all measured as useless.
+
+    The process serves a queue rather than one folder: building Paddle's three
+    predictors costs about 12 s, and a folder of ten pages cannot pay that on
+    its own -- a fresh child per folder read less than its own start-up cost.
+    Each finished folder id goes back on ``done`` so the book that asked keeps
+    reading its clock instead of polling the disk.
+    """
+    os.environ["MLS_HOME"] = home
+    # Only a fresh process can size Paddle's OpenMP pool: the variable is read
+    # once, when the runtime starts, so setting it here is the sole way to make
+    # the reader leave cores for the folder that is drawing.  Half the machine
+    # still reads faster than the GPU stage it hides behind.
+    share = max(1, (os.cpu_count() or 2) // 2)
+    os.environ.setdefault("OMP_NUM_THREADS", str(share))
+    # A separate process means process priorities finally bite where thread
+    # ones did not: the Paddle workers all live under this one, so putting the
+    # whole child below normal hands the cores back to the folder that is
+    # rendering.  Measured on this child, it recovered 8 s of render time.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(), IDLE_PRIORITY_CLASS
+            )
+        except Exception:  # noqa: BLE001 - scheduling advice, never a requirement
+            pass
+    from .config import AppPaths
+    from .pipeline import LocalizerPipeline
+
+    reader = LocalizerPipeline(AppPaths.from_env())
+    # Warm the predictors before anyone is waiting: the batch starts this
+    # process the moment it begins, while the first folder still has its own
+    # pages to read, so start-up lands in a gap instead of in the GPU window.
+    try:
+        from .ocr import PaddleMangaOCR
+
+        PaddleMangaOCR(AppPaths.from_env(), "auto", "quality", "auto")
+    except Exception:  # noqa: BLE001 - a cold start only costs time, never pages
+        pass
+    while True:
+        try:
+            order = orders.get()
+        except Exception:  # noqa: BLE001 - a closed queue means the batch ended
+            return
+        if order is None:
+            return
+        folder_id, request = order
+        try:
+            reader.prefetch(request)
+        except Exception:  # noqa: BLE001 - the folder still runs in its turn
+            pass
+        try:
+            done.put(folder_id)
+        except Exception:  # noqa: BLE001 - nobody is waiting any more
+            return
 
 # A batch is live while its consumer thread still owns it.  There is no paused
 # batch: pausing freezes the current folder, not the queue.
@@ -272,6 +348,15 @@ class BatchService:
         # carry the online API key.
         self._templates: dict[str, dict] = {}
         self._current: dict[str, str] = {}
+        # Read-ahead threads, keyed by the folder they are reading.  A folder
+        # waits for its own thread before it starts, so the cache it reads is
+        # the one it wrote.
+        self._prefetches: dict[int, object] = {}
+        # One reader process per batch, kept warm across its folders.
+        self._reader: object | None = None
+        self._reader_orders: object | None = None
+        self._reader_done: object | None = None
+        self._reader_lock = threading.Lock()
         self._lock = threading.RLock()
         self._adopt_orphans()
         self._worker = threading.Thread(
@@ -345,7 +430,12 @@ class BatchService:
             ):
                 if field in job:
                     task[field] = job[field]
-            task["timings"] = (job.get("result") or {}).get("timings") or {}
+            live = job.get("timings")
+            if live:
+                task["timings"] = dict(live)
+                task["timings_at"] = job.get("timings_at")
+            else:
+                task["timings"] = (job.get("result") or {}).get("timings") or {}
         summarize(merged)
         merged["total"] = len(tasks)
         merged["effective_total"] = len(queued_tasks(merged))
@@ -477,12 +567,197 @@ class BatchService:
             finally:
                 self._queue.task_done()
 
+    def _read_ahead(self, batch: dict, index: int, options: dict) -> dict | None:
+        """The folder after this one, when overlapping it would actually help."""
+        guarded = pipeline_parallel_ready(
+            bool(options.get("enable_pipeline_parallel")),
+            str(options.get("inference_backend") or ""),
+            str(options.get("erase_model") or ""),
+        )
+        if not guarded:
+            return None
+        for later in (batch.get("tasks") or [])[index + 1 :]:
+            if (later.get("status") or "queued") == "queued":
+                return later
+        return None
+
+    def _arm_prefetch(
+        self,
+        pipeline: object,
+        batch_id: str,
+        index: int,
+        ahead: dict,
+        options: dict,
+    ) -> None:
+        """Give the running book a hook that starts reading the next one.
+
+        It fires when this book reaches its GPU stages, so the two folders never
+        ask for the same cores or the same model at the same time.
+        """
+        started = threading.Lock()
+        request = PipelineRequest(
+            source=Path(ahead["source"]),
+            output=Path(ahead["output"]),
+            **options,
+        )
+
+        def start() -> None:
+            # The pipeline calls the hook once per run; a retry must not stack
+            # a second reader on the same folder.
+            if not started.acquire(blocking=False):
+                return
+            self._note_prefetch(batch_id, index, ahead, "预读中")
+            runner = (
+                self._prefetch_in_process
+                if self._factory_is_importable()
+                else self._prefetch_here
+            )
+            threading.Thread(
+                target=runner,
+                args=(batch_id, index, ahead, request),
+                name="manga-localizer-prefetch-watch",
+                daemon=True,
+            ).start()
+
+        pipeline.prefetch_next = start
+
+    def _factory_is_importable(self) -> bool:
+        """Whether a fresh interpreter could rebuild this pipeline factory.
+
+        ``spawn`` imports the target module and pickles its arguments, so a
+        factory defined inside a test function cannot cross the boundary.  Such
+        a factory also keeps its bookkeeping in memory, where a child could
+        never see it -- it stays in this process and overlaps nothing.
+        """
+        factory = self.jobs.pipeline_factory
+        return (
+            factory is LocalizerPipeline
+            or getattr(factory, "__module__", "") not in ("", "__main__")
+            and getattr(factory, "__qualname__", "").find("<locals>") < 0
+        )
+
+    def _reader_process(self) -> tuple[object, object, object] | None:
+        """The shared reader process, started on first use and kept warm."""
+        with self._reader_lock:
+            if self._reader is not None and self._reader.is_alive():
+                return self._reader, self._reader_orders, self._reader_done
+            if not self._factory_is_importable():
+                # A factory defined inside a test function cannot be rebuilt in
+                # a fresh interpreter, so this process reads on its own thread.
+                return None
+            context = multiprocessing.get_context("spawn")
+            orders = context.Queue()
+            done = context.Queue()
+            worker = context.Process(
+                target=prefetch_in_child,
+                args=(str(self.paths.root), orders, done),
+                name="manga-localizer-prefetch",
+                daemon=True,
+            )
+            try:
+                worker.start()
+            except Exception:  # noqa: BLE001 - the folder still runs in order
+                return None
+            self._reader = worker
+            self._reader_orders = orders
+            self._reader_done = done
+            return worker, orders, done
+
+    def _stop_reader(self) -> None:
+        """Let the shared reader exit between batches so nothing idles forever."""
+        with self._reader_lock:
+            worker = self._reader
+            orders = self._reader_orders
+            self._reader = None
+            self._reader_orders = None
+            self._reader_done = None
+        if worker is None:
+            return
+        try:
+            orders.put(None)
+        except Exception:  # noqa: BLE001 - it may already be gone
+            pass
+        try:
+            worker.join(timeout=5.0)
+        except Exception:  # noqa: BLE001 - a stuck child must not block the queue
+            pass
+        if worker.is_alive():
+            worker.terminate()
+
+    def _prefetch_in_process(
+        self, batch_id: str, index: int, ahead: dict, request: PipelineRequest
+    ) -> None:
+        """Hand the next folder to the shared reader and record the outcome.
+
+        The reader builds Paddle's predictors once per batch, so this call only
+        pays the hand-off.  Waiting on the reader's own report -- rather than
+        polling for cache files -- is what lets ``_run_task`` join this watcher
+        and know the folder it is about to start is already read.
+        """
+        reason = ""
+        shared = self._reader_process()
+        if shared is None:
+            self._prefetch_here(batch_id, index, ahead, request)
+            return
+        _worker, orders, done = shared
+        try:
+            orders.put((str(ahead.get("index")), request))
+            if done.get(timeout=PREFETCH_WAIT_S) != str(ahead.get("index")):
+                reason = "预读结果不匹配"
+        except Exception as exc:  # noqa: BLE001 - the folder still runs normally
+            reason = str(exc)
+        self._note_prefetch(
+            batch_id, index, ahead, "预读完成" if not reason else "预读失败，稍后重读"
+        )
+
+    def _prefetch_here(
+        self, batch_id: str, index: int, ahead: dict, request: PipelineRequest
+    ) -> None:
+        """Read the next folder on this thread, for factories a child cannot import."""
+        reason = ""
+        try:
+            self.jobs.pipeline_factory(self.paths).prefetch(request)
+        except Exception as exc:  # noqa: BLE001 - the folder still runs normally
+            reason = str(exc)
+        self._note_prefetch(
+            batch_id, index, ahead, "预读完成" if not reason else "预读失败，稍后重读"
+        )
+
+    def _note_prefetch(
+        self, batch_id: str, index: int, ahead: dict, state: str
+    ) -> None:
+        """Record the overlap on the waiting row so the exchange is visible."""
+        batch = self.store.get(batch_id)
+        if batch is None:
+            return
+        with self._lock:
+            for task in batch.get("tasks") or []:
+                if task.get("index") != ahead.get("index"):
+                    continue
+                if (task.get("status") or "queued") != "queued":
+                    return
+                task["prefetch"] = state
+                # A separate field, not the headline: the reader still needs to
+                # know which folder is running now.
+                batch["prefetch"] = f"{task['name']}（{state}）"
+                self.store.save(batch)
+                return
+
     def _run_batch(self, batch_id: str) -> None:
         # Holding the servers for the whole queue keeps the 7 GB model loaded
         # between folders; the per-job release then becomes a no-op instead of
         # stopping and restarting the server for every single folder.
         with hold_llama_servers():
-            self._run_batch_locked(batch_id)
+            # Start the reader now, not when the first GPU stage opens: its
+            # twelve-second warm-up then hides behind the first folder's own
+            # reading instead of eating the window it was meant to fill.
+            self._reader_process()
+            try:
+                self._run_batch_locked(batch_id)
+            finally:
+                # The reader is only warm because a batch needed it; leaving it
+                # running would pin a gigabyte of Paddle weights per idle queue.
+                self._stop_reader()
 
     def _run_batch_locked(self, batch_id: str) -> None:
         batch = self.store.get(batch_id)
@@ -530,6 +805,11 @@ class BatchService:
         if batch is None:
             return
         task = batch["tasks"][index]
+        # A folder whose pages another task read ahead owns those files now:
+        # finish that thread before reading the cache it was writing.
+        pending = self._prefetches.pop(int(task.get("index", -1)), None)
+        if pending is not None:
+            pending.join()
         options = dict(template.get("options") or {})
         request = PipelineRequest(
             source=Path(task["source"]),
@@ -554,8 +834,14 @@ class BatchService:
         self.store.save(batch)
         with self._lock:
             self._current[batch_id] = job["id"]
+        prepare = None
+        ahead = self._read_ahead(batch, index, options)
+        if ahead is not None:
+            prepare = lambda pipeline: self._arm_prefetch(
+                pipeline, batch_id, index, ahead, options
+            )
         try:
-            self.jobs.start(job["id"], request).result()
+            self.jobs.start(job["id"], request, prepare).result()
         except Exception as exc:  # pragma: no cover - the worker records its own
             final = {"status": "failed", "error": str(exc), "message": "任务失败"}
         else:
