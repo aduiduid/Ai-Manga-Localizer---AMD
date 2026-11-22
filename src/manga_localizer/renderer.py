@@ -423,7 +423,22 @@ TEXT_PADDING_MIN = 2
 # enough that the Chinese reads.  Only for that case -- see ``_draw``.
 PLATE_FILL = (255, 255, 255, 150)
 PLATE_PADDING = 3
-PLATE_RADIUS = 6
+# Corner radius of the card under spilled type.  It scales with the card's own
+# height instead of being a fixed 6 px: on a one-line card 6 px is already most
+# of the height and reads as a pill, while on a five-line card the same 6 px
+# barely rounds the corner at all.  A quarter of the height, clamped, keeps the
+# same visual weight whatever the card's size.
+PLATE_RADIUS_RATIO = 0.25
+PLATE_RADIUS_MIN = 4
+PLATE_RADIUS_MAX = 14
+
+
+def plate_radius(span: tuple[int, int, int, int]) -> int:
+    """Corner radius for a card covering ``span`` (left, top, right, bottom)."""
+    height = max(1, span[3] - span[1])
+    return int(
+        min(PLATE_RADIUS_MAX, max(PLATE_RADIUS_MIN, round(height * PLATE_RADIUS_RATIO)))
+    )
 
 
 def _text_padding(box: list[int]) -> tuple[int, int]:
@@ -1489,15 +1504,14 @@ class ArtworkPreservingRenderer:
                     draw.textbbox((x, y), line, font=font, stroke_width=stroke)
                     for (x, y), line in zip(placed, lines)
                 ]
+                card = (
+                    min(span[0] for span in spans) - PLATE_PADDING,
+                    min(span[1] for span in spans) - PLATE_PADDING,
+                    max(span[2] for span in spans) + PLATE_PADDING,
+                    max(span[3] for span in spans) + PLATE_PADDING,
+                )
                 draw.rounded_rectangle(
-                    [
-                        min(span[0] for span in spans) - PLATE_PADDING,
-                        min(span[1] for span in spans) - PLATE_PADDING,
-                        max(span[2] for span in spans) + PLATE_PADDING,
-                        max(span[3] for span in spans) + PLATE_PADDING,
-                    ],
-                    radius=PLATE_RADIUS,
-                    fill=PLATE_FILL,
+                    list(card), radius=plate_radius(card), fill=PLATE_FILL
                 )
             for (x, y), line in zip(placed, lines):
                 draw.text(

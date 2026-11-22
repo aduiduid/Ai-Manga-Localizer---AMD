@@ -447,20 +447,31 @@ class LocalizerPipeline:
         ]
         ocr = None
         if any(page is None for page in cached_pages) or any(title_refinements):
-            if request.ocr_backend in {"builtin", "hayai"}:
+            if request.ocr_backend in {"builtin", "hayai", "hayai_force"}:
                 # Same detector, same geometry, different recogniser: Hayai reads
                 # a whole bubble in one pass, which is the only stage that
                 # changes and therefore the only stage that can differ.
+                #
+                # ``hayai`` keeps the language dispatch (Paddle reads Latin,
+                # Hayai reads Japanese).  ``hayai_force`` hands every page to
+                # Hayai, which is what a user asks for when a Latin font defeats
+                # Paddle's recogniser.
                 reader = None
-                if request.ocr_backend == "hayai":
+                force = request.ocr_backend == "hayai_force"
+                if request.ocr_backend in {"hayai", "hayai_force"}:
                     self._emit(emit, "ocr", 0, total, "加载 Hayai OCR 识别器")
-                    reader = self._hayai_reader(request, emit, total)
+                    # Explicitly chosen, so a missing model is an error, not a
+                    # silent downgrade to a reader the user did not ask for.
+                    reader = self._hayai_reader(request, emit, total, strict=True)
+                    if force:
+                        emit("ocr", 0, total, "[OCR] 强制使用 Hayai 识别器（全量）")
                 ocr = PaddleMangaOCR(
                     self.paths,
                     request.device,
                     ocr_profile_for(request.quality_profile),
                     request.source_language,
                     reader=reader,
+                    force_reader=force,
                 )
             elif request.ocr_backend == "hybrid":
                 self._emit(emit, "ocr", 0, total, "检查本地视觉语义模型")
@@ -1005,34 +1016,57 @@ class LocalizerPipeline:
         request: PipelineRequest,
         emit: ProgressCallback,
         total: int,
+        strict: bool = False,
     ):
         """Hayai's recogniser, or None so the caller keeps MangaOCR.
 
-        A missing model or package is a warning, never a failed book: every
-        other rule on the page works with the reader the project already has.
+        ``strict`` is for a backend the user chose on purpose: then a missing
+        model or an unloadable graph is that choice failing, and saying so is the
+        honest answer -- quietly reading with MangaOCR would report success for
+        a run that did not do what was asked.
         """
         from .config import HAYAI_OCR_DIR
         from .ocr import HayaiOCRReader
 
         model_dir = self.paths.models / HAYAI_OCR_DIR
-        if not (model_dir / "hayai_prefill_int8.onnx").is_file():
+        missing = not (model_dir / "hayai_prefill_int8.onnx").is_file()
+        if missing:
+            if strict:
+                raise ValueError(
+                    f"已选择 Hayai OCR，但模型文件缺失：{model_dir}。"
+                    "请把 hayai_prefill_int8.onnx / hayai_decode_int8.onnx 等文件放入该目录，"
+                    "或改选其他 OCR 后端。"
+                )
             self._emit(
                 emit, "ocr", 0, total,
                 "未找到 Hayai 模型，本次使用内置 MangaOCR",
             )
             return None
         try:
-            return HayaiOCRReader(
+            reader = HayaiOCRReader(
                 model_dir,
                 request.device,
                 log=lambda message: self._emit(emit, "ocr", 0, total, message),
             )
-        except Exception as exc:  # noqa: BLE001 - a reader is an optimisation
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            if strict:
+                raise ValueError(
+                    f"已选择 Hayai OCR，但识别器加载失败（{type(exc).__name__}: {exc}）。"
+                    "请检查 onnxruntime 是否提供 CPUExecutionProvider，以及模型文件是否完整。"
+                ) from exc
             self._emit(
                 emit, "ocr", 0, total,
                 f"Hayai 不可用（{type(exc).__name__}），本次使用内置 MangaOCR",
             )
             return None
+        if reader.provider != "DmlExecutionProvider":
+            # Said once per run, on the page the user will read, rather than
+            # buried in the reader's own log line.
+            self._emit(
+                emit, "ocr", 0, total,
+                "注：Hayai 在当前环境仅支持 CPU 运行，速度依然极快",
+            )
+        return reader
 
     def _llama_vision(
         self,

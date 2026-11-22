@@ -1673,6 +1673,7 @@ class PaddleMangaOCR:
         profile: str = "quality",
         source_language: str = "auto",
         reader=None,
+        force_reader: bool = False,
     ):
         configure_model_caches(paths)
         try:
@@ -1730,6 +1731,12 @@ class PaddleMangaOCR:
             # else: every detector box, recovery rule and dedup pass below is
             # shared, so switching readers cannot change the page geometry.
             self.reader = reader
+            # ``force_reader`` is the difference between "use this reader where a
+            # reader is consulted" and "this reader owns the page".  The Latin
+            # dispatch below exists because MangaOCR invents kana for English;
+            # a reader the user picked on purpose must not be second-guessed, so
+            # the backend that selects Hayai for every page sets this.
+            self.force_reader = bool(force_reader)
         else:
             self.reader = MangaOcr(force_cpu=manga_force_cpu(device, torch_cuda))
 
@@ -2212,7 +2219,17 @@ class PaddleMangaOCR:
             # carries a recognized string from one of the two passes.
             if not paddle_text and _area(box) < 4_000:
                 continue
-            if self._declared_language() == "en":
+            if getattr(self, "force_reader", False):
+                # The user picked this reader for every page, so neither the
+                # declared-language shortcut nor the Latin dispatch may override
+                # it.  An empty reading still means "no text here": the reader is
+                # the only opinion being consulted, so there is nothing to fall
+                # back to that would be more trustworthy.
+                forced_text = self.reader(crop).strip()
+                if not forced_text:
+                    continue
+                refined = forced_text
+            elif self._declared_language() == "en":
                 # A declared English book never needs the Japanese recognizer:
                 # given Latin bubbles it invents fluent kana, and given artwork it
                 # invents dates.  Paddle's own reading is the original text, so a
@@ -2222,7 +2239,9 @@ class PaddleMangaOCR:
                 refined = paddle_text
             else:
                 manga_text = self.reader(crop).strip()
-                if self._reads_latin(paddle_text, paddle_score):
+                if getattr(self, "force_reader", False) and manga_text:
+                    refined = manga_text
+                elif self._reads_latin(paddle_text, paddle_score):
                     refined = paddle_text
                 elif JP_RE.search(manga_text):
                     # Large display lettering can defeat both Paddle passes, so the

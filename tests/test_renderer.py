@@ -1253,3 +1253,18 @@ def test_a_line_that_stayed_in_its_box_gets_no_plate():
     )
     # It stayed inside its detector box, so nothing spilled.
     assert [int(round(v)) for v in box] == unit.bbox
+
+
+def test_the_plate_corner_scales_with_the_card():
+    """A fixed radius reads as a pill on a one-line card and vanishes on a tall one."""
+    from manga_localizer.renderer import (
+        PLATE_RADIUS_MAX,
+        PLATE_RADIUS_MIN,
+        plate_radius,
+    )
+
+    short = plate_radius((0, 0, 100, 12))
+    tall = plate_radius((0, 0, 100, 120))
+    assert PLATE_RADIUS_MIN <= short < tall <= PLATE_RADIUS_MAX
+    # A card shorter than the minimum still gets a drawable radius, not zero.
+    assert plate_radius((0, 0, 60, 1)) >= PLATE_RADIUS_MIN

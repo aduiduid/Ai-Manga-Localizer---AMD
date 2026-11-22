@@ -1,3 +1,27 @@
+## 0.13.17 - 2026-11-22
+
+- New ``ocr_backend="hayai_force"``: Hayai reads every page, English included.
+  The ``hayai`` backend keeps the language dispatch (Paddle reads Latin, Hayai
+  reads Japanese), which is right by default and useless when a particular Latin
+  font is what defeats Paddle's recogniser.  A reader the user picked on purpose
+  is no longer second-guessed: ``force_reader`` skips both the declared-English
+  shortcut and the per-group Latin dispatch, and the run logs
+  ``[OCR] 强制使用 Hayai 识别器（全量）`` so the choice is visible in the log.
+  Measured on page 6 of the English sample: the dispatch backend calls the reader
+  0 times for its 9 units, the forced backend calls it 9 times.
+- A forced Hayai run fails loudly instead of downgrading.  Selecting Hayai and
+  silently reading with MangaOCR reports success for work that did not happen, so
+  a missing model or an unloadable graph now raises with the directory and the
+  reason.  The ``hayai`` backend keeps its warning-and-continue behaviour, which
+  is right for an optional optimisation.
+- The OCR select says so when Hayai can only run on CPU: "on some AMD setups the
+  Hayai model runs on CPU only, where it is still very fast".  The pipeline emits
+  the same note once when DirectML is unavailable, so the limitation appears in
+  both the UI and the log rather than only in the reader's own output.
+- The plate's corner radius scales with the card instead of being a fixed 6 px:
+  4 px at one line of text, 14 px from four lines up.  The fixed value was most
+  of a short card's height and nearly invisible on a tall one.
+
 ## 0.13.16 - 2026-11-22
 
 - Every translated line no longer gets a translucent plate. The flag that turns

@@ -77,7 +77,7 @@ class SettingsPayload(BaseModel):
     # Percent, so a hand-edited settings.json cannot ask for a gain the Web Audio
     # graph would clip.
     notify_volume: int = Field(70, ge=0, le=100)
-    ocr_backend: Literal["builtin", "hybrid", "hayai", "ollama", "llama"] = "hybrid"
+    ocr_backend: Literal["builtin", "hybrid", "hayai", "hayai_force", "ollama", "llama"] = "hybrid"
     erase_model: Literal["lama", "lama-manga", "aot-manga"] = DEFAULT_ERASE_MODEL
     inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"] = "ollama"
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -117,7 +117,7 @@ class BootstrapPayload(BaseModel):
 
 class InferenceCheckPayload(BaseModel):
     inference_backend: Literal["builtin", "ollama", "llama", "llama_7b", "online"]
-    ocr_backend: Literal["builtin", "hybrid", "hayai", "ollama", "llama"] = "hybrid"
+    ocr_backend: Literal["builtin", "hybrid", "hayai", "hayai_force", "ollama", "llama"] = "hybrid"
     quality_profile: Literal[
         "quality", "fast", "fast_translate_quality_render"
     ] = "quality"

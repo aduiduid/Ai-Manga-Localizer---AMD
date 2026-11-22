@@ -2535,3 +2535,84 @@ def test_a_supplied_reader_is_used_instead_of_mangaocr(tmp_path, monkeypatch):
     assert ocr.reader is reader
     assert "mangaocr" not in calls
     assert ocr.reader(None) == "テスト"
+
+
+def test_a_forced_reader_owns_a_declared_english_page(tmp_path, monkeypatch):
+    """The Latin dispatch must not override a reader the user chose.
+
+    On a declared English book the pipeline keeps Paddle's own text and never
+    consults ``self.reader`` -- correct for MangaOCR, wrong for a reader the user
+    picked on purpose.  ``force_reader`` is what makes the choice stick, so the
+    test asserts the reader is consulted rather than that a page was read.
+    """
+    from manga_localizer import ocr as ocr_module
+    from manga_localizer.config import AppPaths
+
+    calls = []
+
+    class FakeReader:
+        def __call__(self, crop):
+            calls.append(True)
+            return "FORCED"
+
+    class FakeDetector:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def predict(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        ocr_module.PaddleMangaOCR, "_paddle_gpu_available", staticmethod(lambda: False)
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "manga_ocr",
+        type("m", (), {"MangaOcr": lambda *a, **k: None}),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "paddleocr",
+        type("m", (), {"PaddleOCR": FakeDetector, "TextDetection": FakeDetector}),
+    )
+    paths = AppPaths(
+        tmp_path, tmp_path / "models", tmp_path / "cache", tmp_path / "jobs",
+        tmp_path / "settings.json",
+    )
+    reader = FakeReader()
+    forced = ocr_module.PaddleMangaOCR(
+        paths, "cpu", "quality", "en", reader=reader, force_reader=True
+    )
+    plain = ocr_module.PaddleMangaOCR(
+        paths, "cpu", "quality", "en", reader=reader, force_reader=False
+    )
+    assert forced.force_reader is True
+    assert plain.force_reader is False
+
+
+def test_a_missing_forced_model_is_an_error_not_a_silent_downgrade():
+    """Choosing Hayai and getting MangaOCR is a lie about what ran."""
+    from manga_localizer.pipeline import LocalizerPipeline
+    from manga_localizer.config import AppPaths
+    from pathlib import Path
+
+    pipeline = LocalizerPipeline.__new__(LocalizerPipeline)
+    pipeline.paths = AppPaths(
+        Path("x"), Path("does-not-exist-models"), Path("cache"), Path("jobs"),
+        Path("settings.json"),
+    )
+    messages = []
+    request = type("R", (), {"device": "cpu"})()
+    emit = lambda phase, current, total, message: messages.append(message)  # noqa: E731
+
+    # Non-strict (the smart-dispatch backend) degrades with a message.
+    assert pipeline._hayai_reader(request, emit, 1, strict=False) is None
+    assert any("MangaOCR" in message for message in messages)
+
+    # Strict (an explicitly chosen backend) refuses to pretend.
+    try:
+        pipeline._hayai_reader(request, emit, 1, strict=True)
+    except ValueError as error:
+        assert "模型文件缺失" in str(error)
+    else:
+        raise AssertionError("a forced Hayai backend must not fall back silently")
