@@ -1147,6 +1147,15 @@ def _axis_overlap(a0: int, a1: int, b0: int, b1: int) -> int:
 # colour does separate them, and the same reading decides whether two lines
 # belong to one unit -- a black caption one line above a red one is two units,
 # not one paragraph.
+#
+# PROPORTION, NOT BRIGHTNESS.  Whether a colour belongs to the lettering is
+# decided by how much of the crop it covers, never by how light the paper is.
+# A rule keyed on brightness ("bright paper plus dark saturated ink means an
+# anti-aliasing edge") shipped in 0.13.15 and deleted the colour of 230 units on
+# one book -- every violet line of dialogue, the red lettering, the cover title.
+# An anti-aliasing rim is thin by construction, so ``INK_SHARE_MIN`` already
+# rejects it: a 4 px violet rim around black bars is 3.8% of the crop and never
+# becomes a cluster candidate.  Any new colour rule must argue in proportions.
 INK_SHARE_MIN = 0.04
 INK_DISTANCE = 60.0
 INK_VIVID = 90.0
@@ -1169,6 +1178,10 @@ def glyph_ink(rgb: np.ndarray, box: list[int]) -> list[int] | None:
     A clearly saturated cluster wins; otherwise the darkest.  Neutral ink is
     returned too -- it groups a black caption with the black line under it
     while the red one below stays a separate unit.
+
+    Only clusters covering at least ``INK_SHARE_MIN`` of the crop may win, which
+    is what keeps anti-aliasing out of the answer: a coloured rim around a black
+    stroke is a few percent of the box, while real lettering is tens of percent.
     """
     x0, y0, x1, y1 = box
     crop = rgb[max(0, y0) : max(0, y1), max(0, x0) : max(0, x1)]

@@ -1,3 +1,40 @@
+## 0.13.20 - 2026-11-22
+
+- Four defences so a colour rule cannot silently delete colour again. The
+  0.13.15-0.13.19 sequence cost three rounds of debugging, and two of the three
+  mistakes were caught by the user rather than by the program.
+
+  **Proportion, not brightness.** Every colour decision is now argued in shares of
+  the crop, never in paper brightness. `glyph_ink` already refused clusters under
+  `INK_SHARE_MIN`; that is the rule that keeps anti-aliasing out (a 4 px rim is
+  3.8% of a crop, real lettering is tens of percent), and it is now stated at the
+  decision site so the next person reads it before adding a threshold.
+
+  **Colour tests compare pixels.** `tests/test_render_colour_golden.py` renders
+  ten crops of real art through the real renderer and compares drawn glyph pixels
+  with source glyph pixels, asserting both the channel spread and the hue. The
+  suite stayed green through the whole 0.13.15-0.13.19 episode because its
+  assertions were on the `TextStyle` object while the decision had moved to a
+  branch the assertion never touched. Verified to fail: reintroducing the old
+  brightness rule turns five of the ten goldens red.
+
+  **Ask the pixels, not the screen.** `scripts/pixel_probe.py` prints paper level,
+  glyph colour, channel spread and hue name for the same region of a source page
+  and its render. Two people in one session misread a downscaled screenshot.
+
+  **Stale output is not a bug.** The cover's credit was reported as "cut off" for
+  two rounds; that page predated its own fix and current code reproduces the
+  source art with zero changed pixels. `docs/RENDER_RULES.md` records the check.
+
+- The known limit is now visible to the user: where a coloured stamp or
+  decoration is printed across the text, the picked colour can follow the
+  decoration (6 units of 1350 on the sample book; a wrong-hue translation, never
+  a missing erase). It appears as a note under the colour switch in all three
+  languages, and in `docs/RENDER_RULES.md`.
+
+- Re-rendered the sample book with the corrected colour path: 16 units that were
+  drawn black or neutral now carry their colour, including two that were fully
+  black.
 ## 0.13.19 - 2026-11-22
 
 - Coloured lettering on bright paper keeps its colour. A rule added in 0.13.15

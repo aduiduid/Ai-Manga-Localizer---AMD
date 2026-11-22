@@ -93,7 +93,7 @@
                 <label class="toggle-row"><span><b data-i18n="translation.story">故事连贯模式</b><small data-i18n="translation.story.detail">参考相邻页面调整人名和语气</small></span><input id="storyContext" type="checkbox"><i></i></label>
                 <label class="context-row"><span data-i18n="translation.context">上下文页数</span><div class="counter"><button id="contextMinus" type="button">−</button><output id="contextPages">6</output><button id="contextPlus" type="button">＋</button></div></label>
                 <label class="toggle-row"><span><b data-i18n="translation.sfx">保留拟声词</b><small data-i18n="translation.sfx.detail">仅替换对白和旁白</small></span><input id="preserveSfx" type="checkbox"><i></i></label>
-                <label class="toggle-row"><span><b data-i18n="translation.colour">保留文字颜色</b><small data-i18n="translation.colour.detail">原文红字、彩字沿用同色输出</small></span><input id="preserveTextColor" type="checkbox"><i></i></label>
+                <label class="toggle-row"><span><b data-i18n="translation.colour">保留文字颜色</b><small data-i18n="translation.colour.detail">原文红字、彩字沿用同色输出</small><small class="backend-hint" data-i18n="translation.colour.limit">注：彩色印章／图案压在文字上时，取色可能偏向图案。</small></span><input id="preserveTextColor" type="checkbox"><i></i></label>
                 <label class="toggle-row"><span><b data-i18n="translation.parallel">智能双线并行 (CPU/GPU 错峰)</b><small data-i18n="translation.parallel.detail">开启后，当前任务在 GPU 进行翻译与渲染时，CPU 将提前开始下一个任务的文字识别，大幅缩短批量跑书总时长。</small></span><input id="pipelineParallel" type="checkbox"><i></i></label>
                 <p class="field-note" id="parallelNote" hidden></p>
               </section>

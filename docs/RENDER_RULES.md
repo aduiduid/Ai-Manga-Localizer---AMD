@@ -1,0 +1,81 @@
+# Renderer change rules
+
+Learned the hard way on 2026-11-22, from three separate mistakes in one session.
+Every rule below exists because something went wrong in a specific, recorded way.
+
+## 1. Never decide colour from brightness alone
+
+An absolute threshold on paper brightness cannot separate an anti-aliasing rim
+from coloured lettering, because both are dark and saturated. A rule that tried
+("bright paper plus dark saturated ink is a fringe") shipped in 0.13.15 and
+silently repainted **230 units** on the sample book: every violet line of
+dialogue, the red lettering, the cover title.
+
+Decisions about whether a colour belongs to the glyphs are **proportional**: ask
+how much of the crop the colour covers. `INK_SHARE_MIN` (4%) is that rule. A 4 px
+rim around black bars measures 3.8% and never becomes a candidate; real lettering
+is tens of percent. When adding a colour rule, state it as a proportion or do not
+add it.
+
+## 2. Colour tests compare pixels, not objects
+
+The brightness rule shipped with a green test suite. Its own test asserted on the
+`TextStyle` object, and the assertion still passed after the decision moved to a
+different branch: the object said `ink=(84,40,117)` while the renderer painted
+black.
+
+Colour regressions are tested by rendering real crops and comparing **drawn
+pixels** with **source pixels** -- `tests/test_render_colour_golden.py`, ten
+fixtures of real art, asserting the drawn glyphs keep both the source's channel
+spread and its hue. Object-level assertions are still useful for logic, but they
+do not count as colour coverage.
+
+**Prove a new colour test can fail.** Temporarily reintroduce the bug it guards,
+watch it go red, then restore. A test that has never been seen failing is a
+comment.
+
+## 3. Never argue about colour from a picture
+
+Two people in one session misread a screenshot: one saw red lettering where the
+source was dark green, another read a downscaled render as black where the pixels
+were violet. Downscaling, resampling and memory all lie about hue.
+
+Use `scripts/pixel_probe.py` before changing colour code and after:
+
+```
+python scripts/pixel_probe.py <source-or-book> --unit p015u01 --page 00000015 \
+    --rendered <rendered book>
+```
+
+It prints the paper level, the glyph colour, the channel spread and the hue name
+for the same region in both images. A claim about colour has to survive that
+output.
+
+## 4. Stale output looks like a bug
+
+The cover credit "had its bottom edge cut off" for two rounds. It had not: the
+shipped page predated the fix that removed its plate, and the current code
+reproduces the source art with **0 changed pixels out of 905600**.
+
+Before debugging a rendering defect reported against a folder, check when that
+folder was written against the last renderer change:
+
+- `git -C app log -1 --format=%ad --date=iso`
+- file mtime of the reported page
+- re-render the page from its cache and diff it against the shipped file
+
+`tests/rerender_book.py`-style re-renders (see `_home/tmp` history) take ~2 s per
+page from a warm cache and settle the question immediately.
+
+## 5. Record what you chose not to fix
+
+Some defects have no zero-cost fix. The current known limit: when a box holds a
+coloured stamp or heart across black type, `glyph_ink` can report the decoration
+instead of the lettering -- 6 units of 1350 on the sample book. It shows up as a
+wrong-*hue* translation, never as a missing erase.
+
+Half-fixing these is worse than documenting them: the attempt to pick "the
+darkest vivid cluster" changed no output at all (the lettering cluster sits
+below `INK_VIVID`), so it was reverted rather than kept as dead complexity.
+Known limits live in `CHANGELOG.md` and in the UI hint, where the user meets
+them.
