@@ -1115,3 +1115,109 @@ def test_a_white_balloon_never_grows_its_mask():
     selected[20:60, 30:170] = 255
     grown = _absorb_outline(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY), 252.0, selected)
     assert np.array_equal(grown, selected)
+
+
+def test_the_outline_gate_allows_a_rim_thicker_than_the_glyphs():
+    """A fixed multiple of the glyph area refused every thick rim.
+
+    Small dark lettering carries a collar that is large next to its own strokes,
+    so ``added > chosen * 1.5`` dropped the whole growth and the rim stayed on
+    the page as a pale smear.  Budgeting by the glyph's border length instead
+    accepts it; measured over 177 cases it refused none.
+    """
+    crop = np.full((80, 220, 3), (40, 40, 40), dtype=np.uint8)
+    selected = np.zeros((80, 220), dtype=np.uint8)
+    # Thin cores, each wrapped in a rim that stays within OUTLINE_REACH.  The
+    # rim is nearly three times the core by area (measured: 2700 vs 1080).
+    for x in range(20, 200, 20):
+        crop[25:55, x : x + 4] = (10, 10, 10)
+        selected[25:55, x : x + 4] = 255
+        crop[20:25, x - 2 : x + 6] = (250, 250, 250)
+        crop[55:60, x - 2 : x + 6] = (250, 250, 250)
+        crop[25:55, x - 2 : x] = (250, 250, 250)
+        crop[25:55, x + 4 : x + 6] = (250, 250, 250)
+    chosen = int((selected > 0).sum())
+    grown = _absorb_outline(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY), 40.0, selected)
+    added = int((grown > 0).sum()) - chosen
+    assert added > chosen * 1.5, f"fixture must exceed the old flat gate: {added} vs {chosen}"
+    assert grown[22, 21] == 255, "the rim has to join the mask"
+
+
+def test_a_wide_flat_component_is_kept_because_a_latin_line_is_one():
+    """One line of Latin type is a single wide blob, not screentone noise.
+
+    The mask rejected components by aspect ratio, so a whole line whose height
+    was small next to its width was discarded and the source text survived
+    (page 7 kept none of its strokes).
+    """
+    crop = np.full((60, 300, 3), 250, dtype=np.uint8)
+    crop[24:36, 20:280] = (20, 20, 20)  # 12px tall, 260px wide
+    style = TextStyle(
+        mean=250.0,
+        white_ratio=0.9,
+        fill="black",
+        stroke_fill="white",
+        stroke_ratio=0.0,
+        bold=False,
+        font_size=12,
+        vertical=False,
+        outlined=False,
+        background_std=0.0,
+        display=False,
+    )
+    mask = ArtworkPreservingRenderer._text_mask(crop, style, 1)
+    inside = mask[24:36, 20:280]
+    assert float((inside > 0).mean()) > 0.9
+
+
+def test_dialogue_lettering_keeps_the_vote_over_the_plate_rule(monkeypatch):
+    """White glyphs with a dark outline are not a title plate.
+
+    "Dark core inside a bright halo" describes a plaque, where the core is the
+    glyph.  On dialogue-scale lettering over coloured artwork the dark core is
+    the outline, and honouring it painted the translation black so it vanished
+    into the panel.
+
+    The neutral-dark ink override is switched off here: it is a separate rule
+    that also paints black, and leaving it on would hide which rule answered.
+    """
+    monkeypatch.setattr("manga_localizer.renderer._ink_colour", lambda *_a: None)
+    rgb = np.full((400, 400, 3), (200, 170, 150), dtype=np.uint8)
+    # Bright glyphs on coloured artwork, each ringed by a thin dark outline.
+    for x in range(40, 200, 40):
+        rgb[150:210, x : x + 22] = (252, 252, 252)
+        cv2.rectangle(rgb, (x, 150), (x + 22, 210), (10, 10, 10), 2)
+    unit = TextUnit("p1u1", [36, 146, 200, 214], [36, 146, 200, 214], "test", 1.0, False, "中文")
+    style = ArtworkPreservingRenderer._analyze_style(rgb, unit)
+    assert style.display is False
+    assert style.fill == "white"
+
+
+def test_a_title_plate_still_gets_the_dark_core_reading(monkeypatch):
+    """The same geometry on plate-sized lettering keeps the plate rule."""
+    monkeypatch.setattr("manga_localizer.renderer._ink_colour", lambda *_a: None)
+    rgb = np.full((400, 400, 3), (200, 170, 150), dtype=np.uint8)
+    for x in range(40, 220, 40):
+        rgb[120:240, x : x + 26] = (252, 252, 252)
+        cv2.rectangle(rgb, (x, 120), (x + 26, 240), (10, 10, 10), 3)
+    unit = TextUnit("p1u1", [36, 116, 220, 244], [36, 116, 220, 244], "test", 1.0, False, "中文")
+    style = ArtworkPreservingRenderer._analyze_style(rgb, unit)
+    assert style.fill == "black"
+
+
+def test_a_dark_saturated_edge_on_white_paper_is_not_the_glyph_colour():
+    """Black type on a white balloon reports its violet fringe as "ink".
+
+    The fringe is saturated, so it outranked the vote, replaced the luminance
+    mask with a colour-distance one that matched only the fringe -- and the
+    neutral core of every stroke stayed on the page while the translation was
+    drawn in fringe violet.
+    """
+    page = np.full((120, 320, 3), 252, dtype=np.uint8)
+    for x in range(30, 290, 34):
+        page[40:80, x : x + 16] = (18, 18, 18)
+        page[38:42, x - 2 : x + 18] = (113, 83, 138)
+    unit = _ink_unit("[20,30,300,90]", "black on white")
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    assert style.ink is None
+    assert style.fill == "black"

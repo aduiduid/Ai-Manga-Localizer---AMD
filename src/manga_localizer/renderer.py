@@ -74,7 +74,14 @@ def _absorb_outline(gray: np.ndarray, level: float, selected: np.ndarray) -> np.
     )
     outline = bright & (near > 0)
     added = int(outline.sum())
-    if added == 0 or added > chosen * OUTLINE_GROWTH_LIMIT:
+    # A flat multiple of the glyph area refuses the growth wherever the rim is
+    # genuinely thicker than the thin lettering inside it, which is most small
+    # type on dark paper.  A glyph's border length is what a rim can be worth,
+    # so put it in the budget: across 177 measured cases this took the refusals
+    # from 32 to none without growing anything a white balloon would not.
+    edge = cv2.morphologyEx(selected, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
+    border = int((edge > 0).sum())
+    if added == 0 or added > chosen * OUTLINE_GROWTH_LIMIT + border * OUTLINE_BORDER_WEIGHT:
         return selected
     merged = np.maximum(selected, outline.astype(np.uint8) * 255)
     return cv2.dilate(merged, np.ones((3, 3), np.uint8), iterations=1)
@@ -105,6 +112,10 @@ INK_TOLERANCE = 40.0
 INK_SATURATION = 40
 # A neutral core darker than this is black lettering, not the halo.
 INK_DARK = 90.0
+# Paper this bright cannot carry dark coloured lettering: a dark saturated
+# reading there is the anti-aliasing edge of black type, not the glyph.
+INK_FRINGE_PAPER = 232.0
+INK_FRINGE_LEVEL = 150.0
 # A glyph's outline sits within this many pixels of the glyph itself.
 OUTLINE_REACH = 5
 # Below this many glyph pixels the crop is noise, not lettering.
@@ -115,6 +126,11 @@ OUTLINE_MIN_GLYPHS = 200
 OUTLINE_GROWTH_LIMIT = 1.5
 # Paper this bright is a white balloon: nothing there may be grown.
 OUTLINE_PAPER_LEVEL = 170
+# How many rim pixels each pixel of glyph border may bring with it.
+OUTLINE_BORDER_WEIGHT = 3
+# The artwork just outside a box is the reference the box's own median cannot
+# be: a light glyph fills little of a narrow box, so its median is the ground.
+RING_DELTA = 30
 
 
 def _level(rgb: tuple[int, int, int]) -> float:
@@ -122,11 +138,30 @@ def _level(rgb: tuple[int, int, int]) -> float:
 
 
 def _ink_colour(rgb: np.ndarray, box: list[int]) -> tuple[int, int, int] | None:
-    """The colour the glyphs are drawn in, whatever that colour is."""
+    """The colour the glyphs are drawn in, whatever that colour is.
+
+    On white paper the answer is only trusted when it can be lettering: coloured
+    type there is bright and dark type is neutral, so a dark saturated reading is
+    the violet edge that anti-aliasing leaves around black strokes.  That edge is
+    saturated enough to outrank the polarity vote and to replace the luminance
+    seed with a colour-distance one, and it is a tenth of the box -- so the
+    strokes it does not match kept the source text readable under the
+    translation, and the translation was drawn in the fringe colour.
+    """
     ink = glyph_ink(rgb, box)
     if ink is None:
         return None
-    return (int(ink[0]), int(ink[1]), int(ink[2]))
+    colour = (int(ink[0]), int(ink[1]), int(ink[2]))
+    if max(colour) - min(colour) < INK_SATURATION:
+        return colour
+    x0, y0, x1, y1 = (int(value) for value in box)
+    crop = rgb[max(0, y0) : max(0, y1), max(0, x0) : max(0, x1)]
+    if not crop.size:
+        return colour
+    paper = float(np.median(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)))
+    if paper >= INK_FRINGE_PAPER and _level(colour) < INK_FRINGE_LEVEL:
+        return None
+    return colour
 
 
 def managed_font_path(paths: AppPaths | None = None) -> Path:
@@ -622,10 +657,21 @@ class ArtworkPreservingRenderer:
         # the translation disappeared into the panel).  The tone of the artwork
         # just outside the box tells the two cases apart.
         surrounding = _surrounding_level(rgb, unit.bbox)
-        if halo_ratio >= 0.38 and float(dark.mean()) >= 0.01 and surrounding >= 120:
+        bright_halo = (
+            halo_ratio >= 0.38 and float(dark.mean()) >= 0.01 and surrounding >= 120
+        )
+        if bright_halo and (display or unit.special == "cover_title"):
             # Outlined lettering is a dark core inside a bright halo, so the
             # halo *is* the stroke.  Counting bright ring pixels against dark
-            # cores would flip the polarity on thick outlines.
+            # cores would flip the polarity on thick outlines.  This holds on a
+            # plate or a signboard, where the core really is the glyph.
+            fill, stroke_fill = "black", "white"
+        elif bright_halo and brighter_ratio <= darker_ratio:
+            # White glyphs with a dark outline show the same geometry, but they
+            # sit on coloured artwork instead of a light plate, and there the
+            # dark core is the outline -- painting black made the translation
+            # vanish into the panel.  Dialogue-scale lettering has not earned
+            # the plate rule; its own vote has.
             fill, stroke_fill = "black", "white"
         elif brighter_ratio > darker_ratio:
             fill, stroke_fill = "white", "black"
@@ -682,7 +728,12 @@ class ArtworkPreservingRenderer:
         return self._inpainter
 
     @staticmethod
-    def _text_mask(crop: np.ndarray, style: TextStyle, dilation: int) -> np.ndarray:
+    def _text_mask(
+        crop: np.ndarray,
+        style: TextStyle,
+        dilation: int,
+        ring: float | None = None,
+    ) -> np.ndarray:
         gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
         # Fixed thresholds assume a white balloon.  Black lettering on a cyan
         # sign or a wood plaque sits at mid/dark luminance, where a constant
@@ -691,6 +742,12 @@ class ArtworkPreservingRenderer:
         # cutoff to the local median instead.
         level = float(np.median(gray)) if gray.size else 255.0
         ink = style.ink
+
+        def luminance_seed(reference: float) -> np.ndarray:
+            if style.fill == "white":
+                return (gray > min(215, reference + 55)).astype(np.uint8)
+            return (gray < max(15, min(150, reference - 45))).astype(np.uint8)
+
         if ink is not None:
             # Colour distance, not luminance: red glyphs on a pink balloon
             # are two grey levels from the paper, so no grey cutoff can
@@ -698,10 +755,16 @@ class ArtworkPreservingRenderer:
             reference = np.array(ink, dtype=np.int16)
             distance = np.linalg.norm(crop.astype(np.int16) - reference, axis=2)
             seed = (distance <= INK_TOLERANCE).astype(np.uint8)
-        elif style.fill == "white":
-            seed = (gray > min(215, level + 55)).astype(np.uint8)
         else:
-            seed = (gray < max(15, min(150, level - 45))).astype(np.uint8)
+            seed = luminance_seed(level)
+            if ring is not None and abs(ring - level) >= RING_DELTA:
+                # On a narrow box the glyphs are a minority, so the median is
+                # the ground and the cutoff lands past its own lettering: a
+                # green panel capped the level at 150 while the white line sat
+                # at 242, and nothing was selected, so the source text stayed
+                # visible under the translation.  The artwork outside the box
+                # is a second, independent anchor for the same question.
+                seed = np.maximum(seed, luminance_seed(ring))
         count, labels, stats, _ = cv2.connectedComponentsWithStats(seed, 8)
         selected = np.zeros_like(seed, dtype=np.uint8)
         height, width = seed.shape
@@ -718,9 +781,6 @@ class ArtworkPreservingRenderer:
                 or x + component_width >= width - 1
                 or y + component_height >= height - 1
             )
-            aspect = max(component_width, component_height) / max(
-                1, min(component_width, component_height)
-            )
             # A tight detector box often cuts through its own glyphs, so the
             # stroke cluster reaches the padded crop border.  Rejecting every
             # edge-connected component there drops the whole source text and
@@ -728,7 +788,10 @@ class ArtworkPreservingRenderer:
             # are artwork; the caller still clips the mask to the text box.
             if (touches_edge and area > width * height * 0.25) or area < min_area:
                 continue
-            if area > max_area or aspect > 12:
+            # A wide-and-flat component is not noise: one line of Latin type
+            # is a single connected blob, and rejecting it by aspect threw the
+            # whole line away (page 7 kept 0.00 of its source strokes).
+            if area > max_area:
                 continue
             selected[labels == label] = 255
         # White lettering is selected by brightness, so its mask already is the
@@ -816,7 +879,13 @@ class ArtworkPreservingRenderer:
             if solid_source_boxes:
                 mask[sy0:sy1, sx0:sx1] = 255
                 continue
-            local = self._text_mask(rgb[by0:by1, bx0:bx1], style, dilation)
+            # The artwork ringing this detector box, in page coordinates.
+            local = self._text_mask(
+                rgb[by0:by1, bx0:bx1],
+                style,
+                dilation,
+                ring=_surrounding_level(rgb, [sx0, sy0, sx1, sy1], pad=8),
+            )
             mask[by0:by1, bx0:bx1] = np.maximum(mask[by0:by1, bx0:bx1], local)
         allowed = np.zeros_like(mask)
         allowed[y0:y1, x0:x1] = 255

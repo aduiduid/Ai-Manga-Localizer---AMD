@@ -1,3 +1,35 @@
+## 0.13.15 - 2026-11-22
+
+- A dark fringe is no longer the glyph colour on white paper. Black type on a
+  white balloon let `glyph_ink` answer with the violet anti-aliasing edge around
+  each stroke. That edge is saturated, so it outranked the polarity vote and, in
+  the erase mask, replaced the luminance seed with a colour-distance one that
+  matched a tenth of the box. Measured on page 6 of the sample: 70% of the source
+  strokes were claimed and the English stayed readable under the translation,
+  which was itself drawn in fringe violet. On white paper, coloured type is
+  bright and dark type is neutral, so a dark saturated reading there is an edge;
+  dropping it sends both the fill and the mask back to the luminance path (same
+  unit: 98% coverage, 0.4% residual instead of 6.7%).
+- The plate rule is now scoped to plates. "Dark core inside a bright halo" holds
+  on a title plate, where the core is the glyph; white lettering with a dark
+  outline has the same geometry on coloured artwork, where that core is the
+  outline and honouring it painted the translation black so it vanished into the
+  panel. Dialogue-scale lettering now keeps its own vote -- 21 units across the
+  sample book change colour, all of them from black to white.
+- The erase mask keeps wide, flat components. One line of Latin type is a single
+  connected blob, so rejecting components by aspect ratio threw the whole line
+  away; page 7 kept none of its source strokes. Removing that test moved mean
+  stroke coverage from 0.617 to 0.625, recovering 10 units and damaging none.
+- The erase mask also seeds from the artwork outside the box when the two
+  references disagree. On a narrow box the glyphs are a minority, so the box's
+  own median is the ground and the cutoff landed past its own lettering: a green
+  panel capped the reference at 150 while the white line sat at 242, and nothing
+  was selected.
+- The outline gate budgets by the glyph's border length, not a flat multiple of
+  the glyph area. A fixed `chosen * 1.5` refused the growth wherever the rim was
+  genuinely thicker than the thin lettering inside it, leaving a pale rim under
+  every such line; over 177 measured cases the new gate refuses none.
+
 ## 0.13.14 - 2026-11-21
 
 - A spawned child no longer builds a second application. multiprocessing
