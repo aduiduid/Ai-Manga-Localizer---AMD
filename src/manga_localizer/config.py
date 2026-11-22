@@ -77,6 +77,11 @@ LLAMA_CONTEXT_TOKENS = 65_536
 QUALITY_PROFILES = ("quality", "fast", "fast_translate_quality_render")
 
 
+# Hayai's ONNX graphs live in their own model directory, like every other
+# downloadable model.
+HAYAI_OCR_DIR = "hayai-ocr"
+
+
 def translate_quality(profile: str) -> bool:
     """Whether this profile spends the second and third pass on review."""
     return profile == "quality"

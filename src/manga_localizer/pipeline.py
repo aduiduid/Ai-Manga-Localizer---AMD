@@ -447,12 +447,20 @@ class LocalizerPipeline:
         ]
         ocr = None
         if any(page is None for page in cached_pages) or any(title_refinements):
-            if request.ocr_backend == "builtin":
+            if request.ocr_backend in {"builtin", "hayai"}:
+                # Same detector, same geometry, different recogniser: Hayai reads
+                # a whole bubble in one pass, which is the only stage that
+                # changes and therefore the only stage that can differ.
+                reader = None
+                if request.ocr_backend == "hayai":
+                    self._emit(emit, "ocr", 0, total, "加载 Hayai OCR 识别器")
+                    reader = self._hayai_reader(request, emit, total)
                 ocr = PaddleMangaOCR(
                     self.paths,
                     request.device,
                     ocr_profile_for(request.quality_profile),
                     request.source_language,
+                    reader=reader,
                 )
             elif request.ocr_backend == "hybrid":
                 self._emit(emit, "ocr", 0, total, "检查本地视觉语义模型")
@@ -991,6 +999,40 @@ class LocalizerPipeline:
             f"启用分阶段语义审校：{request.llama_model} + {request.llama_review_model}",
         )
         return LocalQualityTranslator(editor, candidate)
+
+    def _hayai_reader(
+        self,
+        request: PipelineRequest,
+        emit: ProgressCallback,
+        total: int,
+    ):
+        """Hayai's recogniser, or None so the caller keeps MangaOCR.
+
+        A missing model or package is a warning, never a failed book: every
+        other rule on the page works with the reader the project already has.
+        """
+        from .config import HAYAI_OCR_DIR
+        from .ocr import HayaiOCRReader
+
+        model_dir = self.paths.models / HAYAI_OCR_DIR
+        if not (model_dir / "hayai_prefill_int8.onnx").is_file():
+            self._emit(
+                emit, "ocr", 0, total,
+                "未找到 Hayai 模型，本次使用内置 MangaOCR",
+            )
+            return None
+        try:
+            return HayaiOCRReader(
+                model_dir,
+                request.device,
+                log=lambda message: self._emit(emit, "ocr", 0, total, message),
+            )
+        except Exception as exc:  # noqa: BLE001 - a reader is an optimisation
+            self._emit(
+                emit, "ocr", 0, total,
+                f"Hayai 不可用（{type(exc).__name__}），本次使用内置 MangaOCR",
+            )
+            return None
 
     def _llama_vision(
         self,

@@ -1,3 +1,26 @@
+## 0.13.16 - 2026-11-22
+
+- Every translated line no longer gets a translucent plate. The flag that turns
+  the plate on asked whether the typeset box differed from ``crop_bbox``, but
+  ``crop_bbox`` is the detector box plus padding -- so it was true for every unit
+  (1337 of 1337 on the sample book) and the panel was drawn behind every line.
+  It now compares against the detector box, which is what "the type grew past
+  its cleared region" actually means.
+- A cover credit printed inside the cover artwork is part of that artwork. The
+  page-spanning rule protects ``Display of Passion``, but ``by Alcor`` is a
+  tenth of that block and stayed translatable, so it was erased and replaced
+  with "作者是阿尔科。" under a grey panel. A unit sharing the block of a unit
+  already preserved as ``artwork_text`` is now preserved too.
+- Hayai OCR, as ``ocr_backend="hayai"``: Paddle still finds the boxes and Hayai
+  reads each bubble in one pass, because Hayai is a crop-level recogniser with no
+  detector of its own. Measured against MangaOCR on the same detector boxes, on
+  a Japanese page: MangaOCR answered 「でも、そんなに寝室になるんで呼時悪い男の間にの合う」
+  where Hayai answered 「こんな時間に寝室に呼び出すなんて具合でも悪いの?」, found a
+  sound effect MangaOCR missed, and read three pages in 27.1s against 36.8s.
+  DirectML is offered first and fails on this graph (a dynamic Reshape node), so
+  the reader reports that once and runs on CPU; a missing model or package
+  leaves the run on MangaOCR instead of failing the book.
+
 ## 0.13.15 - 2026-11-22
 
 - A dark fringe is no longer the glyph colour on white paper. Black type on a

@@ -1221,3 +1221,35 @@ def test_a_dark_saturated_edge_on_white_paper_is_not_the_glyph_colour():
     style = ArtworkPreservingRenderer._analyze_style(page, unit)
     assert style.ink is None
     assert style.fill == "black"
+
+
+def test_a_line_that_stayed_in_its_box_gets_no_plate():
+    """The plate belongs to type that grew onto uncleared artwork.
+
+    ``spilled`` compared the typeset box with ``crop_bbox``, which is the
+    detector box plus padding -- so it was true for every unit (1337 of 1337 on
+    the sample book) and every translated line got a translucent panel, which is
+    what put a grey box over the cover credit.
+    """
+    rgb = np.full((300, 300, 3), 240, dtype=np.uint8)
+    unit = TextUnit(
+        "p001u02", [100, 100, 200, 130], [90, 90, 210, 140], "by Alcor", 0.9, False, "作者"
+    )
+    style = TextStyle(
+        mean=240.0,
+        white_ratio=0.9,
+        fill="black",
+        stroke_fill="white",
+        stroke_ratio=0.0,
+        bold=False,
+        font_size=20,
+        vertical=False,
+        outlined=False,
+        background_std=0.0,
+        display=False,
+    )
+    box = ArtworkPreservingRenderer._typeset_box(
+        ArtworkPreservingRenderer.__new__(ArtworkPreservingRenderer), rgb, unit, style
+    )
+    # It stayed inside its detector box, so nothing spilled.
+    assert [int(round(v)) for v in box] == unit.bbox

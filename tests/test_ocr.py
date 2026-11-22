@@ -2435,3 +2435,103 @@ def test_the_ink_of_one_crop_does_not_change_between_readings():
         page[64:110, offset : offset + 3] = (228, 108, 110)
     readings = {tuple(glyph_ink(page, [0, 0, 240, 120]) or ()) for _ in range(5)}
     assert len(readings) == 1
+
+
+def test_a_cover_credit_sharing_the_title_block_is_preserved():
+    """The credit is printed inside the cover artwork, like the title.
+
+    ``Display of Passion`` is caught by the page-spanning rule, but ``by Alcor``
+    is a tenth of that block's area -- far below the size threshold -- so it was
+    translated, which erased the credit and stamped a panel over the drawing.
+    """
+    from manga_localizer.ocr import TextUnit, PageOCR, classify_non_story_text
+
+    title = TextUnit(
+        "p1u1", [108, 10, 800, 352], [80, 0, 800, 362], "Display ofPassion", 0.99, False, ""
+    )
+    title.skip = True
+    title.skip_reason = "preserve"
+    title.special = "artwork_text"
+    credit = TextUnit(
+        "p1u2", [591, 327, 789, 403], [581, 317, 799, 413], "by Alcor", 0.87, False, "作者是阿尔科。"
+    )
+    page = PageOCR(1, "00000001.webp", 800, 1132, [title, credit])
+    classify_non_story_text(page)
+    assert credit.skip is True
+    assert credit.skip_reason == "preserve"
+    assert credit.special == "artwork_text"
+    assert credit.zh == ""
+
+
+def test_a_credit_far_from_any_artwork_block_is_still_translated():
+    """The rule must key on the artwork block, not on the word "by"."""
+    from manga_localizer.ocr import TextUnit, PageOCR, classify_non_story_text
+
+    title = TextUnit(
+        "p1u1", [108, 10, 800, 352], [80, 0, 800, 362], "Display ofPassion", 0.99, False, ""
+    )
+    title.skip = True
+    title.special = "artwork_text"
+    caption = TextUnit(
+        "p1u2", [40, 900, 300, 940], [30, 890, 310, 950],
+        "The rain was loud that night.", 0.9, False, "那晚雨很大。",
+    )
+    page = PageOCR(1, "00000001.webp", 800, 1132, [title, caption])
+    classify_non_story_text(page)
+    assert caption.skip is False
+
+
+def test_a_supplied_reader_is_used_instead_of_mangaocr(tmp_path, monkeypatch):
+    """The hayai backend swaps the recogniser and nothing else.
+
+    ``PaddleMangaOCR`` is "Paddle detector + a recogniser", so the injection
+    point is the reader.  Building the object proves the branch is taken: if the
+    supplied reader is used, MangaOCR is never constructed.
+    """
+    from manga_localizer import ocr as ocr_module
+
+    calls = {}
+
+    class FakeReader:
+        def __call__(self, crop):
+            calls["read"] = True
+            return "テスト"
+
+    class FakeDetector:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def predict(self, *args, **kwargs):
+            return []
+
+    class FakePaddleOCR(FakeDetector):
+        pass
+
+    class ForbiddenMangaOcr:
+        def __init__(self, *args, **kwargs):
+            calls["mangaocr"] = True
+
+    monkeypatch.setattr(
+        ocr_module.PaddleMangaOCR, "_paddle_gpu_available", staticmethod(lambda: False)
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "manga_ocr",
+        type("m", (), {"MangaOcr": ForbiddenMangaOcr}),
+    )
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "paddleocr",
+        type("m", (), {"PaddleOCR": FakePaddleOCR, "TextDetection": FakeDetector}),
+    )
+    reader = FakeReader()
+    from manga_localizer.config import AppPaths
+
+    paths = AppPaths(
+        tmp_path, tmp_path / "models", tmp_path / "cache", tmp_path / "jobs",
+        tmp_path / "settings.json",
+    )
+    ocr = ocr_module.PaddleMangaOCR(paths, "cpu", "quality", "ja", reader=reader)
+    assert ocr.reader is reader
+    assert "mangaocr" not in calls
+    assert ocr.reader(None) == "テスト"

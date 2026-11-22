@@ -1702,9 +1702,13 @@ class ArtworkPreservingRenderer:
             placed.append([x0, y0, x1, y1])
             region = rendered.crop((x0, y0, x1, y1))
             # Growth means the balloon was too small for readable type, so the
-            # glyphs sit on artwork that the erase step never cleared.
+            # glyphs sit on artwork that the erase step never cleared -- that is
+            # what the plate is for.  Compare against the *detector* box: the
+            # crop box is that box plus padding, so testing against it marked
+            # every unit as spilled (1337 of 1337 on the sample book) and put a
+            # translucent panel behind every translated line.
             spilled = [x0, y0, x1, y1] != [
-                int(round(value)) for value in (unit.crop_bbox or unit.bbox)
+                int(round(value)) for value in unit.bbox
             ]
             self._draw(
                 region,

@@ -265,6 +265,16 @@ PUBLICATION_METADATA_MARKERS = (
 )
 
 
+def _overlaps_near(first: list[int], second: list[int], margin: int) -> bool:
+    """Whether two boxes touch, allowing ``margin`` pixels of slack."""
+    return not (
+        first[2] + margin <= second[0]
+        or second[2] + margin <= first[0]
+        or first[3] + margin <= second[1]
+        or second[3] + margin <= first[1]
+    )
+
+
 def page_spanning_display_artwork(page: PageOCR, unit: TextUnit) -> bool:
     """Detect cover artwork that OCR misread as one page-filling caption.
 
@@ -350,6 +360,24 @@ def classify_non_story_text(page: PageOCR) -> PageOCR:
             continue
 
         if page_spanning_display_artwork(page, unit):
+            unit.zh = ""
+            unit.skip = True
+            unit.skip_reason = "preserve"
+            unit.special = "artwork_text"
+            continue
+
+        # A cover prints its credits inside the same artwork block as its title.
+        # "by Alcor" is a third of the cover lettering's height and overlaps it,
+        # so translating it erased the credit and stamped a panel over the
+        # drawing.  Anything sharing that block is artwork too.
+        artwork_blocks = [
+            other.bbox
+            for other in page.units
+            if other.id != unit.id and other.special == "artwork_text"
+        ]
+        if artwork_blocks and any(
+            _overlaps_near(unit.bbox, block, 10) for block in artwork_blocks
+        ):
             unit.zh = ""
             unit.skip = True
             unit.skip_reason = "preserve"
@@ -1556,6 +1584,79 @@ def region_area_floor(width: int, height: int) -> int:
     return max(MIN_REGION_AREA // 2, min(MIN_REGION_AREA, scaled))
 
 
+class HayaiOCRReader:
+    """A crop-level recogniser backed by Hayai's ONNX graphs.
+
+    ``hayai_ocr`` coerces the int8 graphs to ``CPUExecutionProvider`` on its own
+    (``onnx.py``: any int8 or int4 precision forces CPU), so the providers list is
+    always passed explicitly.  DirectML is offered first because it is the only
+    GPU path this machine has, but the current graph fails there on a dynamic
+    ``Reshape`` node -- that failure is caught, reported once, and the reader
+    falls back to CPU rather than taking the book down.
+    """
+
+    def __init__(
+        self,
+        model_dir: Path,
+        device: str = "auto",
+        log=None,
+    ):
+        import os
+
+        # hayai_ocr logs through loguru and points at a stderr that Windows
+        # consoles mangle; the messages this reader needs go through ``log``.
+        os.environ.setdefault("LOGURU_LEVEL", "ERROR")
+        try:
+            from hayai_ocr import HayaiOcr
+        except ImportError as exc:
+            raise ModelDependencyError(
+                "Hayai OCR is not installed. Run "
+                "`uv pip install hayai-ocr==2.4.0 --no-deps` in the app venv."
+            ) from exc
+
+        self._log = log or (lambda _message: None)
+        self.model_dir = Path(model_dir)
+        wanted = ["DmlExecutionProvider", "CPUExecutionProvider"]
+        if device == "cpu":
+            wanted = ["CPUExecutionProvider"]
+        self.provider = "CPUExecutionProvider"
+        self.ocr = None
+        errors = []
+        for providers in ([wanted] if device == "cpu" else [wanted, ["CPUExecutionProvider"]]):
+            try:
+                candidate = HayaiOcr(
+                    backend="onnx",
+                    onnx_precision="int8",
+                    onnx_model_path=str(self.model_dir),
+                    onnx_providers=providers,
+                )
+                # The constructor reports a failed warmup as a warning and still
+                # returns a usable CPU session, so exercise it once to be sure.
+                candidate(
+                    __import__("PIL.Image", fromlist=["Image"]).new("RGB", (64, 64), "white")
+                )
+                self.ocr = candidate
+                self.provider = providers[0]
+                break
+            except Exception as exc:  # noqa: BLE001 - fallback is the point
+                errors.append(f"{providers[0]}: {type(exc).__name__}")
+                continue
+        if self.ocr is None:
+            raise ModelDependencyError(
+                "Hayai OCR could not start (" + "; ".join(errors) + ")."
+            )
+        if self.provider != wanted[0] and device != "cpu":
+            self._log(
+                "Hayai OCR: DirectML unavailable on this graph, running on CPU"
+            )
+
+    def __call__(self, crop) -> str:
+        try:
+            return str(self.ocr(crop)).strip()
+        except Exception:  # noqa: BLE001 - one unreadable crop is not fatal
+            return ""
+
+
 class PaddleMangaOCR:
     """Paddle text localization followed by manga-specific Japanese recognition.
 
@@ -1571,6 +1672,7 @@ class PaddleMangaOCR:
         device: str = "auto",
         profile: str = "quality",
         source_language: str = "auto",
+        reader=None,
     ):
         configure_model_caches(paths)
         try:
@@ -1623,7 +1725,13 @@ class PaddleMangaOCR:
             torch_cuda = torch.cuda.is_available()
         except (ImportError, RuntimeError):
             torch_cuda = False
-        self.reader = MangaOcr(force_cpu=manga_force_cpu(device, torch_cuda))
+        if reader is not None:
+            # A caller-supplied recogniser (Hayai) replaces MangaOCR and nothing
+            # else: every detector box, recovery rule and dedup pass below is
+            # shared, so switching readers cannot change the page geometry.
+            self.reader = reader
+        else:
+            self.reader = MangaOcr(force_cpu=manga_force_cpu(device, torch_cuda))
 
     @staticmethod
     def _paddle_gpu_available() -> bool:
