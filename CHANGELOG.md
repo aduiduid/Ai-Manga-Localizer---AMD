@@ -1,3 +1,23 @@
+## 0.13.18 - 2026-11-22
+
+- Docs: `docs/ocr-backend-comparison-2026-11-22.md` records a controlled
+  three-backend comparison on one English book.  All three runs share Paddle's
+  detection, so the 1372 units have identical ids and bounding boxes and the only
+  variable is the recogniser.  The dispatch backend (`hayai`) matched `builtin`
+  on all 1372 units because the Latin path never reaches the injected reader;
+  `hayai_force` disagreed on 929 and threw away 51 translations against
+  `builtin`'s 13.
+- The OCR select now says what the comparison found: Hayai is tuned for Japanese
+  and an English-only comic should use the built-in OCR.  The hint follows the
+  same `data-ocr-note` mechanism as the existing CPU note, so it disappears when
+  another backend is chosen.
+- Re-rendered the shipped sample book with the current code.  71 of its 74 pages
+  differed from the stored files, which had been produced before 0.13.15-0.13.17;
+  the cover's `by Alcor` credit is now byte-identical to the source art, where
+  the stored page had a plate and a translated credit over it.  This was stale
+  output, not a renderer defect: the credit's bbox bottom sits at y=403 of a
+  1132-pixel page, so nothing was ever clipped by the page edge.
+
 ## 0.13.17 - 2026-11-22
 
 - New ``ocr_backend="hayai_force"``: Hayai reads every page, English included.
