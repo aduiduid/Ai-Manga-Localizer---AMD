@@ -1301,6 +1301,114 @@ def test_plain_black_lettering_on_white_paper_stays_black():
     assert style.fill == "black"
 
 
+def test_plate_is_skipped_when_the_ground_already_separates_from_the_type():
+    """The card is a legibility aid, not a decoration.
+
+    ``p005u01`` sits in a white balloon with a pink wedge either side.  The card
+    under it was white-on-white -- invisible -- yet its rectangle reached both
+    wedges and washed them out.  Where the ground is already far in luminance
+    from the type the card buys nothing and must not be drawn.
+    """
+    from manga_localizer.renderer import plate_is_needed
+
+    balloon = Image.new("RGB", (200, 60), (252, 252, 252))
+    card = (10, 10, 190, 50)
+    assert plate_is_needed(balloon, card, "black") is False
+
+    panel = Image.new("RGB", (200, 60), (58, 40, 34))
+    assert plate_is_needed(panel, card, "black") is True
+
+
+def test_plate_is_kept_when_the_ground_is_close_to_the_type():
+    """Grey artwork behind black type is exactly what the card exists for."""
+    from manga_localizer.renderer import plate_is_needed
+
+    grey = Image.new("RGB", (200, 60), (96, 96, 96))
+    assert plate_is_needed(grey, (10, 10, 190, 50), "black") is True
+
+    # Mid-tone ground behind light type is the same problem mirrored.
+    pale = Image.new("RGB", (200, 60), (210, 210, 210))
+    assert plate_is_needed(pale, (10, 10, 190, 50), "white") is True
+
+
+def _plate_style() -> TextStyle:
+    return TextStyle(
+        mean=255.0,
+        white_ratio=0.9,
+        fill="black",
+        stroke_fill="white",
+        stroke_ratio=0.0,
+        bold=False,
+        font_size=20,
+        vertical=False,
+        outlined=False,
+        background_std=0.0,
+        display=False,
+    )
+
+
+def _plate_page(ground) -> Image.Image:
+    """A uniform page of ``ground`` with dark borders, ready for one line."""
+    page = np.full((120, 400, 3), ground, dtype=np.uint8)
+    page[:16, :] = 20
+    page[-16:, :] = 20
+    return Image.fromarray(page)
+
+
+def _plate_lift(image: Image.Image, before: np.ndarray) -> np.ndarray:
+    """Per-pixel brightening the card added, ignoring where the type landed."""
+    after = np.asarray(image).astype(np.int16)
+    return (after - before.astype(np.int16)).mean(axis=2)
+
+
+def test_bright_artwork_beside_the_line_is_not_painted_over(tmp_path):
+    """The card must not be drawn where the ground already separates from the type.
+
+    ``p005u01`` sits on a white balloon with pink wedges either side.  The white
+    wash is invisible there, so the only thing the card did was cover that
+    artwork.  A bright neutral ground is the same situation without the colour:
+    if the card is drawn, it brightens the ground, and on bright ground every
+    pixel must come back untouched.
+    """
+    try:
+        find_bold_font()
+    except FileNotFoundError:
+        pytest.skip("no CJK font installed to render with")
+
+    renderer = _measuring_renderer(tmp_path)
+    image = _plate_page(230)
+    before = np.asarray(image).copy()
+    renderer._draw(
+        image, "当然不是同性恋啦。", [40, 30, 360, 90], _plate_style(), plate=True
+    )
+    lift = _plate_lift(image, before)
+    assert lift.max() <= 1.0, (
+        f"the card was drawn on bright ground (max lift {lift.max():.0f}); "
+        "it can only cover artwork there"
+    )
+
+
+def test_a_grey_ground_still_gets_its_card(tmp_path):
+    """The mirror case: type on grey artwork must keep its wash."""
+    try:
+        find_bold_font()
+    except FileNotFoundError:
+        pytest.skip("no CJK font installed to render with")
+
+    renderer = _measuring_renderer(tmp_path)
+    image = _plate_page(96)
+    before = np.asarray(image).copy()
+    renderer._draw(
+        image, "当然不是同性恋啦。", [40, 30, 360, 90], _plate_style(), plate=True
+    )
+    lift = _plate_lift(image, before)
+    # The translucent white wash lifts grey ground by tens of levels.
+    assert float(lift.max()) > 40.0, (
+        f"no card on a grey ground (max lift {lift.max():.0f}); "
+        "the type would sit on busy artwork unaided"
+    )
+
+
 def test_a_coloured_bubble_does_not_paint_black_type():
     """Green cast on black type must not be mistaken for green lettering.
 

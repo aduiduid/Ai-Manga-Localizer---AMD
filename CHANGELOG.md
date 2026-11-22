@@ -1,3 +1,36 @@
+## 0.13.21 - 2026-11-22
+
+- The plate under spilled type is now drawn only where it earns its place.
+  `p005u01` ("NO HOMO OF COURSE." in a white balloon) was reported three times
+  as red type painted black. It is not red: the source glyphs are `(72,89,71)`,
+  a green-cast near-black whose channel spread is 17, under `INK_SATURATION` 40,
+  so the neutral reading is correct. The real defect was elsewhere and only
+  showed on that line because the card sat over it.
+
+  **What was wrong.** `_draw` filled the whole rounded card with translucent
+  white whenever the typeset box had grown past the detector box. On a white
+  balloon that wash is invisible, so the card cost nothing visually -- but its
+  rectangle still reached the artwork on both sides and the two pink wedges in
+  the bubbles flanking that line lost their colour (`red>40` pixels: 80 -> 0 on
+  the left, 112 -> 46 on the right). A plateau of census attempts to decide by
+  card "busy-ness" all failed: the pink wedges are *inside* the card, so every
+  measure of dirt flagged the card that least needed a plate (746 cards, target
+  card `hostile share` 0.079 against a book median of 0.108).
+
+  **The rule.** The card has one job, legibility. Compare the ground's median
+  luminance with the type's (`0` for black, `255` for white, weighted level
+  otherwise); draw the card only when they are within `PLATE_MARGIN` (110).
+  Pink at ~150 against black type is 150 apart, so the artwork survives; grey
+  artwork behind black type is 96 apart, so the card stays. Measured over 746
+  cards: 134 keep their plate, 612 no longer get one. The 612 include 42 whose
+  glyph bed still has a dark intrusion; all were rendered and checked by eye,
+  the white stroke carries them.
+
+  **Verified to fail.** `test_bright_artwork_beside_the_line_is_not_painted_over`
+  passes with the rule and reports a 15-level lift when `plate_is_needed` is
+  stubbed to `True`. `tests/test_renderer.py` also covers the mirror case (grey
+  ground keeps its card) and the three luminance branches of the rule.
+
 ## 0.13.20 - 2026-11-22
 
 - Four defences so a colour rule cannot silently delete colour again. The

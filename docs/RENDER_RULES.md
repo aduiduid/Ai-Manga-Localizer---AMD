@@ -67,7 +67,25 @@ folder was written against the last renderer change:
 `tests/rerender_book.py`-style re-renders (see `_home/tmp` history) take ~2 s per
 page from a warm cache and settle the question immediately.
 
-## 5. Record what you chose not to fix
+## 5. A decorative overlay is not evidence of what is under it
+
+The plate under spilled type was reported for three rounds as "red lettering
+turned black". The lettering was never red: source glyphs measure (72,89,71),
+channel spread 17. What had changed was the two pink wedges either side of that
+line, which the invisible white card painted over.
+
+The lesson: when a pixel looks wrong, find the *step* that moved it before
+theorising about the colour path. _home/tmp/isolate_corners.py answered it in
+one run by disabling one unit and re-rendering -- the erase step had not touched
+the wedges at all, the plate had.
+
+Corollary: a rule that decides whether to paint a decorative element must be
+argued from what that element is *for* (legibility: luminance separation), not
+from how busy the area looks. Every "is this card dirty" measure failed on 746
+cards, because the artwork beside the line is inside the card and always reads as
+dirt.
+
+## 6. Record what you chose not to fix
 
 Some defects have no zero-cost fix. The current known limit: when a box holds a
 coloured stamp or heart across black type, `glyph_ink` can report the decoration

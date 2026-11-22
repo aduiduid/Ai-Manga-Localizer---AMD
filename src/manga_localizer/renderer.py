@@ -407,8 +407,20 @@ TEXT_PADDING_MIN = 2
 # artwork.  Type on top of a drawing is unreadable, so the spilled glyphs get a
 # translucent card: light enough that the artwork still shows through, opaque
 # enough that the Chinese reads.  Only for that case -- see ``_draw``.
+#
+# The card is drawn only where it earns its keep, i.e. where the artwork under
+# it sits close in luminance to the type (``PLATE_MARGIN``).  Drawing it
+# unconditionally was actively harmful both ways: on white balloons it is a
+# white-on-white nothing (invisible), yet the rectangle still reaches artwork
+# beside the line and washes it out -- ``p005u01`` sits in a white balloon with
+# two pink wedges either side and both were erased by a plate nobody could see.
+# On 746 cards across the sample book the plate keeps 134 and drops 612.
 PLATE_FILL = (255, 255, 255, 150)
 PLATE_PADDING = 3
+# How far the backdrop must be from the type before the card stops helping.
+# Below this the type and its ground are too close to read unaided; above it the
+# type already separates from the artwork and the card only costs picture.
+PLATE_MARGIN = 110.0
 # Corner radius of the card under spilled type.  It scales with the card's own
 # height instead of being a fixed 6 px: on a one-line card 6 px is already most
 # of the height and reads as a pill, while on a five-line card the same 6 px
@@ -425,6 +437,28 @@ def plate_radius(span: tuple[int, int, int, int]) -> int:
     return int(
         min(PLATE_RADIUS_MAX, max(PLATE_RADIUS_MIN, round(height * PLATE_RADIUS_RATIO)))
     )
+
+
+def plate_is_needed(
+    image: Image.Image, card: tuple[int, int, int, int], fill
+) -> bool:
+    """Whether the card's ground is too close to ``fill`` to read unaided.
+
+    ``image`` is the already-erased artwork the card will be pasted over.  The
+    test is luminance separation, not "is this area busy": artwork that is busy
+    but far away in luminance (the pink wedges beside black type) does not
+    threaten legibility and the card would only cover it up.
+    """
+    target = 0.0 if fill == "black" else 255.0 if fill == "white" else _level(fill)
+    width, height = image.size
+    left = max(0, int(card[0]))
+    top = max(0, int(card[1]))
+    right = min(width, int(round(card[2])) + 1)
+    bottom = min(height, int(round(card[3])) + 1)
+    if right <= left or bottom <= top:
+        return True
+    patch = np.asarray(image.crop((left, top, right, bottom)).convert("L"))
+    return abs(float(np.median(patch)) - target) <= PLATE_MARGIN
 
 
 def _text_padding(box: list[int]) -> tuple[int, int]:
@@ -1496,9 +1530,10 @@ class ArtworkPreservingRenderer:
                     max(span[2] for span in spans) + PLATE_PADDING,
                     max(span[3] for span in spans) + PLATE_PADDING,
                 )
-                draw.rounded_rectangle(
-                    list(card), radius=plate_radius(card), fill=PLATE_FILL
-                )
+                if plate_is_needed(image, card, fill):
+                    draw.rounded_rectangle(
+                        list(card), radius=plate_radius(card), fill=PLATE_FILL
+                    )
             for (x, y), line in zip(placed, lines):
                 draw.text(
                     (x, y),
