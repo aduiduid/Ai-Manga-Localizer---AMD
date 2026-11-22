@@ -1,3 +1,25 @@
+## 0.13.19 - 2026-11-22
+
+- Coloured lettering on bright paper keeps its colour. A rule added in 0.13.15
+  discarded any dark saturated ink sitting on bright paper, on the theory that
+  such a reading must be the anti-aliasing edge of black strokes. The case it was
+  written for is in fact a whole paragraph of violet type, so the rule was
+  deleting real colour from 230 units on the sample book: every violet line of
+  dialogue, the red lettering, the cover title. p015u01 "NO!" at ink (84,40,117)
+  and p015u10 "PLEASE," at (82,41,117) both sit on paper of level 252-255 and were
+  both being painted black; they now keep their violet.
+- What actually keeps a fringe out of the colour path is the cluster-share floor,
+  not a brightness rule: a 4 px violet rim around black bars occupies 3.8% of the
+  crop, under INK_SHARE_MIN of 4%, so it never becomes a cluster candidate and the
+  existing fringe test still passes with the brightness rule gone.
+- Neutral type is unaffected: the sample book prints black type with a green cast
+  of 26-34 channel spread, below INK_SATURATION of 40, so those lines keep their
+  black fill. Verified both directions on rendered pages, not just on styles.
+- Known limit, left explicit rather than half-fixed: where a box holds a coloured
+  stamp or heart across black type, glyph_ink may report the decoration instead of
+  the lettering, because the lettering cluster is less saturated than the
+  decoration. That affects 6 units of 1350 and shows up as a wrong-hue
+  translation, not as a missing erase.
 ## 0.13.18 - 2026-11-22
 
 - Docs: `docs/ocr-backend-comparison-2026-11-22.md` records a controlled

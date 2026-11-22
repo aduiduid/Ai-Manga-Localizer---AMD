@@ -1268,3 +1268,50 @@ def test_the_plate_corner_scales_with_the_card():
     assert PLATE_RADIUS_MIN <= short < tall <= PLATE_RADIUS_MAX
     # A card shorter than the minimum still gets a drawable radius, not zero.
     assert plate_radius((0, 0, 60, 1)) >= PLATE_RADIUS_MIN
+
+
+def test_violet_lettering_on_bright_paper_keeps_its_colour():
+    """A saturated reading on white paper is usually just coloured type.
+
+    A rule used to discard any dark saturated ink on bright paper, on the theory
+    that it was the anti-aliasing edge of black strokes.  On the sample book that
+    deleted real colour from 230 units -- every violet line of dialogue, the red
+    lettering, the cover title -- and the case it was written for turned out to be
+    a whole paragraph of violet type, not black type with a violet edge.
+    """
+    page = np.full((120, 340, 3), 253, dtype=np.uint8)
+    for x in range(30, 310, 40):
+        page[45:95, x : x + 22] = (84, 40, 117)
+    unit = TextUnit("p1u1", [20, 40, 320, 100], [20, 40, 320, 100], "NO!", 1.0, False, "不！")
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    assert style.ink is not None, "violet type on white paper must keep its colour"
+    # Saturation is the channel spread, and the blue end is the wide one here.
+    assert max(style.ink) - min(style.ink) >= INK_SATURATION
+    assert style.ink[2] == max(style.ink), "the reading must still be the violet one"
+
+
+def test_plain_black_lettering_on_white_paper_stays_black():
+    """The other direction: neutral type must not acquire a colour."""
+    page = np.full((120, 340, 3), 253, dtype=np.uint8)
+    for x in range(30, 310, 40):
+        page[45:95, x : x + 22] = (18, 18, 18)
+    unit = TextUnit("p1u1", [20, 40, 320, 100], [20, 40, 320, 100], "STOP", 1.0, False, "停")
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    assert style.ink is None
+    assert style.fill == "black"
+
+
+def test_a_coloured_bubble_does_not_paint_black_type():
+    """Green cast on black type must not be mistaken for green lettering.
+
+    The sample book prints neutral black type with a slight green cast
+    (luminance-neutral, channel spread 26-34).  Treating that as coloured ink
+    would repaint every such line green.
+    """
+    page = np.full((120, 340, 3), 253, dtype=np.uint8)
+    for x in range(30, 310, 40):
+        page[45:95, x : x + 22] = (58, 90, 58)  # dark, faintly green
+    unit = TextUnit("p1u1", [20, 40, 320, 100], [20, 40, 320, 100], "HELLO", 1.0, False, "你好")
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    assert style.ink is None, "a 32-level cast is below INK_SATURATION"
+    assert style.fill == "black"

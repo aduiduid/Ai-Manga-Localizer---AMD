@@ -112,10 +112,6 @@ INK_TOLERANCE = 40.0
 INK_SATURATION = 40
 # A neutral core darker than this is black lettering, not the halo.
 INK_DARK = 90.0
-# Paper this bright cannot carry dark coloured lettering: a dark saturated
-# reading there is the anti-aliasing edge of black type, not the glyph.
-INK_FRINGE_PAPER = 232.0
-INK_FRINGE_LEVEL = 150.0
 # A glyph's outline sits within this many pixels of the glyph itself.
 OUTLINE_REACH = 5
 # Below this many glyph pixels the crop is noise, not lettering.
@@ -140,28 +136,18 @@ def _level(rgb: tuple[int, int, int]) -> float:
 def _ink_colour(rgb: np.ndarray, box: list[int]) -> tuple[int, int, int] | None:
     """The colour the glyphs are drawn in, whatever that colour is.
 
-    On white paper the answer is only trusted when it can be lettering: coloured
-    type there is bright and dark type is neutral, so a dark saturated reading is
-    the violet edge that anti-aliasing leaves around black strokes.  That edge is
-    saturated enough to outrank the polarity vote and to replace the luminance
-    seed with a colour-distance one, and it is a tenth of the box -- so the
-    strokes it does not match kept the source text readable under the
-    translation, and the translation was drawn in the fringe colour.
+    Nothing here overrides the colour on brightness grounds.  A rule that did --
+    "bright paper plus dark saturated ink means the reading is anti-aliasing" --
+    was deleting real colour from 230 units on this book: every violet line of
+    dialogue, the red lettering, the cover title.  The case it was built from was
+    itself misdiagnosed: that paragraph is violet type, not black type with a
+    violet edge.  Whether the colour can be trusted is decided where the pixels
+    are clustered (``glyph_ink``), because that is where the evidence is.
     """
     ink = glyph_ink(rgb, box)
     if ink is None:
         return None
-    colour = (int(ink[0]), int(ink[1]), int(ink[2]))
-    if max(colour) - min(colour) < INK_SATURATION:
-        return colour
-    x0, y0, x1, y1 = (int(value) for value in box)
-    crop = rgb[max(0, y0) : max(0, y1), max(0, x0) : max(0, x1)]
-    if not crop.size:
-        return colour
-    paper = float(np.median(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)))
-    if paper >= INK_FRINGE_PAPER and _level(colour) < INK_FRINGE_LEVEL:
-        return None
-    return colour
+    return (int(ink[0]), int(ink[1]), int(ink[2]))
 
 
 def managed_font_path(paths: AppPaths | None = None) -> Path:
