@@ -149,6 +149,23 @@ def test_a_queued_folder_shows_the_clock_of_the_job_that_is_running(tmp_path):
     wait_for_batch(client, batch_id)
 
 
+def test_a_finished_folder_keeps_its_stage_clock_on_its_own_row(tmp_path):
+    client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=ClocksPipeline))
+    folder = make_folder(tmp_path, "chapter-01")
+
+    batch = start_batch(client, [folder], tmp_path / "out").json()
+    finished = wait_for_batch(client, batch["id"])
+
+    task = finished["tasks"][0]
+    assert task["status"] == "complete"
+    # view() only merges the folders that are still live, so a finished row
+    # never re-reads its job record.  The clock therefore has to be written
+    # into the batch record when the folder finishes, or the row keeps a
+    # blank clock for the rest of its life.
+    assert isinstance(task["timings"], dict)
+    assert task["timings"], "a finished folder lost its stage clock"
+
+
 def test_the_read_ahead_only_fires_for_a_gpu_backend_and_the_manga_eraser():
     from manga_localizer.pipeline import pipeline_parallel_ready
 

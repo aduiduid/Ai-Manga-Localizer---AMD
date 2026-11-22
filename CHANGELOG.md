@@ -23,6 +23,11 @@
 - Polling cadence is adaptive: 2 s while a job is active, 10 s when it is
   idle, halving the request rate on a long run.
 
+- A batch that finished before this change has no stage clock stored, so
+  its history row keeps blank stage times. `data/batches/9f5e64919c27.json`
+  is the real case: 46 tasks, none of them carrying timings. The numbers
+  are not reconstructible after the fact, so nothing is backfilled.
+
 ## 0.13.21 - 2026-11-22
 
 - The plate under spilled type is now drawn only where it earns its place.
