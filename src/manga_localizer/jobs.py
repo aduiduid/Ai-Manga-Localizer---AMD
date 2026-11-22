@@ -188,14 +188,25 @@ class JobStore:
         with self._lock:
             return json.loads(path.read_text(encoding="utf-8"))
 
-    def list(self) -> list[dict]:
+    def list(self, *, summary: bool = False) -> list[dict]:
+        """Newest first.  ``summary`` drops the page manifest.
+
+        A finished book stores one entry per page under ``result``, so a hundred
+        books of history is megabytes of JSON that the history list never shows.
+        Callers that only need the headline ask for the summary; anything that
+        reads the record itself (orphan adoption, shutdown, a full GET) does not.
+        """
         jobs = []
         for path in self.folder.glob("*.json"):
             try:
                 jobs.append(json.loads(path.read_text(encoding="utf-8")))
             except (OSError, json.JSONDecodeError):
                 continue
-        return sorted(jobs, key=lambda item: item.get("created_at", ""), reverse=True)
+        jobs.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        if summary:
+            for job in jobs:
+                job.pop("result", None)
+        return jobs
 
 
 class JobService:

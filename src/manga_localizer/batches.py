@@ -411,6 +411,12 @@ class BatchService:
         merged = deepcopy(batch)
         tasks = merged.get("tasks") or []
         for task in tasks:
+            # A folder that has finished already wrote its final numbers into the
+            # batch record (see _run_task).  Re-reading its job file just to copy
+            # the same scalars back made one poll cost 107 ms once 52 books were
+            # done, because every finished result is re-parsed for nothing.
+            if task.get("status") not in LIVE_STATUSES:
+                continue
             job_id = task.get("job_id")
             if not job_id:
                 continue
@@ -869,5 +875,10 @@ class BatchService:
             message=final.get("message") or "任务失败",
             error=final.get("error"),
             finished_at=final.get("finished_at") or utc_now(),
+            # The clock belongs to the folder, and view() no longer reads a
+            # finished job record, so the numbers have to land here.
+            timings=final.get("timings")
+            or (final.get("result") or {}).get("timings")
+            or {},
         )
         self.store.save(batch)

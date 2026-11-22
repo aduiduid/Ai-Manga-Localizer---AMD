@@ -768,7 +768,9 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
 
     @app.get("/api/jobs")
     def list_jobs():
-        return {"jobs": jobs.store.list()}
+        # Polled once a second: the history list needs status and progress, not
+        # the per-page manifest that made this response 2.7 MB.
+        return {"jobs": jobs.store.list(summary=True)}
 
     @app.get("/api/batches")
     def list_batches():

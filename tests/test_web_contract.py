@@ -330,7 +330,10 @@ def test_batch_terminal_state_rings_the_chime_once():
     assert 'else if(job.status==="failed"){announceJobEnd("failure")' in batch_branch
     assert 'else if(job.status==="cancelled"){announceJobEnd("failure")' in batch_branch
     # A finished batch is not polled again: only live batches reschedule.
-    assert "else state.pollTimer=setTimeout(pollJob,1000);return}" in batch_branch
+    # The cadence is adaptive now: 2 s while work is in flight, 10 s when it
+    # is not, because a one-second heartbeat re-parsed the whole batch record
+    # every tick for a bar that barely moves.
+    assert "else state.pollTimer=setTimeout(pollJob,pollDelay(job));return}" in batch_branch
 
 
 def test_batch_card_shows_the_running_folder_phase():
@@ -685,6 +688,9 @@ def test_a_failed_poll_reschedules_instead_of_ending_the_updates():
     assert "state.pollFailures=0;" in poll
     assert "state.pollFailures=(state.pollFailures||0)+1" in poll
     assert "state.pollTimer=setTimeout(pollJob,Math.min(8000," in poll
+    assert "POLL_ACTIVE_MS=2000" in javascript
+    assert "POLL_IDLE_MS=10000" in javascript
+    assert "function pollDelay(job)" in javascript
     assert "pollFailures:0" in javascript
 def test_a_poll_tick_keeps_the_rows_the_user_is_about_to_click():
     javascript = (WEB / "app.js").read_text(encoding="utf-8")

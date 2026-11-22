@@ -1,3 +1,28 @@
+## 0.13.22 - 2026-11-23
+
+- Polling a long batch no longer stops the page or hides its clock.
+  `BatchService.view()` used to re-read and re-parse the full job record of
+  every finished folder on each poll, purely to copy nine scalars that the
+  batch record already carried. At 52 books that was 107 ms per tick and 12
+  MB re-parsed per second, in the same process as the OCR and render work,
+  which is what made a large batch feel like a frozen page. It now merges
+  only the running and paused folders; a folder that finishes writes its
+  own stage clock into the batch record as it completes.
+
+- The batch card's stage clocks were always blank. `tickStageClocks` read
+  `state.currentJob`, which in a batch is the batch itself, and the batch
+  record carries no timings; the numbers live on the selected folder. The
+  tick now resolves the batch to its current task, so the four stage times
+  write once and keep counting instead of being wiped every second.
+
+- `/api/jobs` returns a summary: the history list drops each job's page
+  manifest, shrinking the response from 2.57 MB to 221 KB. The history
+  renders its first 50 rows with a "show more" control instead of every
+  record at once.
+
+- Polling cadence is adaptive: 2 s while a job is active, 10 s when it is
+  idle, halving the request rate on a long run.
+
 ## 0.13.21 - 2026-11-22
 
 - The plate under spilled type is now drawn only where it earns its place.
