@@ -950,7 +950,7 @@ def test_windows_cpu_detector_disables_mkldnn_regression():
     assert "enable_mkldnn=False" in source
 
 
-def test_quality_recogniser_uses_onednn_but_detector_does_not(tmp_path):
+def test_quality_recogniser_uses_onednn_but_detector_does_not(tmp_path, monkeypatch):
     """oneDNN speeds recognition up 3.7x with identical text, and only there.
 
     Paddle 3.3.1 raises NotImplementedError converting the detector's PIR
@@ -960,8 +960,17 @@ def test_quality_recogniser_uses_onednn_but_detector_does_not(tmp_path):
     actually built: the constructor's guard proves the guard ran, not that the
     config reached the model.
     """
+    pytest.importorskip("paddleocr")
     from manga_localizer import ocr as ocr_module
     from manga_localizer.config import AppPaths
+
+    # The engine downloads 97 MB when the cache is cold and fails outright
+    # offline, so point it at the models the project already has instead of
+    # letting it fill pytest's temp directory on every run.
+    cache = Path(__file__).resolve().parents[2] / "data" / "models" / "paddlex"
+    if not cache.is_dir():
+        pytest.skip(f"needs the paddlex models under {cache}")
+    monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(cache))
 
     paths = AppPaths(
         tmp_path, tmp_path / "models", tmp_path / "cache", tmp_path / "jobs",
@@ -2520,6 +2529,36 @@ class FakeModel:
         self.runner = FakeRunner(run_mode)
 
 
+def _stub_paddlex(monkeypatch):
+    """Stand in for the shipped paddlex config the quality branch merges.
+
+    CI installs the test extra only, so ``paddlex`` is as absent as
+    ``paddleocr`` is here: without this the branch raises ModelDependencyError
+    and the reader tests lose their coverage rather than skip.
+    """
+
+    def load_pipeline_config(name):
+        return {
+            "pipeline_name": name,
+            "SubModules": {
+                "TextDetection": {},
+                "TextLineOrientation": {},
+                "TextRecognition": {},
+            },
+        }
+
+    pipelines = type("m", (), {"load_pipeline_config": load_pipeline_config})
+    pipelines.__path__ = []
+    inference = type("m", (), {"pipelines": pipelines})
+    inference.__path__ = []
+    paddlex = type("m", (), {"inference": inference})
+    paddlex.__path__ = []
+    modules = __import__("sys").modules
+    monkeypatch.setitem(modules, "paddlex", paddlex)
+    monkeypatch.setitem(modules, "paddlex.inference", inference)
+    monkeypatch.setitem(modules, "paddlex.inference.pipelines", pipelines)
+
+
 def test_a_supplied_reader_is_used_instead_of_mangaocr(tmp_path, monkeypatch):
     """The hayai backend swaps the recogniser and nothing else.
 
@@ -2570,6 +2609,7 @@ def test_a_supplied_reader_is_used_instead_of_mangaocr(tmp_path, monkeypatch):
         "paddleocr",
         type("m", (), {"PaddleOCR": FakePaddleOCR, "TextDetection": FakeDetector}),
     )
+    _stub_paddlex(monkeypatch)
     reader = FakeReader()
     from manga_localizer.config import AppPaths
 
@@ -2628,6 +2668,7 @@ def test_a_forced_reader_owns_a_declared_english_page(tmp_path, monkeypatch):
         "paddleocr",
         type("m", (), {"PaddleOCR": FakeDetector, "TextDetection": FakeDetector}),
     )
+    _stub_paddlex(monkeypatch)
     paths = AppPaths(
         tmp_path, tmp_path / "models", tmp_path / "cache", tmp_path / "jobs",
         tmp_path / "settings.json",
