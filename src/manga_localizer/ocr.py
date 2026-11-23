@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import difflib
 import json
 import re
@@ -1697,6 +1698,10 @@ class PaddleMangaOCR:
             # present its absence as a broken runtime component to desktop users.
             with _suppress_optional_ccache_warning():
                 from paddleocr import PaddleOCR, TextDetection
+                # The merge entry point: reading the shipped pipeline
+                # config is how a sub-module gets one override without
+                # this file owning a copy of that config.
+                from paddlex.inference.pipelines import load_pipeline_config
         except ImportError as exc:
             raise ModelDependencyError(
                 "OCR dependencies are missing. Run scripts/bootstrap with an ML profile."
@@ -1723,6 +1728,19 @@ class PaddleMangaOCR:
             )
             self.recognition_detector = None
             if profile == "quality":
+                # Recognition is 83% of a page's OCR seconds and oneDNN
+                # runs it 3.7x faster with identical text.  The detector
+                # has to stay on plain paddle: Paddle 3.3.1 cannot convert
+                # its PIR attribute graph for oneDNN and PIR cannot be
+                # switched off.  Enabling oneDNN here switches all three
+                # sub-modules, so the other two are pinned back through the
+                # supported `paddlex_config` merge -- an override on top of
+                # the shipped config, not a config this file maintains.
+                merged = copy.deepcopy(load_pipeline_config("OCR"))
+                for pinned in ("TextDetection", "TextLineOrientation"):
+                    merged["SubModules"][pinned]["engine_config"] = {
+                        "paddle_static": {"run_mode": "paddle"}
+                    }
                 self.recognition_detector = PaddleOCR(
                     text_detection_model_name="PP-OCRv5_mobile_det",
                     text_recognition_model_name="PP-OCRv5_server_rec",
@@ -1731,8 +1749,31 @@ class PaddleMangaOCR:
                     use_textline_orientation=True,
                     device=resolved_device,
                     text_recognition_batch_size=32,
-                    enable_mkldnn=False,
+                    enable_mkldnn=True,
+                    paddlex_config=merged,
                 )
+                # Without this, a silently ignored config would look like
+                # the speedup while running the old path.
+                _pipelines = self.recognition_detector.paddlex_pipeline._pipeline
+                built_modes = {
+                    "text_det_model": _pipelines.text_det_model.runner._config[
+                        "run_mode"
+                    ],
+                    "textline_orientation_model": (
+                        _pipelines.textline_orientation_model.runner._config["run_mode"]
+                    ),
+                    "text_rec_model": _pipelines.text_rec_model.runner._config["run_mode"],
+                }
+                wanted = {
+                    "text_det_model": "paddle",
+                    "textline_orientation_model": "paddle",
+                    "text_rec_model": "mkldnn",
+                }
+                if built_modes != wanted:
+                    raise RuntimeError(
+                        f"Paddle OCR built {built_modes}, wanted {wanted}; "
+                        "the recognition speedup is not in effect"
+                    )
         try:
             import torch
 

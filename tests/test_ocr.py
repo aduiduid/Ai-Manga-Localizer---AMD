@@ -950,6 +950,33 @@ def test_windows_cpu_detector_disables_mkldnn_regression():
     assert "enable_mkldnn=False" in source
 
 
+def test_quality_recogniser_uses_onednn_but_detector_does_not(tmp_path):
+    """oneDNN speeds recognition up 3.7x with identical text, and only there.
+
+    Paddle 3.3.1 raises NotImplementedError converting the detector's PIR
+    attribute graph for oneDNN, and PIR cannot be switched off, so enabling
+    oneDNN for the recogniser switches every sub-module and then pins the two
+    that must stay on plain paddle.  Read the modes off the runners that were
+    actually built: the constructor's guard proves the guard ran, not that the
+    config reached the model.
+    """
+    from manga_localizer import ocr as ocr_module
+    from manga_localizer.config import AppPaths
+
+    paths = AppPaths(
+        tmp_path, tmp_path / "models", tmp_path / "cache", tmp_path / "jobs",
+        tmp_path / "settings.json",
+    )
+    engine = ocr_module.PaddleMangaOCR(
+        paths, "cpu", "quality", "en", reader=lambda crop: ""
+    )
+    built = engine.recognition_detector.paddlex_pipeline._pipeline
+
+    assert built.text_det_model.runner._config["run_mode"] == "paddle"
+    assert built.textline_orientation_model.runner._config["run_mode"] == "paddle"
+    assert built.text_rec_model.runner._config["run_mode"] == "mkldnn"
+
+
 def test_detection_only_payload_becomes_tight_regions():
     payload = {
         "dt_polys": [
@@ -2481,6 +2508,18 @@ def test_a_credit_far_from_any_artwork_block_is_still_translated():
     assert caption.skip is False
 
 
+class FakeRunner:
+    """The single attribute the OCR builder reads back after construction."""
+
+    def __init__(self, run_mode):
+        self._config = {"run_mode": run_mode}
+
+
+class FakeModel:
+    def __init__(self, run_mode):
+        self.runner = FakeRunner(run_mode)
+
+
 def test_a_supplied_reader_is_used_instead_of_mangaocr(tmp_path, monkeypatch):
     """The hayai backend swaps the recogniser and nothing else.
 
@@ -2499,7 +2538,14 @@ def test_a_supplied_reader_is_used_instead_of_mangaocr(tmp_path, monkeypatch):
 
     class FakeDetector:
         def __init__(self, *args, **kwargs):
-            pass
+            # Mirrors PaddleOCR(...).paddlex_pipeline._pipeline, which the
+            # quality branch reads to prove oneDNN reached the recogniser
+            # only.  These doubles exist to check the reader, not the modes.
+            self.paddlex_pipeline = self
+            self._pipeline = self
+            self.text_det_model = FakeModel("paddle")
+            self.textline_orientation_model = FakeModel("paddle")
+            self.text_rec_model = FakeModel("mkldnn")
 
         def predict(self, *args, **kwargs):
             return []
@@ -2557,7 +2603,14 @@ def test_a_forced_reader_owns_a_declared_english_page(tmp_path, monkeypatch):
 
     class FakeDetector:
         def __init__(self, *args, **kwargs):
-            pass
+            # Mirrors PaddleOCR(...).paddlex_pipeline._pipeline, which the
+            # quality branch reads to prove oneDNN reached the recogniser
+            # only.  These doubles exist to check the reader, not the modes.
+            self.paddlex_pipeline = self
+            self._pipeline = self
+            self.text_det_model = FakeModel("paddle")
+            self.textline_orientation_model = FakeModel("paddle")
+            self.text_rec_model = FakeModel("mkldnn")
 
         def predict(self, *args, **kwargs):
             return []

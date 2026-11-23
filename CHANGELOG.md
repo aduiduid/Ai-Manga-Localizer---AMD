@@ -1,3 +1,25 @@
+## 0.13.24 - 2026-11-23
+
+- The quality OCR profile now runs its recogniser through oneDNN. Recognition
+  is 83% of OCR time (job `de660845915c`: 10509.3 s across 611 pages, i.e.
+  17.2 s a page and 3.6 h for a 1360-page book) and the recogniser can take
+  `enable_mkldnn` while the detector cannot -- Paddle 3.3.1 raises
+  `NotImplementedError: ConvertPirAttribute2RuntimeAttribute` at
+  `onednn_instruction.cc:118` for the detector's PIR graph, and PIR cannot be
+  turned off.
+
+- The detector and the line-orientation model are pinned back to plain paddle
+  through `paddlex_config`, a deep copy of `load_pipeline_config("OCR")` with
+  one `engine_config` added to each of the two sub-modules. The build is then
+  read back off the runners and a mismatch raises instead of quietly running
+  the old path.
+
+- Measured on the same ten pages: recognition 135.4 s -> 43.5 s (3.11x), whole
+  pages 132.1 s -> 40.2 s (3.29x, 13.2 s -> 4.0 s a page). Every page produced
+  identical `rec_texts` (0 of 10 pages differ, 157 lines) and the largest
+  `rec_score` change was 4.8e-06, so `OCR_CACHE_VERSION` stays at 19 and
+  caches built before this release stay valid.
+
 ## 0.13.23 - 2026-11-23
 
 - The selected row of a batch card now follows the folder that is actually
