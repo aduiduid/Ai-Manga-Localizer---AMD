@@ -20,6 +20,11 @@
   `rec_score` change was 4.8e-06, so `OCR_CACHE_VERSION` stays at 19 and
   caches built before this release stay valid.
 
+- Limit: CI installs the test extra only, so it has no paddleocr and no
+  paddlex. `test_quality_recogniser_uses_onednn_but_detector_does_not`
+  skips there and only the machines with the ml extra actually run its
+  three `run_mode` assertions -- CI does not cover them.
+
 ## 0.13.23 - 2026-11-23
 
 - The selected row of a batch card now follows the folder that is actually
