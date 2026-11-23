@@ -313,6 +313,24 @@ def test_resume_restores_the_setup_form_from_the_batch_request():
     assert active_branch.startswith('if(active){state.taskIndex=-1;restoreJobForm(active);renderJob(active);pollJob()}')
 
 
+def test_the_batch_row_follows_the_folder_that_is_running():
+    # A batch row used to stay on tasks[0] for the whole run because the row was only
+    # re-picked once it went out of range. The four stage clocks then showed the first
+    # book's frozen numbers, or nothing at all when that book had no timings.
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    assert "taskIndex:0,taskPinned:false,jobsShown:HISTORY_PAGE" in javascript
+    assert (
+        'if(!state.taskPinned){const live=tasks.findIndex(task=>task.status==="running")'
+        ';if(live>=0)state.taskIndex=live}'
+    ) in javascript
+    # Clicking a row is a deliberate choice, so the next poll must not take it back.
+    assert "function selectTask(index){state.taskIndex=index;state.taskPinned=true;" in javascript
+    # Each new job starts unpinned, otherwise a pin from the previous run would stick.
+    assert "state.taskPinned=false;if(active){state.taskIndex=-1;" in javascript
+    assert "state.taskIndex=-1;state.taskPinned=false;" in javascript
+    assert "state.taskIndex=-1;state.taskPinned=false;restoreJobForm(job)" in javascript
+
+
 def test_preview_follows_the_selected_batch_task():
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
     assert "function previewTarget()" in javascript
