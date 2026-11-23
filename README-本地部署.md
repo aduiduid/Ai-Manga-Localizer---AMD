@@ -91,10 +91,72 @@ Music/Videos/Favorites/Links/Searches/Contacts 十个壳目录。
 **改 `start.bat` 必须保持 CRLF 行尾**：写成 LF 后 cmd 会把整行拆碎，
 报 `'Localizer' is not recognized as an internal or external command`。
 
+## OCR 模型版本
+
+内置 OCR（`ocr_backend=builtin`）用的包，全部已装在本项目 venv 里，也都是 PyPI 上的最新版：
+
+| 包 | 版本 |
+| --- | --- |
+| `paddleocr` | 3.7.0 |
+| `paddlex` | 3.7.2 |
+| `paddlepaddle` | 3.3.1 |
+| `manga-ocr` | 0.1.16 |
+| `hayai-ocr` | 2.4.0（`hayai` / `hayai_force` 后端才加载） |
+
+`manga-ocr` 的权重来自 Hugging Face 的 `kha-white/manga-ocr-base`，revision
+`aa6573bd10b0d446cbf622e29c3e084914df9741`。该仓库 2022-06-22 之后没有再更新过，
+所以这个型号已经到顶了，升级 `manga-ocr` 包不会换到新权重。
+
+当前模型是 **`PP-OCRv5_mobile_det` + `PP-OCRv5_server_rec`**。PP-OCRv6 已经发布
+（tiny / small / medium 的 det 与 rec），本项目**没有采用**，原因有两条：
+
+- 检测不是瓶颈。整页 OCR 均值 17.37 s，检测器只占 0.82 s（4.7%），换检测器省不了时间。
+- 换检测器会改变框数：同一批页面的文字行数从 133 掉到 125（小模型）/ 119（中模型），
+  行数变少意味着有行被合并或漏掉，下游翻译与排字都会跟着变，不值得为 4.7% 冒这个险。
+
+## 为什么 OCR 跑在 CPU
+
+这不是配置漏了，是这台机器上确实没有一条能走通的路。三条硬事实：
+
+1. **Paddle 没有 Windows + AMD 的发行版。** 本机 `paddlepaddle 3.3.1` 是 CPU 构建：
+   `paddle.is_compiled_with_cuda()` 与 `paddle.is_compiled_with_rocm()` 都返回 `False`，
+   `paddle.device.get_device()` 返回 `cpu`。PyPI 上 `paddlepaddle-gpu` 最新只到 **2.6.2**，
+   它的 `win_amd64` wheel 全是 CUDA 构建；官方 Windows 安装文档给的三条命令分别是
+   cu118 / cu126 / cu129，没有一条是 ROCm。RX 9070 XT 没有能装的 Paddle。
+
+2. **torch 是 CPU 构建。** `torch.__version__` 是 `2.8.0+cpu`，
+   `torch.cuda.is_available()` 为 `False`，`torch.version.hip` 为 `None`。
+   PyTorch 官方的 ROCm 索引（rocm6.3 / 6.4 / 7.2）里 `win_amd64` wheel 数量是 **0**，
+   只有 manylinux —— Windows 上连装 ROCm 版 torch 这条路都不存在，所以纯 torch 的
+   `manga-ocr` 同样上不了卡。
+
+3. **ONNX Runtime 是这里唯一真带 GPU 执行器的库，但 OCR 用不上它。**
+   本机装的是 `onnxruntime-directml 1.24.4`，`ort.get_available_providers()` 返回
+   `['DmlExecutionProvider', 'CPUExecutionProvider']`；AOT 擦除图实测确实绑到了
+   `DmlExecutionProvider`（补画能上卡就是这个原因）。OCR 走不到这条路上：
+
+   - `hayai_ocr` 不传 providers 时自己就把 int8 图钉在 CPU（`onnx.py`：int8 / int4
+     精度一律 `providers = ["CPUExecutionProvider"]`）；
+   - 本项目显式传了 DirectML，但两个 int8 图在 DML 上仍然失败，且失败点不同：
+     预填充图卡在 `Reshape` 节点 `node_view`，解码图卡在 `node_Reshape_1644`
+     （ORT 报 `Non-zero status code returned while running Reshape node`）。
+     同两个图换成 CPU 就正常。
+   - DirectML 对每个新输入尺寸都要重做一次准备。同一张 AOT 图各喂 6 次，
+     固定尺寸对每次换尺寸，各测 3 轮：DML 稳定慢 **1.52–1.74×**（固定 129–161 ms，
+     换尺寸 224–252 ms）；CPU 同期是 0.68–0.95×，即只跟着像素数走、没有额外惩罚。
+     OCR 每页的气泡尺寸都不一样，正落在 DML 最不划算的用法上。
+
+**已评估并否决：`torch-directml`。** PyPI 最新是 `0.2.5.dev240914`，`requires_dist` 写死
+`torch==2.4.1`、`torchvision==0.19.1`，会把本项目的 torch 从 2.8.0 一次降两级；
+classifier 只到 Python 3.10。为一个 Public Preview 后端降两代 torch，不值。
+
+这条限制就这么定着：**内置 OCR 与 `manga-ocr` 在本机只能跑 CPU**。翻译走 Ollama/Vulkan，
+补画走 DirectML，只有 OCR 这一段是 CPU，见下一节的实测耗时。
+
 ## 已知限制
 
-- **OCR 是纯 CPU**（RX 9070 XT 只能给 Ollama 用 Vulkan，Paddle 没有 ROCm/DirectML 后端）。
-  整本 71 页质量模式实测 **256 s**（约 3.6 s/页，含 OCR + 翻译 + LaMa 补画 + 排字）。
+- **OCR 是纯 CPU**，原因见上一节「为什么 OCR 跑在 CPU」。整本 71 页质量模式实测
+  **256 s**（约 3.6 s/页，含 OCR + 翻译 + LaMa 补画 + 排字）。
 - 翻译已全部上显卡：9B 主译 + Hy-MT2 候选都由 Ollama/Vulkan 跑，不再走 CPU torch。
 - `--ocr-backend hybrid` 会调 Ollama 做全页视觉语义。整页 VLM 会把网点纸、面板边框读成
   「ただだ」「効果か:」这类假文字，或把已有台词重读歪一两个字。本地已加三道过滤

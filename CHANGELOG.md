@@ -18,6 +18,21 @@
   submitting a new batch, resuming a batch, or opening one from history is what
   clears it.
 
+- Docs only, no behaviour change: README-本地部署.md now records the OCR
+  stack versions (paddleocr 3.7.0 / paddlex 3.7.2 / paddlepaddle 3.3.1 /
+  manga-ocr 0.1.16 / hayai-ocr 2.4.0), the `manga-ocr-base` revision it
+  pins (`aa6573bd…`, unchanged since 2022-06-22), and why PP-OCRv6 was not
+  adopted: the detector is 4.7% of page OCR time (0.82 s of 17.37 s) while
+  swapping it changes the detected line count from 133 to 125/119.
+
+- Docs only, no behaviour change: README-本地部署.md now explains why OCR stays
+  on the CPU on this box -- Paddle ships no Windows AMD build (paddlepaddle-gpu
+  on PyPI stops at 2.6.2, CUDA-only), PyTorch's ROCm channels carry no win_amd64
+  wheels at all, and the two Hayai int8 graphs fail on DirectML's `Reshape`
+  while the AOT erase graph binds DirectML fine. It also records the rejected
+  option: `torch-directml` 0.2.5.dev240914 pins `torch==2.4.1` and would drop
+  this project's torch two minor versions.
+
 ## 0.13.22 - 2026-11-23
 
 - Polling a long batch no longer stops the page or hides its clock.
