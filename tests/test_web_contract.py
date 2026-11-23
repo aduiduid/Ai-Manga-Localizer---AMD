@@ -331,6 +331,17 @@ def test_the_batch_row_follows_the_folder_that_is_running():
     assert "state.taskIndex=-1;state.taskPinned=false;restoreJobForm(job)" in javascript
 
 
+def test_opening_a_running_job_keeps_polling_it():
+    # openJob is the whole history-list path: it renders once and used to schedule
+    # nothing, so a job opened from the list sat on a frozen picture forever.
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    opened = javascript[javascript.index("async function openJob(jobId)"):]
+    opened = opened[: opened.index("\n", 0) if "\n" in opened else len(opened)]
+    assert "if(isJobActive(job))pollJob()" in opened
+    # The two resume callers poll again right after opening; that stays as it is.
+    assert "if(active){await openJob(active.id);pollJob();return}" in javascript
+
+
 def test_preview_follows_the_selected_batch_task():
     javascript = (WEB / "app.js").read_text(encoding="utf-8")
     assert "function previewTarget()" in javascript
