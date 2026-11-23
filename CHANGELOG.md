@@ -1,3 +1,23 @@
+## 0.13.23 - 2026-11-23
+
+- The selected row of a batch card now follows the folder that is actually
+  running. `renderBatchJob` only re-picked a row once the current index went
+  out of range, so `tasks[0]` held the selection for the whole run and the four
+  stage clocks showed the first book's frozen numbers. An older batch whose
+  first book carries no timings -- `data/batches/9f5e64919c27.json` is the real
+  case, 46 tasks and none with timings -- showed blank clocks instead, which is
+  the report this fixes.
+
+- Opening a job from the history list while it is still running keeps polling.
+  `openJob` rendered once and scheduled nothing, so the page sat on a frozen
+  picture until something else touched it. It now schedules the next poll when
+  the job is active.
+
+- Limit: once the user clicks a row, that batch stops following the running
+  folder for the rest of its life. Nothing on screen says the row is pinned;
+  submitting a new batch, resuming a batch, or opening one from history is what
+  clears it.
+
 ## 0.13.22 - 2026-11-23
 
 - Polling a long batch no longer stops the page or hides its clock.
