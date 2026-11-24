@@ -545,7 +545,7 @@ class PromptTranslator:
             or "初译：" in clean
             or "初译:" in clean
             or "||" in clean
-            or "/" in clean
+            or ("/" in clean and "/" not in unit.ja)
             or bool(re.search(r"第\d+页[：:]", clean))
         )
         latin_leak = bool(LATIN_RE.search(clean)) and not SOURCE_LATIN_RE.search(

@@ -265,6 +265,18 @@ def test_translation_quality_gate_rejects_kana_and_context_leakage():
     assert PromptTranslator._valid_translation(latin_source, "W〒！") is True
 
 
+def test_a_slash_the_source_already_had_is_not_a_context_leak():
+    # A page-number watermark like "Tob/2022" is the source, not a hint that
+    # the model recited the context: rejecting its faithful "托布/2022" put
+    # every signature through four calls per page and never let it through.
+    watermark = TextUnit("p001u03", [0, 0, 20, 20], [0, 0, 20, 20], "Tob/2022", 1.0)
+    assert PromptTranslator._valid_translation(watermark, "托布/2022") is True
+    # A slash the source never had is still the old leak signal.
+    prose = TextUnit("p001u04", [0, 0, 20, 20], [0, 0, 20, 20], "これは本です", 1.0)
+    assert PromptTranslator._valid_translation(prose, "这是书/图") is False
+
+
+
 def test_translation_quality_gate_allows_natural_chinese_expansion():
     unit = TextUnit("p001u01", [0, 0, 20, 20], [0, 0, 20, 20], "みんな引っ越した", 1.0)
     assert (
