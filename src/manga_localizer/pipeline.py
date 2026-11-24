@@ -256,7 +256,11 @@ class LocalizerPipeline:
         file and is swapped in, so the path holds either the old content or
         the new one, never half of each.  ``keep_previous`` copies the old
         file one extension over first: the draft is the only copy of text
-        the book already paid for.
+        the book already paid for, and a single slot that always holds the
+        previous write loses the best one on the second bad run -- two runs
+        of 4708 -> 180 -> 433 left nothing but 180.  The copy is therefore
+        only taken when the draft being replaced is at least as complete as
+        the backup already there.
         """
         payload = {
             "source": str(source),
@@ -274,12 +278,39 @@ class LocalizerPipeline:
         if glossary:
             payload["glossary"] = glossary
         if keep_previous and path.is_file():
-            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+            backup = path.with_suffix(path.suffix + ".bak")
+            kept = LocalizerPipeline._translated_units(backup)
+            replacing = LocalizerPipeline._translated_units(path)
+            if backup.is_file() and replacing < kept:
+                logger.warning(
+                    "[草稿备份] 新草稿 zh 更少（%d < %d），保留更完整的 .bak：%s",
+                    replacing, kept, backup,
+                )
+            else:
+                shutil.copy2(path, backup)
         temporary = path.with_suffix(path.suffix + ".part")
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         temporary.replace(path)
+
+    @staticmethod
+    def _translated_units(path: Path) -> int:
+        """How many units in a draft actually carry a translation."""
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        rows = payload.get("pages")
+        if not isinstance(rows, list):
+            return 0
+        return sum(
+            1
+            for row in rows
+            if isinstance(row, dict)
+            for unit in row.get("units") or []
+            if isinstance(unit, dict) and (unit.get("zh") or "").strip()
+        )
 
     @staticmethod
     def _draft_rejected(path: Path, gate: str, expected, actual) -> int:

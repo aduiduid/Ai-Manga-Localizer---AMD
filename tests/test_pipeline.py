@@ -714,6 +714,74 @@ def test_the_previous_draft_survives_a_new_write(tmp_path):
     assert json.loads(target.read_text(encoding="utf-8"))["pages"][0]["units"][0]["zh"] == ""
 
 
+def _draft_with_translations(tmp_path, translated: int) -> list:
+    """One page whose first ``translated`` units carry text, the rest do not."""
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    units = [
+        {
+            "id": f"p001u{index:02d}",
+            "bbox": [1, row * 20, 40, row * 20 + 16],
+            "ja": f"LINE {index}",
+            "zh": f"第 {index} 行" if index <= translated else "",
+        }
+        for index, row in enumerate(range(1, 121), start=1)
+    ]
+    return [
+        page_from_dict(
+            {
+                "page": 1,
+                "file": "001.jpg",
+                "width": 100,
+                "height": 2600,
+                "units": units,
+            }
+        )
+    ]
+
+
+def test_a_less_complete_draft_never_replaces_the_backup(tmp_path, caplog):
+    """The backup is a high-water mark, not the previous write.
+
+    A single slot that always holds the last file loses the best one on the
+    second bad run: 4708 -> 180 -> 433 left 180 in the backup and 4708 nowhere.
+    """
+    target = tmp_path / "work" / "translation-draft.json"
+    for translated in (100, 20, 5):
+        with caplog.at_level("WARNING", logger="manga_localizer.pipeline"):
+            LocalizerPipeline._write_transcript(
+                target,
+                tmp_path / "src",
+                _draft_with_translations(tmp_path, translated),
+                None,
+                "简体中文",
+                keep_previous=True,
+            )
+    backup = target.with_suffix(target.suffix + ".bak")
+    kept = json.loads(backup.read_text(encoding="utf-8"))
+    assert LocalizerPipeline._translated_units(backup) == 100
+    assert kept["pages"][0]["units"][0]["zh"] == "第 1 行"
+    assert LocalizerPipeline._translated_units(target) == 5
+    assert "保留更完整的 .bak" in caplog.text
+
+
+def test_a_better_draft_does_replace_the_backup(tmp_path):
+    """The ordinary "previous write" meaning still holds when nothing is lost."""
+    target = tmp_path / "work" / "translation-draft.json"
+    for translated in (100, 120):
+        LocalizerPipeline._write_transcript(
+            target,
+            tmp_path / "src",
+            _draft_with_translations(tmp_path, translated),
+            None,
+            "简体中文",
+            keep_previous=True,
+        )
+    backup = target.with_suffix(target.suffix + ".bak")
+    assert LocalizerPipeline._translated_units(backup) == 100
+    assert LocalizerPipeline._translated_units(target) == 120
+
+
 def _pipeline_paths(tmp_path):
     root = tmp_path / "home"
     return AppPaths(
