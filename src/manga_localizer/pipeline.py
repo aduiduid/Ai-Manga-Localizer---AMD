@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -58,6 +60,7 @@ from .translator import (
 )
 
 
+logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, int, int, str], None]
 # 8: recognition payloads now keep Paddle's own text, so every cached page from
 # version 7 holds MangaOCR's Japanese hallucination for English sources.
@@ -244,7 +247,17 @@ class LocalizerPipeline:
         pages: list[PageOCR],
         glossary: dict[str, str] | None = None,
         target_language: str = "",
+        keep_previous: bool = False,
     ) -> None:
+        """Write one transcript, atomically, keeping the file it replaces.
+
+        A run that dies mid-write used to truncate the draft, and the next
+        run then resumed whatever survived.  The new text lands beside the
+        file and is swapped in, so the path holds either the old content or
+        the new one, never half of each.  ``keep_previous`` copies the old
+        file one extension over first: the draft is the only copy of text
+        the book already paid for.
+        """
         payload = {
             "source": str(source),
             # Recorded so a later run can tell whether these lines are still
@@ -260,9 +273,28 @@ class LocalizerPipeline:
         }
         if glossary:
             payload["glossary"] = glossary
-        path.write_text(
+        if keep_previous and path.is_file():
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        temporary = path.with_suffix(path.suffix + ".part")
+        temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        temporary.replace(path)
+
+    @staticmethod
+    def _draft_rejected(path: Path, gate: str, expected, actual) -> int:
+        """Say which gate dropped the draft, and what it saw instead.
+
+        Every gate here used to return 0 in silence.  The caller then wrote a
+        fresh draft out of the OCR cache -- whose ``zh`` is always empty -- so a
+        run that could not resume also erased what it failed to resume, and
+        nothing anywhere said so.  The reported book lost 4708 lines that way.
+        """
+        logger.warning(
+            "[草稿未续用] 门禁=%s 草稿=%s 期望=%r 实际=%r",
+            gate, path, expected, actual,
+        )
+        return 0
 
     @staticmethod
     def _resume_translations(
@@ -293,23 +325,35 @@ class LocalizerPipeline:
         """
         path = work / "translation-draft.json"
         if not path.is_file():
-            return 0
+            return LocalizerPipeline._draft_rejected(
+                path, "草稿存在", "一个可读的草稿文件", "文件不存在"
+            )
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return 0
+        except (OSError, ValueError) as error:
+            return LocalizerPipeline._draft_rejected(
+                path, "草稿解析", "合法的 JSON", f"{type(error).__name__}: {error}"
+            )
         try:
             declared_version = int(payload.get("ocr_version", -1))
         except (TypeError, ValueError):
-            return 0
+            return LocalizerPipeline._draft_rejected(
+                path, "版本戳可解析", "整数 ocr_version", repr(payload.get("ocr_version"))
+            )
         if declared_version != OCR_CACHE_VERSION:
-            return 0
+            return LocalizerPipeline._draft_rejected(
+                path, "版本不符", OCR_CACHE_VERSION, declared_version
+            )
         declared = str(payload.get("target_language") or "")
         if declared and target_language and declared != target_language:
-            return 0
+            return LocalizerPipeline._draft_rejected(
+                path, "目标语言不符", target_language, declared
+            )
         rows = payload.get("pages")
         if not isinstance(rows, list):
-            return 0
+            return LocalizerPipeline._draft_rejected(
+                path, "pages 字段", "list", type(rows).__name__
+            )
         saved: dict[str, dict[str, tuple[str, str]]] = {}
         for row in rows:
             if not isinstance(row, dict):
@@ -326,7 +370,9 @@ class LocalizerPipeline:
                 if isinstance(unit, dict)
             }
         if not saved:
-            return 0
+            return LocalizerPipeline._draft_rejected(
+                path, "草稿内容", "至少一条带 file 的页面记录", f"{len(rows)} 页"
+            )
         reused = 0
         for page in pages:
             lines = saved.get(page.file)
@@ -776,6 +822,7 @@ class LocalizerPipeline:
                     pages,
                     translator.resolved_glossary,
                     request.target_language,
+                    keep_previous=True,
                 )
         else:
             self._write_transcript(
@@ -784,6 +831,7 @@ class LocalizerPipeline:
                 pages,
                 glossary,
                 request.target_language,
+                keep_previous=True,
             )
         if translator is not None:
             summarise = getattr(translator, "collapsed_summary", None)

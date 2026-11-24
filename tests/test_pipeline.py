@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -580,6 +581,137 @@ def test_a_draft_from_another_ocr_version_is_thrown_away(tmp_path, stamp):
     )
     assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
     assert page.units[0].zh == ""
+
+
+def test_a_draft_that_cannot_be_resumed_says_why(tmp_path, caplog):
+    """A gate that drops the draft used to return 0 without a word.
+
+    The caller then rewrote the draft out of the OCR cache, whose ``zh`` is
+    always empty -- so a run that could not resume also erased what it failed
+    to resume, and the log never said which gate had refused it.  The reported
+    book lost 4708 finished lines that way.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    draft = work / "translation-draft.json"
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [{"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "NO!", "zh": ""}],
+        }
+    )
+    draft.write_text(
+        json.dumps(
+            {
+                "target_language": "简体中文",
+                "ocr_version": OCR_CACHE_VERSION - 1,
+                "pages": [
+                    {
+                        "page": 1,
+                        "file": "001.jpg",
+                        "units": [{"id": "p001u01", "ja": "NO!", "zh": "不！"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING", logger="manga_localizer.pipeline"):
+        assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
+    assert "版本不符" in caplog.text
+    assert str(draft) in caplog.text
+    assert page.units[0].zh == ""
+
+    caplog.clear()
+    draft.write_text(
+        json.dumps(
+            {
+                "target_language": "繁體中文",
+                "ocr_version": OCR_CACHE_VERSION,
+                "pages": [
+                    {
+                        "page": 1,
+                        "file": "001.jpg",
+                        "units": [{"id": "p001u01", "ja": "NO!", "zh": "不！"}],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level("WARNING", logger="manga_localizer.pipeline"):
+        assert LocalizerPipeline._resume_translations(work, [page], "简体中文") == 0
+    assert "目标语言不符" in caplog.text
+    assert page.units[0].zh == ""
+
+
+def test_writing_the_draft_is_atomic(tmp_path, monkeypatch):
+    """A run killed mid-write leaves the old draft, not half a new one."""
+    work = tmp_path / "work"
+    work.mkdir()
+    target = work / "translation-draft.json"
+    original = {"target_language": "简体中文", "pages": []}
+    target.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
+    page = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [{"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "NO!", "zh": "不！"}],
+        }
+    )
+
+    def refuse(self, other):
+        raise OSError("the drive went away")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    with pytest.raises(OSError):
+        LocalizerPipeline._write_transcript(
+            target, tmp_path / "src", [page], None, "简体中文"
+        )
+    assert json.loads(target.read_text(encoding="utf-8")) == original
+
+
+def test_the_previous_draft_survives_a_new_write(tmp_path):
+    """The draft is the only copy of text the book already paid for."""
+    work = tmp_path / "work"
+    work.mkdir()
+    target = work / "translation-draft.json"
+    filled = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [{"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "NO!", "zh": "不！"}],
+        }
+    )
+    LocalizerPipeline._write_transcript(
+        target, tmp_path / "src", [filled], None, "简体中文"
+    )
+    empty = page_from_dict(
+        {
+            "page": 1,
+            "file": "001.jpg",
+            "width": 100,
+            "height": 200,
+            "units": [{"id": "p001u01", "bbox": [1, 2, 30, 40], "ja": "NO!", "zh": ""}],
+        }
+    )
+    LocalizerPipeline._write_transcript(
+        target, tmp_path / "src", [empty], None, "简体中文", keep_previous=True
+    )
+    backup = json.loads(
+        target.with_suffix(target.suffix + ".bak").read_text(encoding="utf-8")
+    )
+    assert backup["pages"][0]["units"][0]["zh"] == "不！"
+    assert json.loads(target.read_text(encoding="utf-8"))["pages"][0]["units"][0]["zh"] == ""
 
 
 def _pipeline_paths(tmp_path):
