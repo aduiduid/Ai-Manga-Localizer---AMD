@@ -101,6 +101,37 @@ def test_an_endless_truncation_reports_the_ceiling_it_hit(monkeypatch):
     assert "400" in str(excinfo.value)
 
 
+def test_a_short_reply_is_logged_with_the_request_that_asked_for_it(
+    monkeypatch, caplog
+):
+    # 79 of 82 requests in a real run answered in 3-9 tokens while the server
+    # reported 79-80 t/s, so the failing request has to be in the log: the
+    # finish_reason says whether the model stopped or was cut off, and the
+    # prompt tail says what it was looking at.
+    recorder = _Recorder([_reply('好的。', finish_reason='stop')])
+    client = _client(monkeypatch, recorder)
+    prompt = '请翻译以下日文：' + 'あ' * 80
+    with caplog.at_level("WARNING", logger="manga_localizer.llama_client"):
+        assert client.chat(prompt, max_tokens=1600) == '好的。'
+    (record,) = [r for r in caplog.records if r.levelname == 'WARNING']
+    message = record.getMessage()
+    assert 'finish_reason=' in message
+    assert "'stop'" in message
+    assert 'max_tokens=1600' in message
+    assert 'prompt_chars=88' in message
+    # The tail is the last 200 characters, so a long prompt is truncated
+    # but a short one arrives whole.
+    assert prompt[-200:] in message
+
+
+def test_a_real_translation_is_not_logged(monkeypatch, caplog):
+    recorder = _Recorder([_reply('这是一句完整的译文，不该进日志。')])
+    client = _client(monkeypatch, recorder)
+    with caplog.at_level("WARNING", logger="manga_localizer.llama_client"):
+        client.chat('请翻译', max_tokens=1600)
+    assert [r for r in caplog.records if r.name == 'manga_localizer.llama_client'] == []
+
+
 def test_an_empty_content_is_reported_rather_than_returned(monkeypatch):
     # llama.cpp leaves content null when the whole budget went to the reasoning
     # channel; an empty string there would be silently translated into "skip".

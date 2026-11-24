@@ -23,6 +23,7 @@ Two llama.cpp details are load-bearing and easy to lose in a rewrite:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Iterable
 
 from .llama_server import llama_timeout, restart_llama_server
@@ -53,6 +54,39 @@ MAX_REQUEST_WAIT_S = 300
 # book that kills its server every few pages needs a person, not another
 # attempt.
 MAX_RESTARTS = 5
+
+# A reply shorter than this is not a translation, it is a symptom.  A
+# 1360-page run was clocked at 79 of 82 requests answering in 3-9 tokens
+# while the server reported 79-80 t/s, so the request behind the reply
+# has to be recorded before anyone can tell an empty answer apart from a
+# dropped connection.
+SHORT_REPLY_CHARS = 8
+
+logger = logging.getLogger(__name__)
+
+
+def _log_short_reply(
+    route: str, prompt: str, budget: int, text: str, reason: str
+) -> None:
+    """Record a reply too short to be an answer, with the request behind it."""
+    stripped = text.strip()
+    if len(stripped) >= SHORT_REPLY_CHARS:
+        return
+    # ``warning`` and not ``info``: nothing in this app configures
+    # logging, and uvicorn's LOGGING_CONFIG has no root handler, so a
+    # WARNING record is the only level ``logging.lastResort`` prints to
+    # the console this line is meant to be read from.
+    logger.warning(
+        "[LLM 空回复] route=%s finish_reason=%r max_tokens=%d "
+        "prompt_chars=%d text_chars=%d stripped_chars=%d prompt_tail=%r",
+        route,
+        reason,
+        budget,
+        len(prompt),
+        len(text),
+        len(stripped),
+        prompt[-200:],
+    )
 
 
 class LlamaChatClient:
@@ -187,7 +221,8 @@ class LlamaChatClient:
             "repeat_penalty": REPEAT_PENALTY,
             "repeat_last_n": REPEAT_LAST_N,
         }
-        text, _ = self._answer(payload, budget, timeout)
+        text, reason = self._answer(payload, budget, timeout)
+        _log_short_reply("chat", prompt, budget, text, reason)
         return text.strip()
 
     def chat_json(
@@ -232,6 +267,7 @@ class LlamaChatClient:
             raise InferenceConnectionError(
                 f"llama-server 结构化输出在 {budgets[-1]} token 上限下仍被截断"
             )
+        _log_short_reply("chat_json", prompt, budget, last, reason)
         try:
             return json.loads(last)
         except (TypeError, json.JSONDecodeError) as exc:
