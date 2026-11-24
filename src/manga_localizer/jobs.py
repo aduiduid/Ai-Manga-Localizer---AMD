@@ -136,6 +136,7 @@ class JobStore:
                 "source": str(request.source),
                 "output": str(request.output),
                 "target_language": request.target_language,
+                "source_language": request.source_language,
                 "story_context": request.story_context,
                 "context_pages": request.context_pages,
                 "preserve_sfx": request.preserve_sfx,
