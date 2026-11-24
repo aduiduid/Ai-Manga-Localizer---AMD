@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 from PIL import Image
@@ -767,3 +768,80 @@ def test_the_single_model_backend_keeps_a_vision_server_it_never_started(monkeyp
     )
     assert type(translator) is LlamaTranslator
     assert calls == []
+
+
+def test_the_translate_clock_is_live_while_the_stage_runs(monkeypatch, tmp_path):
+    """The fourth step read nothing for the whole stage.
+
+    The stage total is only written once ``translate_pages`` returns, so a
+    run that spends an hour there looked frozen the whole time.  The
+    progress callback has to publish a running clock while it still can.
+    """
+    from manga_localizer import pipeline as pipeline_module
+
+    source = tmp_path / "src"
+    source.mkdir()
+    Image.new("RGB", (200, 400), "white").save(source / "001.jpg")
+
+    seen: dict = {}
+
+    class TickingTranslator:
+        resolved_glossary: dict = {}
+
+        def translate_pages(self, pages, *args, **kwargs):
+            progress = kwargs["progress"]
+            # Spend real time, then report a page: the clock the UI reads
+            # has to be non-zero at that moment, not only at stage end.
+            time.sleep(0.2)
+            progress(1, len(pages))
+            seen.update(getattr(pipeline, "live_timings", None) or {})
+            return pages
+
+        def release(self):
+            pass
+
+    class Reader:
+        stage_seconds: dict = {}
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def analyze(self, image_path, page_number):
+            # A dialogue-sized box: a page-filling one is classified as
+            # artwork and skipped, and then no translate stage ever runs.
+            unit = pipeline_module.TextUnit(
+                id=f"p{page_number:03d}u01",
+                bbox=[10, 10, 60, 30],
+                crop_bbox=[10, 10, 60, 30],
+                ja="\u30c6\u30b9\u30c8",
+                score=0.95,
+            )
+            return pipeline_module.PageOCR(
+                page=page_number,
+                file=image_path.name,
+                width=200,
+                height=400,
+                units=[unit],
+            )
+
+    monkeypatch.setattr(pipeline_module, "PaddleMangaOCR", Reader)
+    monkeypatch.setattr(pipeline_module, "HyMTTranslator", lambda *a, **k: TickingTranslator())
+    monkeypatch.setattr(
+        LocalizerPipeline,
+        "_load_cached_ocr",
+        staticmethod(lambda *a, **k: None),
+    )
+
+    pipeline = LocalizerPipeline(_pipeline_paths(tmp_path))
+    request = PipelineRequest(
+        source=source,
+        output=tmp_path / "out",
+        source_language="en",
+        ocr_backend="builtin",
+        inference_backend="builtin",
+        quality_profile="fast",
+    )
+    pipeline.run(request)
+
+    assert "translate" in seen, "the stage clock never ticked"
+    assert seen["translate"] > 0

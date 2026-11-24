@@ -219,6 +219,25 @@ class LocalizerPipeline:
         callback(phase, current, total, message)
 
     @staticmethod
+    def _translate_progress(
+        callback: ProgressCallback,
+        timings: dict[str, float],
+        started: float,
+        current: int,
+        total: int,
+    ) -> None:
+        """Tick the live translate clock, then report the page reached.
+
+        The stage total is only written once translation ends, so without
+        this the fourth step showed nothing at all for the whole stage --
+        and on a 1360 page book that stage is most of an hour.
+        """
+        timings["translate"] = round(time.perf_counter() - started, 1)
+        LocalizerPipeline._emit(
+            callback, "translate", current, total, f"翻译质量进度 {current}/{total}"
+        )
+
+    @staticmethod
     def _write_transcript(
         path: Path,
         source: Path,
@@ -746,12 +765,8 @@ class LocalizerPipeline:
                     story_context=request.story_context,
                     preserve_sfx=request.preserve_sfx,
                     glossary=glossary,
-                    progress=lambda current, count: self._emit(
-                        emit,
-                        "translate",
-                        current,
-                        count,
-                        f"翻译质量进度 {current}/{count}",
+                    progress=lambda current, count: self._translate_progress(
+                        emit, timings, stage_started, current, count
                     ),
                 )
             finally:
