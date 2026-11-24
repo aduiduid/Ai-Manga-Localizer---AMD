@@ -1,5 +1,6 @@
 """Batch (multi-folder queue) scheduling: ordering, failures, cancel, release."""
 
+import threading
 import time
 from pathlib import Path
 
@@ -226,6 +227,59 @@ def test_the_next_folder_is_read_while_this_one_translates(tmp_path):
     )
 
 
+def test_a_folder_waits_for_its_prefetched_reader(tmp_path):
+    """The read-ahead thread writes the cache this folder is about to read.
+
+    ``_prefetches`` was defined and popped but never assigned, so the join
+    in ``_run_task`` never ran and the folder started against a cache that
+    was still being written.
+    """
+
+    class SlowPrefetchPipeline(FakePipeline):
+        events: list = []
+
+        def prefetch(self, request, callback=None):
+            # Long enough that a missing join shows up as an early start.
+            time.sleep(0.4)
+            work = request.output / ".manga-localizer-work"
+            work.mkdir(parents=True, exist_ok=True)
+            SlowPrefetchPipeline.events.append(("read", request.source.name))
+            return 1
+
+        def run(self, request, callback):
+            SlowPrefetchPipeline.events.append(("run", request.source.name))
+            hook = getattr(self, "prefetch_next", None)
+            if hook is not None:
+                hook()
+            return super().run(request, callback)
+
+    SlowPrefetchPipeline.events = []
+    client = TestClient(
+        create_app(make_paths(tmp_path), pipeline_factory=SlowPrefetchPipeline)
+    )
+    folders = [make_folder(tmp_path, name) for name in ("chapter-01", "chapter-02")]
+    response = client.post(
+        "/api/batches",
+        json={
+            "source": [str(path) for path in folders],
+            "output": str(tmp_path / "out"),
+            "inference_backend": "llama",
+            "erase_model": "aot-manga",
+            "enable_pipeline_parallel": True,
+        },
+    )
+    assert response.status_code == 200
+    wait_for_batch(client, response.json()["id"], timeout=15.0)
+
+    events = SlowPrefetchPipeline.events
+    # The first folder starts before its neighbour is read.  The second
+    # one must not: that read-ahead is what writes the cache it reads.
+    assert ("read", "chapter-02") in events, "no read-ahead ran"
+    assert events.index(("read", "chapter-02")) < events.index(
+        ("run", "chapter-02")
+    ), (
+        "a folder started before the reader that owns its cache finished"
+    )
 def test_a_failing_folder_is_recorded_and_the_rest_still_run(tmp_path):
     client = TestClient(create_app(make_paths(tmp_path), pipeline_factory=FlakyPipeline))
     folders = [

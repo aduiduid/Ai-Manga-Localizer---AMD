@@ -618,12 +618,18 @@ class BatchService:
                 if self._factory_is_importable()
                 else self._prefetch_here
             )
-            threading.Thread(
+            watcher = threading.Thread(
                 target=runner,
                 args=(batch_id, index, ahead, request),
                 name="manga-localizer-prefetch-watch",
                 daemon=True,
-            ).start()
+            )
+            # The folder this thread reads owns its cache files, so it must
+            # not start until the thread is done.  ``_run_task`` pops this
+            # entry and joins it; without the registration that join never
+            # ran and the folder started against a cache still being written.
+            self._prefetches[int(ahead.get("index", -1))] = watcher
+            watcher.start()
 
         pipeline.prefetch_next = start
 
@@ -763,6 +769,10 @@ class BatchService:
             try:
                 self._run_batch_locked(batch_id)
             finally:
+                # Read-ahead entries are keyed by queue index and every batch
+                # restarts at zero, so one left behind here would be joined by
+                # the next batch's matching folder.
+                self._prefetches.clear()
                 # The reader is only warm because a batch needed it; leaving it
                 # running would pin a gigabyte of Paddle weights per idle queue.
                 self._stop_reader()
