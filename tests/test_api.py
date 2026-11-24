@@ -7,6 +7,7 @@ from PIL import Image
 
 from manga_localizer.api import create_app
 from manga_localizer.config import AppPaths
+from manga_localizer.hardware import normalize_cpu_threads
 from manga_localizer.jobs import JobStore
 from manga_localizer.pipeline import PipelineRequest
 
@@ -281,6 +282,32 @@ def test_online_secret_is_memory_only_and_builtin_model_becomes_optional(tmp_pat
     assert "do-not-persist" not in app_paths.settings.read_text(encoding="utf-8")
     models = {item["id"]: item for item in client.get("/api/models").json()["models"]}
     assert models["hy-mt2"]["required"] is False
+
+
+def test_submitting_a_job_keeps_settings_the_client_did_not_send(tmp_path):
+    app_paths = make_paths(tmp_path)
+    client = TestClient(create_app(app_paths, pipeline_factory=FakePipeline))
+    # The form was saved with read-ahead on and a thread budget.  A submit only
+    # sends the fields it shows, so everything else has to survive the POST --
+    # dumping pydantic defaults over the file used to turn both of these off.
+    app_paths.settings.write_text(
+        json.dumps({"enable_pipeline_parallel": True, "cpu_threads": 16}),
+        encoding="utf-8",
+    )
+    source = tmp_path / "source"
+    source.mkdir()
+    Image.new("RGB", (32, 32), "white").save(source / "1.png")
+    response = client.post(
+        "/api/jobs",
+        json={"source": str(source), "output": str(tmp_path / "out")},
+    )
+    assert response.status_code == 200
+    saved = json.loads(app_paths.settings.read_text(encoding="utf-8"))
+    assert saved["enable_pipeline_parallel"] is True
+    # The budget is clamped to this machine, so a small CI box stores fewer
+    # threads than the 16 asked for; what matters is that it is not back to 0.
+    assert saved["cpu_threads"] == normalize_cpu_threads(16)
+    assert saved["cpu_threads"] > 0
 
 
 def test_notification_switches_round_trip_through_settings(tmp_path):

@@ -8,6 +8,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 
@@ -662,11 +663,20 @@ def create_app(paths: AppPaths | None = None, pipeline_factory=None) -> FastAPI:
         return {"path": str(folder.resolve()), "folders": folders}
 
     def _activate(payload: JobPayload) -> tuple[UserSettings, str]:
-        """Persist the submitted settings and resolve the online API key."""
-        settings = SettingsPayload(
-            **payload.model_dump(exclude={"source", "output", "reviewed_transcript"})
+        """Persist the submitted settings and resolve the online API key.
+
+        A submit carries what the form had on screen, not the whole settings
+        file.  Dumping the model unconditionally filled every field the client
+        left out with its pydantic default and wrote that over the file, so a
+        single POST reset ``enable_pipeline_parallel`` and ``cpu_threads`` and a
+        queued batch silently lost its read-ahead.  Merge onto what is already
+        stored: absent from the payload means "leave it alone", not "reset it".
+        """
+        sent = payload.model_dump(
+            exclude_unset=True, exclude={"source", "output", "reviewed_transcript"}
         )
-        active = save_settings_payload(settings)
+        merged = {**asdict(UserSettings.load(paths.settings)), **sent}
+        active = save_settings_payload(SettingsPayload(**merged))
         api_key = payload.online_api_key
         if api_key is None:
             api_key = secrets["online_api_key"]
