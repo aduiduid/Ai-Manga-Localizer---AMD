@@ -1,3 +1,68 @@
+## 0.13.25 - 2026-11-26
+
+- A translation reply too short to be an answer is now logged with the request
+  that produced it: `finish_reason`, `max_tokens`, prompt length, the last 200
+  characters of the prompt and the reply length. A 1360-page run made 82
+  requests in one window and 79 of them returned 3-9 tokens; without this line
+  there was no way to tell a terse model from a broken prompt.
+
+- A slash the source text already had is not a context leak. Every page-number
+  signature (`Tob/2022`, `0b/2022`, ...) had its faithful translation
+  (`托布/2022`) rejected by the `or "/" in clean` rule, so the ladder spent four
+  calls per signature per run and never let one through. A slash the source did
+  not have is still rejected.
+
+- The job record keeps `source_language`. It was missing from the request
+  dict, so replaying a finished job fell back to `auto`, which no longer
+  matches what the OCR cache recorded (`en`), and the whole book re-read.
+
+- The translate clock ticks while the stage runs instead of only when it ends.
+  `timings["translate"]` is written from the page progress callback, so the
+  batch card shows a moving clock instead of a blank one.
+
+- The read-ahead thread is joined before its cache is read. `_prefetches` was
+  declared and popped but never assigned, so the join at the top of
+  `_run_task` never ran and a folder could start reading a cache that was
+  still being written.
+
+- A draft that cannot be resumed now says which gate rejected it, the file is
+  written through a `.part` file and `replace()`, and the previous draft is
+  copied to `.bak` before being overwritten. `_resume_translations` had seven
+  silent `return 0` paths; hitting any of them wiped a whole book's
+  translations and left no trace.
+
+- The `.bak` keeps the most complete draft, not the most recent one. A single
+  rotating slot still lost the full book: run 1 left `.bak` at 4708 units and
+  `draft` at 180, then run 2 rotated `.bak` down to 180. A draft with fewer
+  translated units no longer replaces a fuller backup.
+
+- Submitting a job no longer resets settings the client did not send.
+  `_activate()` rebuilt the whole settings file from the request payload, so
+  any field the form omitted fell back to its pydantic default --
+  `enable_pipeline_parallel` became `False` and `cpu_threads` became `0`,
+  which turned read-ahead off and doubled a 34-book batch from 12.5 h to
+  24.5 h. The payload is now merged over the settings already on disk.
+
+- Known limits, so a later reader does not re-diagnose them as bugs:
+
+  - A batch task's `phase` and `current` are written when the folder starts and
+    when it ends, nothing in between. Reading `data/batches/<id>.json` shows
+    `prepare 0/1136` for an hour and looks stuck; the live progress is in
+    `data/jobs/<job_id>.json`.
+
+  - `_adopt_orphans()` stamps a running batch as `cancelled` with
+    `服务重启，批次已中断` whenever a second application is built over the same
+    data folder. It has happened nine times, covering twenty folders that had
+    already finished. The output on disk survives; the batch record does not
+    describe what happened.
+
+  - Read-ahead only ever fetches the next folder in the queue. When a large
+    folder follows a small one, the queue waits for it: batch `dc769fbbb88c`
+    spent 2.07 h of its 7.92 h wall time waiting, 98.5% of it in the twelve
+    gaps over a minute (the largest, 1->2, was 49.4 min). The wait is invisible
+    in the task rows. Picking the largest folder first is a separate change and
+    is not in this release.
+
 ## 0.13.24 - 2026-11-23
 
 - The quality OCR profile now runs its recogniser through oneDNN. Recognition
