@@ -1,4 +1,28 @@
-## 0.13.25 - 2026-11-26
+## 0.13.26 - 2026-11-26
+
+- A colour reading that is the balloon itself no longer wins the polarity
+  vote. On a dark balloon the clustering keeps whatever sits 45 levels from
+  the median -- the shading between the strokes -- and returns a reading that
+  is the ground, which then forced `fill="black"` and painted a white
+  translation black on black. `_analyze_style` now only lets a neutral dark
+  reading override the vote when it sits at least `INK_GROUND_MARGIN` levels
+  below the box's own median; the branch that keeps page 1's black lettering
+  with a white outline is preserved. On the two books this affected, 132 of
+  335 sampled units flipped back to white (1.5% instead of 39.4%) and the
+  mask for one 16x96 glyph went from covering 8.4% of its pixels to 100%.
+
+- The batch read-ahead note now only speaks for a row that is still waiting.
+  `_note_prefetch`'s `queued` guard meant `done` was never written to a
+  finished task, so `task["prefetch"]` stayed `reading` and the row kept saying
+  "reading ahead" for a book that had already completed. The front end checks
+  the task's own status before rendering the note.
+
+- Residual translations: the units that still carry their source text after the
+  polarity fix are 42/107/4 for 3445076/3296292/1416037 under the same
+  residual caliber the fix used, and none of them sits on a bright
+  background (all 153 are `bg_median < 160`, the highest being 152.0). A
+  full-library scan of `bg_median >= 160` units whose dark/bright evidence
+  supports black glyphs turned up zero units flipped to white.
 
 - A translation reply too short to be an answer is now logged with the request
   that produced it: `finish_reason`, `max_tokens`, prompt length, the last 200
