@@ -1087,6 +1087,27 @@ def test_a_dark_neutral_glyph_is_not_painted_white_over_its_own_halo():
     assert style.stroke_fill == "white"
     assert INK_DARK < 150
 
+
+def test_a_white_glyph_on_a_dark_balloon_is_not_painted_black():
+    """A dark balloon has no dark glyph to read: the reading is the ground.
+
+    The clustering keeps whatever sits 45 levels from the median, and on a
+    near-black balloon that is the shading between the white strokes, so the
+    reading comes back as the balloon itself.  Letting a neutral dark reading
+    overrule a white vote painted white lettering black on black -- on
+    3445076 that was 132 units in 52 pages, every one of them unreadable.
+    """
+    page = np.full((140, 360, 3), (18, 18, 20), dtype=np.uint8)
+    page[16:124, 16:344] = (8, 8, 8)
+    for top in range(30, 110, 18):
+        for left in range(28, 330, 16):
+            page[top : top + 11, left : left + 9] = (250, 250, 250)
+
+    unit = _ink_unit("[16,16,344,124]", '"HI THERE, NEW SEAT."')
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    assert style.fill == "white"
+    assert style.stroke_fill == "black"
+
 def test_the_outline_around_a_dark_glyph_is_erased_with_it():
     """The grey cutoff finds the core, not the bright rim around it.
 

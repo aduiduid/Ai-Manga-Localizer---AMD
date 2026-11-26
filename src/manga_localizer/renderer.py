@@ -112,6 +112,15 @@ INK_TOLERANCE = 40.0
 INK_SATURATION = 40
 # A neutral core darker than this is black lettering, not the halo.
 INK_DARK = 90.0
+# ...but only when that core is measurably darker than the box's own ground.
+# A white glyph on a dark balloon has no dark glyph to read at all: the
+# clustering keeps whatever sits 45 levels from the median, which there is the
+# shading between the strokes, and it returns a reading that is the ground
+# itself.  On this book the units where such a reading overruled a white vote sat
+# 17 levels from their ground on median (53% inside +-40), and that distribution
+# has a void between 76 and 93; units whose dark reading the vote already agreed
+# with sat 218 levels away.  Ninety is that void.
+INK_GROUND_MARGIN = 90.0
 # A glyph's outline sits within this many pixels of the glyph itself.
 OUTLINE_REACH = 5
 # Below this many glyph pixels the crop is noise, not lettering.
@@ -725,10 +734,22 @@ class ArtworkPreservingRenderer:
             # line white in the first place.  A dark ink keeps the light
             # outline it had, a bright one keeps the dark outline.
             stroke_fill = "white" if _level(ink) < 150 else "black"
-        elif ink is not None and _level(ink) < INK_DARK:
+        elif (
+            ink is not None
+            and _level(ink) < INK_DARK
+            and background_level - _level(ink) >= INK_GROUND_MARGIN
+        ):
             # A neutral but clearly dark core is still the glyph.  The vote
             # loses here because the bright halo fills the box: page 1's
             # black lettering with a white outline was painted white.
+            #
+            # The margin is what makes that claim checkable.  On a dark balloon
+            # the same reading comes back as the ground itself, and overriding a
+            # white vote with it painted the translation black on black -- on
+            # this book 132 units across 52 pages, every one of them unreadable.
+            # A reading that is genuinely a dark glyph separates from the box's
+            # median by hundreds of levels; one that is the ground separates by
+            # tens.
             fill, stroke_fill = "black", "white"
         if not saturated:
             ink = None

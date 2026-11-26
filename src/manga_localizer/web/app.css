@@ -47,9 +47,9 @@
 .batch-task-drop:hover{border-color:var(--danger);color:#fff;background:var(--danger)}
 .batch-task-index{color:var(--muted);font-size:11px;font-weight:700;text-align:right}
 .batch-task-main{min-width:0}
-.batch-task-main b,.batch-task-output,.batch-task-error{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.batch-task-main b,.batch-task-output,.batch-task-note,.batch-task-error{display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .batch-task-main b{font-size:12px}
-.batch-task-output{color:var(--muted);font-size:10px}
+.batch-task-output,.batch-task-note{color:var(--muted);font-size:10px}
 .batch-task-error{color:var(--danger);font-size:10px}
 .batch-task-progress{display:flex;align-items:center;gap:6px}
 .batch-task-progress>span{flex:1;height:6px;border-radius:3px;background:#ebe7e1;overflow:hidden}

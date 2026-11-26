@@ -239,6 +239,15 @@ def test_batch_queue_renders_rows_with_remove_and_wires_its_controls():
     assert "function parseQueueText(text)" in javascript
     assert "function addQueuePaths(paths)" in javascript
     assert "function batchTaskRow(task,index,batch)" in javascript
+
+    # `batches.py` has written the read-ahead state onto each task since 0.13.22
+    # and the row never said so, so a queued row waiting on a long read-ahead
+    # looked identical to a stuck one.  The sentence is one of the keys that
+    # already exist in i18n.js -- nothing is added here.
+    assert "function batchTaskPrefetchNote(task)" in javascript
+    assert 'prefetch==="done"?"batch.task.prefetched":prefetch==="failed"?"batch.task.prefetchFailed":"batch.task.prefetch"' in javascript
+    assert 'class="batch-task-note"' in javascript
+    assert '${escapeHtml(output)}</small>${note}${error}</div>' in javascript
     assert 'data-index="${index}"' in javascript
     assert 'data-remove="${index}"' in javascript
     assert "function batchQueueClick(event)" in javascript
@@ -499,6 +508,7 @@ def test_batch_queue_styles_reuse_the_design_variables():
     assert ".batch-task.running{" in css
     assert ".batch-task.selected{" in css
     assert ".batch-task-error{" in css
+    assert ".batch-task-output,.batch-task-note{color:var(--muted);font-size:10px}" in css
     assert ".child-option.disabled{" in css
 
 
