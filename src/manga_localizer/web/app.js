@@ -105,7 +105,13 @@ function clearSetupError(){showSetupError("")}
 // that looks idle the whole time is indistinguishable from a stuck one.
 // `task.prefetch` is the state (`reading`/`done`/`failed`); the folder named in
 // the sentence is this row's own, because this row is what got read.
-function batchTaskPrefetchNote(task){const prefetch=task&&task.prefetch;if(!prefetch)return "";const key=prefetch==="done"?"batch.task.prefetched":prefetch==="failed"?"batch.task.prefetchFailed":"batch.task.prefetch";return `<small class="batch-task-note">${escapeHtml(t(key,{name:task.name||folderName(task.source||"")}))}</small>`}
+//
+// Only a row that is still queued may speak.  `_note_prefetch` skips its write
+// once the folder stops being queued, so a read-ahead that finishes before the
+// folder starts leaves `reading` on the record for good: on batch
+// dc769fbbb88c that was 17 of 33 rows announcing a read-ahead they had already
+// finished.
+function batchTaskPrefetchNote(task){const status=(task&&task.status)||"queued";const prefetch=task&&task.prefetch;if(!prefetch||status!=="queued")return "";const key=prefetch==="done"?"batch.task.prefetched":prefetch==="failed"?"batch.task.prefetchFailed":"batch.task.prefetch";return `<small class="batch-task-note">${escapeHtml(t(key,{name:task.name||folderName(task.source||"")}))}</small>`}
 function batchTaskRow(task,index,batch){const status=task.status||"queued";const running=status==="running";const selected=!!batch&&index===state.taskIndex;const chip=status==="complete"?"ready":status==="failed"?"error":status==="paused"?"paused":running?"running":"";const raw=task.total?Math.round((Number(task.current)||0)/(task.total||1)*100):Math.round(Number(task.progress)||0);const percent=Math.max(0,Math.min(100,raw));const output=task.output||taskOutputPath(task.source);// Two different ✕ live in this column: before a batch is submitted the row is only a local queue
 // entry, so removing it just edits the list; once the batch exists the row is a backend record and
 // only a still-waiting folder can be dropped, which is why the running batch gets its own attribute.

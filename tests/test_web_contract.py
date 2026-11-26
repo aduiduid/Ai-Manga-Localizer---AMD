@@ -1,5 +1,10 @@
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).parents[1]
@@ -267,6 +272,60 @@ def test_batch_queue_renders_rows_with_remove_and_wires_its_controls():
     # absolute path it can open, so the UI explains why it uses the native dialog instead.
     assert "webkitdirectory" in javascript
     assert "showDirectoryPicker" in javascript
+
+
+def test_a_read_ahead_note_only_speaks_for_a_queued_row():
+    """A row that already finished must not announce a read-ahead.
+
+    ``_note_prefetch`` (batches.py) skips its write once the folder stops being
+    queued, so a read-ahead that finishes before the folder starts leaves
+    ``prefetch="reading"`` on the record for good.  Batch dc769fbbb88c has it on
+    17 of its 34 finished rows.  The note is therefore gated on the row still
+    waiting, and this runs the shipped function rather than reading its source:
+    the whole bug is what the function returns for a given task.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed, so the row renderer cannot be executed")
+
+    javascript = (WEB / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"function batchTaskPrefetchNote\(task\)\{[^\n]*\}\n", javascript)
+    assert match is not None, "batchTaskPrefetchNote is gone"
+    source = match.group(0)
+
+    harness = "\n".join(
+        [
+            # The three helpers the note leans on are stubbed: what is under test
+            # is the gate on `status`, not HTML escaping or path trimming.
+            'const escapeHtml=(value)=>String(value===undefined||value===null?"":value);',
+            'const folderName=(path)=>String(path||"").split(/[\\\\/]/).filter(Boolean).pop()||"";',
+            'const t=(key,parameters)=>key+"|"+String((parameters||{}).name||"");',
+            source,
+            'const tasks=JSON.parse(require("fs").readFileSync(0,"utf8"));',
+            "process.stdout.write(JSON.stringify(tasks.map((task)=>batchTaskPrefetchNote(task))));",
+        ]
+    )
+    tasks = [
+        {"status": "complete", "prefetch": "reading", "name": "finished-book"},
+        {"status": "queued", "prefetch": "reading", "name": "waiting-book"},
+        {"status": "complete", "prefetch": "done", "name": "finished-book"},
+    ]
+    done = subprocess.run(
+        [node, "-e", harness],
+        input=json.dumps(tasks, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    note = json.loads(done.stdout)
+
+    assert note[0] == "", f"a finished row still announced a read-ahead: {note[0]}"
+    assert note[1] != "", "a queued row lost its read-ahead note"
+    assert "batch.task.prefetch" in note[1]
+    assert note[2] == ""
 
 
 def test_batch_submission_goes_through_the_batches_endpoint_with_validation():
