@@ -20,9 +20,11 @@
 - Residual translations: the units that still carry their source text after the
   polarity fix are 42/107/4 for 3445076/3296292/1416037 under the same
   residual caliber the fix used, and none of them sits on a bright
-  background (all 153 are `bg_median < 160`, the highest being 152.0). A
+  background (all 153 are `bg_median < 160`, the highest being 153.0). A
   full-library scan of `bg_median >= 160` units whose dark/bright evidence
   supports black glyphs turned up zero units flipped to white.
+
+## 0.13.25 - 2026-11-26
 
 - A translation reply too short to be an answer is now logged with the request
   that produced it: `finish_reason`, `max_tokens`, prompt length, the last 200
