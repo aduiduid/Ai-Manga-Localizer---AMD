@@ -33,9 +33,11 @@
     tight bbox (in the padding / cleanup ring), 8 where the components
     were all rejected by the gates, and 4 where the seed itself was
     empty because the glyph peak never reached the cutoff. Only the last
-    four are about the median anchor; measured with
-    `_home/tmp/probe_empty_mask_classes.py`. They are three different
-    defects, so no single patch fixes them, and none is fixed here.
+    four are about the median anchor. The three classes come from
+    replaying `_text_mask` step by step -- brightness seed, connected
+    components, area and edge gates -- and noting which step produced
+    the empty result. They are three different defects, so no single
+    patch fixes them, and none is fixed here.
 
 ## 0.13.25 - 2026-11-26
 
