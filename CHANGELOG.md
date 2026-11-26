@@ -24,6 +24,19 @@
   full-library scan of `bg_median >= 160` units whose dark/bright evidence
   supports black glyphs turned up zero units flipped to white.
 
+- Known limits, so a later reader does not re-diagnose them as bugs:
+
+  - The polarity fix leaves 153 units still carrying their source text
+    (3445076: 42, 3296292: 107, 1416037: 4). Twenty of those get a mask
+    that covers none of their glyph pixels, and that zero divides into
+    three unrelated causes: 8 where the mask lands entirely outside the
+    tight bbox (in the padding / cleanup ring), 8 where the components
+    were all rejected by the gates, and 4 where the seed itself was
+    empty because the glyph peak never reached the cutoff. Only the last
+    four are about the median anchor; measured with
+    `_home/tmp/probe_empty_mask_classes.py`. They are three different
+    defects, so no single patch fixes them, and none is fixed here.
+
 ## 0.13.25 - 2026-11-26
 
 - A translation reply too short to be an answer is now logged with the request
