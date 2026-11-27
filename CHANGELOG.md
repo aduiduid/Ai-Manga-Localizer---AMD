@@ -1,3 +1,24 @@
+## 0.13.27 - 2026-11-28
+
+- Black type drawn over its own balloon now gets an outline. When `glyph_ink`
+  returns a reading that is the balloon itself -- the condition
+  `abs(background_level - _level(ink)) < INK_GROUND_MARGIN` that 0.13.26
+  already used to withhold the vote override -- the translation was painted
+  with `stroke_ratio` 0.0, so black lettering on a mid-tone balloon had
+  nothing behind it. `_analyze_style` now gives those units the 0.045 stroke
+  they would have had if the rim had been detected; `fill` and `stroke_fill`
+  are untouched. Measured on three books at stride 7 with page 409 forced in,
+  2980 live units: 289 went from 0.0 to 0.045 (whisperfoot 35, toby 239,
+  display 15), `reading_is_ground` held for 289/289 = 100% of them, and no
+  unit with `fill == "white"` moved -- white already earned 0.045, so the
+  predicate cannot reach that branch.
+
+- Scope, so a later reader does not mistake this for the mask fix: the four
+  candidate cluster rules for the mask side were measured and rejected,
+  `bf6936d` was reverted, and this release carries no net mask change. Page
+  409's surviving white lettering stays recorded as a known limit in 0.13.26.
+  The two are separate defects and no single patch fixes both.
+
 ## 0.13.26 - 2026-11-26
 
 - A colour reading that is the balloon itself no longer wins the polarity
