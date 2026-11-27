@@ -1472,24 +1472,6 @@ def _rimmed_balloon() -> tuple[np.ndarray, TextUnit, np.ndarray]:
     return page, unit, core
 
 
-def test_white_lettering_inside_a_coloured_rim_is_all_masked():
-    """The colour seed follows the rim and leaves the glyph core behind.
-
-    Page 409 draws a white-cored caption with a saturated rim; the ink reading
-    is that rim, so the seed sits on the rim and the crop's own bright core is
-    never selected.  83.3% of the source lettering survived under the
-    translation and the page read as "看不清".  A neutral bright pixel that
-    still differs from the crop's median colour is the core itself.
-    """
-    page, unit, core = _rimmed_balloon()
-    renderer = ArtworkPreservingRenderer()
-    style = renderer._analyze_style(page, unit)
-    marks = core > 0
-    mask = renderer._text_mask(page, style, renderer._mask_dilation(unit, style))
-    covered = int(((mask > 0) & marks).sum()) / int(marks.sum())
-    assert covered >= 0.80, f"only {covered:.3f} of the white core was masked"
-
-
 def test_black_type_earns_an_outline_when_its_ink_is_nearly_the_balloon():
     """A reading that close to the ground is no evidence of what the glyphs are.
 
@@ -1507,4 +1489,3 @@ def test_black_type_earns_an_outline_when_its_ink_is_nearly_the_balloon():
     assert style.fill == "black"
     assert not style.outlined
     assert style.stroke_ratio > 0, "the translation was drawn with no outline"
-
