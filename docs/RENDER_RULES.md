@@ -97,3 +97,15 @@ darkest vivid cluster" changed no output at all (the lettering cluster sits
 below `INK_VIVID`), so it was reverted rather than kept as dead complexity.
 Known limits live in `CHANGELOG.md` and in the UI hint, where the user meets
 them.
+
+The second one, recorded 2026-11-27: white lettering with a saturated rim on a
+coloured balloon survives the erase. Reading the white core instead of the rim
+does not fix it, because the core is neutral and a neutral reading is dropped to
+`None` before the mask is built -- the erase then falls back to a brightness
+seed. Every selection rule that was tried also changed hundreds of units that
+were already correct, because a balloon's own highlight and white lettering are
+the same colour; only the detector box tells them apart, and on page 409 that box
+spans several balloons. Four rules were measured and all rejected (74.2%, 67.8%,
+75.0% and 88.0% of their new mask landing on paper, against an acceptance of
+30%). A defect that needs a different box, not a different threshold, is a known
+limit.

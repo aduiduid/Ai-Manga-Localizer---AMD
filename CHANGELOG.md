@@ -39,6 +39,38 @@
     the empty result. They are three different defects, so no single
     patch fixes them, and none is fixed here.
 
+  - Page 409 of 3445076 draws white lettering with a saturated rim on a pink
+    balloon, and the translation comes out with the balloon's own colour
+    behind it: 83.3% of the white source glyphs stay on the page, the drawn
+    type sits at channel spread 0 on a balloon 78 levels away from the
+    reading, and the mask covers 39.7% of the lettering inside the erase
+    boxes. Two causes, neither of them a threshold:
+
+    - `glyph_ink` reports the rim. The four clusters of that crop are
+      (215,122,160) share 0.323, (246,245,253) share 0.283, (228,223,246)
+      share 0.252 and (187,89,127) share 0.143 -- the last two are the white
+      core and the rim, and the rim wins because it is the most saturated
+      cluster above `INK_VIVID`. Selecting the core instead does not help on
+      its own: the core is neutral (spread 8.1), and `_analyze_style` drops a
+      neutral reading to `None` by design, at which point `_text_mask` falls
+      back to its luminance seed -- measured 0.552 and 0.381 hit instead of
+      0.397 and 0.393.
+    - The detector box is 392x339 across several balloons. It is the union of
+      15 erase rectangles spanning a face, a thigh and three captions, so
+      24,986 of the 55,834 bright pixels inside it sit outside every
+      rectangle's padding and no mask can reach them; raising the mask inside
+      the rectangles only repaints the balloon.
+
+    Four selection rules were measured across the three books (every seventh
+    page, plus page 409) and all were rejected rather than shipped: letting a
+    neutral cluster above the median win (814 units change ink, 74.2% of the
+    new mask lands on paper), adding "the reading must be darker than the
+    median" (323 units, 67.8%), requiring the bright cluster to be neutral
+    (301 units, 75.0%), and the `INK_GROUND_MARGIN` gate the task specified
+    (553 units, 88.0%, of which 539 turn `style.ink` into `None`). The
+    acceptance was paper under 30% and lettering over 50%; the current code is
+    left untouched.
+
 ## 0.13.25 - 2026-11-26
 
 - A translation reply too short to be an answer is now logged with the request
