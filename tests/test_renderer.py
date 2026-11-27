@@ -1444,3 +1444,45 @@ def test_a_coloured_bubble_does_not_paint_black_type():
     style = ArtworkPreservingRenderer._analyze_style(page, unit)
     assert style.ink is None, "a 32-level cast is below INK_SATURATION"
     assert style.fill == "black"
+
+
+def _rimmed_balloon() -> tuple[np.ndarray, TextUnit, np.ndarray]:
+    """White lettering ringed by a saturated dark rim, on a pink balloon.
+
+    This is the geometry of page 409: ``glyph_ink`` prefers the most saturated
+    cluster, so it reports the rim instead of the white core, and the colour
+    seed then follows the rim alone.
+    """
+    page = np.full((260, 420, 3), (247, 183, 205), dtype=np.uint8)
+    core = np.zeros((260, 420), dtype=np.uint8)
+    for row in range(3):
+        top = 40 + row * 44
+        for column in range(6):
+            left = 24 + column * (26 + 16)
+            cv2.rectangle(core, (left, top), (left + 26, top + 20), 255, -1)
+    rim = cv2.dilate((core > 0).astype(np.uint8), np.ones((7, 7), np.uint8))
+    page[rim > 0] = (187, 89, 127)
+    page[core > 0] = (250, 248, 246)
+    unit = TextUnit(
+        "p409u01", [16, 30, 404, 232], [16, 30, 404, 232], "WOW, YOU RUN FAST!", 0.95
+    )
+    unit.zh = "哇，你跑得真快！"
+    return page, unit, core
+
+
+def test_white_lettering_inside_a_coloured_rim_is_all_masked():
+    """The colour seed follows the rim and leaves the glyph core behind.
+
+    Page 409 draws a white-cored caption with a saturated rim; the ink reading
+    is that rim, so the seed sits on the rim and the crop's own bright core is
+    never selected.  83.3% of the source lettering survived under the
+    translation and the page read as "看不清".  A neutral bright pixel that
+    still differs from the crop's median colour is the core itself.
+    """
+    page, unit, core = _rimmed_balloon()
+    renderer = ArtworkPreservingRenderer()
+    style = renderer._analyze_style(page, unit)
+    marks = core > 0
+    mask = renderer._text_mask(page, style, renderer._mask_dilation(unit, style))
+    covered = int(((mask > 0) & marks).sum()) / int(marks.sum())
+    assert covered >= 0.80, f"only {covered:.3f} of the white core was masked"

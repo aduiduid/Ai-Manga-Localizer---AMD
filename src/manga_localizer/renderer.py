@@ -17,6 +17,7 @@ from .image_io import load_rgb
 from .inpainting import AOTMangaInpainter, LaMaInpainter
 from .model_manager import ModelManager
 from .ocr import (
+    INK_BACKGROUND_DISTANCE,
     JP_RE,
     PageOCR,
     TextUnit,
@@ -121,6 +122,10 @@ INK_DARK = 90.0
 # has a void between 76 and 93; units whose dark reading the vote already agreed
 # with sat 218 levels away.  Ninety is that void.
 INK_GROUND_MARGIN = 90.0
+# A neutral pixel this bright is paper-white lettering.  Shared by the luminance
+# seed and by the outline-proof second seed: both are asking the same question,
+# whether a pixel could be the bright core of a glyph.
+GLYPH_BRIGHT_LEVEL = 215
 # A glyph's outline sits within this many pixels of the glyph itself.
 OUTLINE_REACH = 5
 # Below this many glyph pixels the crop is noise, not lettering.
@@ -801,7 +806,9 @@ class ArtworkPreservingRenderer:
 
         def luminance_seed(reference: float) -> np.ndarray:
             if style.fill == "white":
-                return (gray > min(215, reference + 55)).astype(np.uint8)
+                return (
+                    gray > min(GLYPH_BRIGHT_LEVEL, reference + 55)
+                ).astype(np.uint8)
             return (gray < max(15, min(150, reference - 45))).astype(np.uint8)
 
         if ink is not None:
@@ -821,47 +828,86 @@ class ArtworkPreservingRenderer:
                 # visible under the translation.  The artwork outside the box
                 # is a second, independent anchor for the same question.
                 seed = np.maximum(seed, luminance_seed(ring))
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(seed, 8)
-        selected = np.zeros_like(seed, dtype=np.uint8)
-        height, width = seed.shape
-        # Furigana and punctuation are much smaller than the main glyphs but
-        # belong to the same replacement region.  Keep their components while
-        # still rejecting isolated screentone speckles.
-        min_area = max(4, round(style.font_size * style.font_size * 0.0005))
-        max_area = max(80, round(width * height * 0.45))
-        for label in range(1, count):
-            x, y, component_width, component_height, area = stats[label]
-            touches_edge = (
-                x <= 1
-                or y <= 1
-                or x + component_width >= width - 1
-                or y + component_height >= height - 1
+        def grow(candidate: np.ndarray) -> np.ndarray:
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                candidate, 8
             )
-            # A tight detector box often cuts through its own glyphs, so the
-            # stroke cluster reaches the padded crop border.  Rejecting every
-            # edge-connected component there drops the whole source text and
-            # leaves it visible under the new lettering.  Only large edge blobs
-            # are artwork; the caller still clips the mask to the text box.
-            if (touches_edge and area > width * height * 0.25) or area < min_area:
-                continue
-            # A wide-and-flat component is not noise: one line of Latin type
-            # is a single connected blob, and rejecting it by aspect threw the
-            # whole line away (page 7 kept 0.00 of its source strokes).
-            if area > max_area:
-                continue
-            selected[labels == label] = 255
-        # White lettering is selected by brightness, so its mask already is the
-        # bright band and growing it would only eat the balloon.  Coloured ink
-        # is selected by colour, and its outline is a separate bright rim that
-        # still has to go.
-        if selected.any() and not (ink is None and style.fill == "white"):
-            selected = _absorb_outline(gray, level, selected)
-        if dilation > 1 and selected.any():
-            selected = cv2.dilate(
-                selected,
-                np.ones((dilation, dilation), np.uint8),
-                iterations=1,
+            selected = np.zeros_like(candidate, dtype=np.uint8)
+            height, width = candidate.shape
+            # Furigana and punctuation are much smaller than the main glyphs but
+            # belong to the same replacement region.  Keep their components while
+            # still rejecting isolated screentone speckles.
+            min_area = max(4, round(style.font_size * style.font_size * 0.0005))
+            max_area = max(80, round(width * height * 0.45))
+            for label in range(1, count):
+                x, y, component_width, component_height, area = stats[label]
+                touches_edge = (
+                    x <= 1
+                    or y <= 1
+                    or x + component_width >= width - 1
+                    or y + component_height >= height - 1
+                )
+                # A tight detector box often cuts through its own glyphs, so the
+                # stroke cluster reaches the padded crop border.  Rejecting every
+                # edge-connected component there drops the whole source text and
+                # leaves it visible under the new lettering.  Only large edge blobs
+                # are artwork; the caller still clips the mask to the text box.
+                if (
+                    touches_edge and area > width * height * 0.25
+                ) or area < min_area:
+                    continue
+                # A wide-and-flat component is not noise: one line of Latin type
+                # is a single connected blob, and rejecting it by aspect threw the
+                # whole line away (page 7 kept 0.00 of its source strokes).
+                if area > max_area:
+                    continue
+                selected[labels == label] = 255
+            # White lettering is selected by brightness, so its mask already is
+            # the bright band and growing it would only eat the balloon.  Coloured
+            # ink is selected by colour, and its outline is a separate bright rim
+            # that still has to go.
+            if selected.any() and not (ink is None and style.fill == "white"):
+                selected = _absorb_outline(gray, level, selected)
+            if dilation > 1 and selected.any():
+                selected = cv2.dilate(
+                    selected,
+                    np.ones((dilation, dilation), np.uint8),
+                    iterations=1,
+                )
+            return selected
+
+        selected = grow(seed)
+        if ink is not None:
+            # ``ink`` can be the glyph's outline instead of the glyph.  On page
+            # 409 ``glyph_ink`` returned the dark-pink rim of white lettering, so
+            # the colour seed followed the rim and 83.3% of the white core stayed
+            # in place under the translation.  A neutral, bright pixel that still
+            # differs from the crop's median colour is the core itself; the median
+            # test is what keeps a white balloon's paper out.
+            median_colour = np.median(
+                crop.reshape(-1, 3).astype(np.int16), axis=0
             )
+            from_median = np.linalg.norm(
+                crop.astype(np.int16) - median_colour, axis=2
+            )
+            spread = (
+                crop.max(axis=2).astype(np.int16)
+                - crop.min(axis=2).astype(np.int16)
+            )
+            bright_seed = (
+                (spread < INK_SATURATION)
+                & (gray >= GLYPH_BRIGHT_LEVEL)
+                & (from_median >= INK_BACKGROUND_DISTANCE)
+            ).astype(np.uint8)
+            if bright_seed.any():
+                # Only when the first pass actually left the core behind.  If the
+                # colour seed already covers most bright pixels there is nothing
+                # to recover, and merging paper into the mask removes the pixels
+                # the eraser uses to estimate the balloon behind it.
+                covered = int((bright_seed & selected).sum())
+                uncovered = int(bright_seed.sum()) - covered
+                if uncovered > covered:
+                    selected = np.maximum(selected, grow(bright_seed))
         return selected
 
     @staticmethod
