@@ -10,6 +10,8 @@ from manga_localizer.config import AppPaths
 from manga_localizer.ocr import PageOCR, TextUnit
 from manga_localizer.renderer import (
     CLOSING_PUNCTUATION,
+    INK_GROUND_MARGIN,
+    _level,
     MIN_READABLE_FONT,
     INK_DARK,
     _absorb_outline,
@@ -1486,3 +1488,23 @@ def test_white_lettering_inside_a_coloured_rim_is_all_masked():
     mask = renderer._text_mask(page, style, renderer._mask_dilation(unit, style))
     covered = int(((mask > 0) & marks).sum()) / int(marks.sum())
     assert covered >= 0.80, f"only {covered:.3f} of the white core was masked"
+
+
+def test_black_type_earns_an_outline_when_its_ink_is_nearly_the_balloon():
+    """A reading that close to the ground is no evidence of what the glyphs are.
+
+    Page 409's rim sits 75 levels from the balloon, well inside
+    ``INK_GROUND_MARGIN``, and it never reads as a dark stroke -- so
+    ``outlined`` is False and the black translation was drawn onto the pink
+    with nothing behind it, at stroke_ratio 0.0.
+    """
+    page, unit, _ = _rimmed_balloon()
+    style = ArtworkPreservingRenderer._analyze_style(page, unit)
+    gray = cv2.cvtColor(page, cv2.COLOR_RGB2GRAY)
+    ground = float(np.median(gray))
+    assert style.ink is not None
+    assert abs(ground - _level(style.ink)) < INK_GROUND_MARGIN
+    assert style.fill == "black"
+    assert not style.outlined
+    assert style.stroke_ratio > 0, "the translation was drawn with no outline"
+

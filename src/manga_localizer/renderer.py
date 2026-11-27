@@ -759,7 +759,22 @@ class ArtworkPreservingRenderer:
         if not saturated:
             ink = None
         bold = outlined or (float(dark.mean()) >= 0.025 and font_size >= 32)
-        stroke_ratio = 0.066 if outlined else (0.045 if fill == "white" else 0.0)
+        # Black lettering on a pale balloon needs no outline of its own -- except
+        # when the colour reading behind that choice is nearly the balloon.  Page
+        # 409 draws a white-cored caption with a saturated rim on pink; the ink
+        # reading is that rim, 78 levels from the ground, so ``outlined`` is
+        # False (the rim never reads as a dark stroke) and the black translation
+        # went onto the pink with nothing behind it.  A reading close to the
+        # ground is no evidence of what the glyphs are, so give the translation
+        # the outline it would have had if the rim had been detected.
+        reading_is_ground = ink is not None and (
+            abs(background_level - _level(ink)) < INK_GROUND_MARGIN
+        )
+        stroke_ratio = (
+            0.066
+            if outlined
+            else (0.045 if fill == "white" or reading_is_ground else 0.0)
+        )
         return TextStyle(
             mean=mean,
             white_ratio=white_ratio,
